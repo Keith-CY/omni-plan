@@ -1,0 +1,23 @@
+{
+  "activeDepFilter": "All",
+  "activeFilter": "All",
+  "activeScenario": "Parallel Release",
+  "depsRendered": 12,
+  "rowsRendered": 15,
+  "selectedSubtitle": "2.2 • Aug 2 → Aug 18",
+  "selectedTitle": "Professional Gantt surface",
+  "timeline": {
+    "clientHeight": 688,
+    "clientWidth": 1053,
+    "scrollHeight": 688,
+    "scrollLeft": 0,
+    "scrollTop": 0,
+    "scrollWidth": 1053
+  },
+  "title": "Professional Gantt Dependency Demo - OmniPlan Personal",
+  "url": "http://127.0.0.1:5173/gantt-dependencies-demo.html",
+  "viewport": {
+    "height": 1773,
+    "width": 1889
+  }
+}

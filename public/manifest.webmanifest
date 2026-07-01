@@ -1,0 +1,26 @@
+{
+  "name": "OmniPlan Personal",
+  "short_name": "OmniPlan",
+  "description": "Personal multi-project scheduling, evidence, and direction audit.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f4f5f2",
+  "theme_color": "#20251f",
+  "share_target": {
+    "action": "/agent/commands",
+    "method": "GET",
+    "params": {
+      "title": "title",
+      "text": "text",
+      "url": "url"
+    }
+  },
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

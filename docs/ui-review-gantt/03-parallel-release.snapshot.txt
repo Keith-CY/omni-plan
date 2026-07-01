@@ -1,0 +1,163 @@
+- banner:
+  - heading "Professional Gantt Dependency Demo" [level=1]
+  - paragraph: Canvas/SVG hybrid prototype for task causality, dependency tracing, critical path, baseline variance, and blocked cascades.
+  - button "−"
+  - button "+"
+  - button "Trace to finish"
+  - button "Simulate +3d slip"
+- generic: Scenario
+- button "Blocked Cascade"
+- button "Critical Path Shift"
+- button "Parallel Release" [active]
+- button "300 Task Stress"
+- main:
+  - generic: Focus
+  - button "All"
+  - button "Critical path"
+  - button "Blocked"
+  - button "Delayed"
+  - button "Baseline Δ"
+  - generic: Dependencies
+  - button "All"
+  - button "FS"
+  - button "SS"
+  - button "FF"
+  - button "SF"
+  - complementary:
+    - generic: WBS
+    - generic: Task
+    - generic: Status
+    - generic: Float
+    - generic: Owner
+    - generic: "1"
+    - button "▼"
+    - generic: Scheduling Engine
+    - generic: Summary
+    - generic: —
+    - generic: Chen
+    - generic: "1.1"
+    - generic: Domain schema and migration plan
+    - generic: Complete
+    - generic: 5d
+    - generic: Chen
+    - generic: "1.2"
+    - generic: Calendars, weekends, exceptions
+    - generic: Active
+    - generic: 2d
+    - generic: Chen
+    - generic: "1.3"
+    - generic: Deterministic scheduling core
+    - generic: Delayed
+    - generic: 0d
+    - generic: Chen
+    - generic: "1.4"
+    - generic: "Split task: optimizer worker"
+    - generic: Active
+    - generic: 6d
+    - generic: Chen
+    - generic: "1.5"
+    - generic: Monte Carlo risk engine
+    - generic: Active
+    - generic: 0d
+    - generic: Chen
+    - generic: "1.6"
+    - generic: "Hammock: contrarian audit window"
+    - generic: Hammock
+    - generic: 10d
+    - generic: AI
+    - generic: "1.7"
+    - generic: Evidence package for engine trust
+    - generic: Blocked
+    - generic: "-5d"
+    - generic: Chen
+    - generic: "1.8"
+    - generic: "Milestone: core engine trustworthy"
+    - generic: Blocked
+    - generic: "-6d"
+    - generic: Chen
+    - generic: "2"
+    - button "▼"
+    - generic: Project UI
+    - generic: Summary
+    - generic: —
+    - generic: Chen
+    - generic: "2.1"
+    - generic: Outline table and inspector
+    - generic: Active
+    - generic: 4d
+    - generic: Chen
+    - generic: "2.2"
+    - generic: Professional Gantt surface
+    - generic: Active
+    - generic: 0d
+    - generic: Chen
+    - generic: "2.3"
+    - generic: Network graph cross-check
+    - generic: Delayed
+    - generic: 0d
+    - generic: Chen
+    - generic: "2.4"
+    - generic: PDF / Markdown / CSV reports
+    - generic: Ready
+    - generic: 1d
+    - generic: Chen
+    - generic: "2.5"
+    - generic: "Milestone: personal daily use ready"
+    - generic: Ready
+    - generic: "-4d"
+    - generic: Chen
+  - generic: Jul
+  - generic: month
+  - generic: Jul
+  - generic: month
+  - generic: Aug
+  - generic: month
+  - generic: Sep
+  - generic: month
+  - complementary:
+    - generic: Schedule pressure
+    - strong: 58%
+    - generic: Project minimap
+    - generic: 14 weeks
+    - heading "Professional Gantt surface" [level=2]
+    - paragraph: 2.2 • Aug 2 → Aug 18
+    - generic: Active
+    - generic: Progress
+    - strong: 35%
+    - generic: Baseline Δ
+    - strong: "-18d"
+    - generic: Float
+    - strong: 0d
+    - generic: Downstream
+    - strong: "3"
+    - generic: Mini chain
+    - generic: Diagnostics
+    - strong: No hard gate currently triggered
+    - generic: Task has 1 predecessor(s), 2 successor(s), and 0 days of float.
+    - generic: Dependencies
+    - button "FS From 2.1 Outline table and inspector Gantt surface needs the outline/inspector contract.":
+      - generic: FS
+      - strong: From 2.1 Outline table and inspector
+      - generic: Gantt surface needs the outline/inspector contract.
+    - button "SS To 2.3 Network graph cross-check +4d lag/lead • Network graph starts once Gantt dependency model is visible.":
+      - generic: SS
+      - strong: To 2.3 Network graph cross-check
+      - generic: +4d lag/lead • Network graph starts once Gantt dependency model is visible.
+    - button "SF To 2.4 PDF / Markdown / CSV reports Reporting should not finish before Gantt demo starts.":
+      - generic: SF
+      - strong: To 2.4 PDF / Markdown / CSV reports
+      - generic: Reporting should not finish before Gantt demo starts.
+    - generic: Successor chain
+    - button "2.3 Network graph cross-check Delayed • Aug 8 • 0d float":
+      - strong: 2.3 Network graph cross-check
+      - generic: Delayed • Aug 8 • 0d float
+    - button "2.4 PDF / Markdown / CSV reports Ready • Aug 21 • critical":
+      - strong: 2.4 PDF / Markdown / CSV reports
+      - generic: Ready • Aug 21 • critical
+    - 'button "2.5 Milestone: personal daily use ready Ready • Sep 6 • critical"':
+      - strong: "2.5 Milestone: personal daily use ready"
+      - generic: Ready • Sep 6 • critical
+- heading "2.2 Professional Gantt surface" [level=4]
+- paragraph:
+  - text: Aug 29 → Sep 14 • Active • 35% complete
+  - text: Critical path • Baseline Δ 9d

@@ -1,0 +1,2643 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>OmniPlan Personal - Schedule Plan</title>
+    <style>
+      :root {
+        color-scheme: light;
+        font-family: "Segoe UI Variable", "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+        --bg: #f3f2f1;
+        --panel: #ffffff;
+        --panel-2: #faf9f8;
+        --line: #d2d0ce;
+        --line-2: #edebe9;
+        --ink: #201f1e;
+        --muted: #605e5c;
+        --faint: #8a8886;
+        --brand: #0f6cbd;
+        --brand-2: #0b5cab;
+        --brand-soft: #eff6fc;
+        --critical: #d83b01;
+        --critical-soft: #fff3ed;
+        --blocked: #b3261e;
+        --blocked-soft: #fff0f0;
+        --delayed: #c5850b;
+        --delayed-soft: #fff7e3;
+        --complete: #107c10;
+        --complete-soft: #ecf8ed;
+        --progress: #0f6cbd;
+        --purple: #5c2e91;
+        --shadow: 0 8px 20px rgba(0, 0, 0, 0.08), 0 1px 2px rgba(0, 0, 0, 0.06);
+        --radius: 8px;
+        --left-width: 424px;
+        --row-height: 42px;
+        --header-height: 64px;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-width: 1180px;
+        background: var(--bg);
+        color: var(--ink);
+      }
+
+      button,
+      input,
+      select {
+        font: inherit;
+      }
+
+      button {
+        cursor: pointer;
+      }
+
+      .shell {
+        min-height: 100vh;
+        display: grid;
+        grid-template-rows: auto auto minmax(0, 1fr);
+      }
+
+      .topbar {
+        position: sticky;
+        top: 0;
+        z-index: 50;
+        grid-row: 1;
+        display: grid;
+        grid-template-columns: minmax(280px, 1fr) auto auto;
+        gap: 14px;
+        align-items: center;
+        padding: 10px 16px;
+        border-bottom: 1px solid var(--line);
+        background: rgba(255, 255, 255, 0.92);
+        backdrop-filter: blur(20px);
+      }
+
+      .crumb {
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 600;
+      }
+
+      .title h1 {
+        margin: 0;
+        font-size: 20px;
+        line-height: 1.2;
+        font-weight: 650;
+        letter-spacing: 0;
+      }
+
+      .title p {
+        margin: 4px 0 0;
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .toolbar,
+      .chipRow,
+      .viewTabs,
+      .scenarioSwitch {
+        display: flex;
+        align-items: center;
+        justify-content: flex-end;
+        gap: 6px;
+        flex-wrap: wrap;
+      }
+
+      .button,
+      .chip,
+      .scenario,
+      .viewTab {
+        min-height: 30px;
+        border: 1px solid var(--line);
+        border-radius: 4px;
+        background: #fff;
+        color: var(--ink);
+        padding: 0 10px;
+        font-size: 12px;
+        font-weight: 600;
+      }
+
+      .button:hover,
+      .chip:hover,
+      .scenario:hover,
+      .viewTab:hover {
+        border-color: #c8c6c4;
+        background: #faf9f8;
+      }
+
+      .button.primary {
+        border-color: var(--brand);
+        background: var(--brand);
+        color: #fff;
+      }
+
+      .button.icon {
+        width: 30px;
+        padding: 0;
+      }
+
+      .chip.active,
+      .scenario.active,
+      .viewTab.active {
+        border-color: var(--brand);
+        background: var(--brand-soft);
+        color: var(--brand-2);
+      }
+
+      .gatePill {
+        display: inline-flex;
+        min-height: 28px;
+        align-items: center;
+        border: 1px solid #f0b8b4;
+        border-radius: 4px;
+        padding: 0 10px;
+        background: var(--blocked-soft);
+        color: var(--blocked);
+        font-size: 12px;
+        font-weight: 700;
+        white-space: nowrap;
+      }
+
+      .gatePill.ok {
+        border-color: #c7e0c7;
+        background: var(--complete-soft);
+        color: var(--complete);
+      }
+
+      .gatePill.warn {
+        border-color: #efd28f;
+        background: var(--delayed-soft);
+        color: #8a5d02;
+      }
+
+      .scenarioBar {
+        grid-row: 2;
+        display: grid;
+        grid-template-columns: minmax(260px, 1fr) auto;
+        align-items: center;
+        gap: 12px;
+        padding: 8px 16px;
+        border-bottom: 1px solid var(--line-2);
+        background: #faf9f8;
+      }
+
+      .scenarioLabel {
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+      }
+
+      .scenarioMeta {
+        display: flex;
+        align-items: baseline;
+        gap: 10px;
+        min-width: 0;
+      }
+
+      .scenarioMeta strong {
+        font-size: 13px;
+        font-weight: 650;
+      }
+
+      .scenarioMeta span:last-child {
+        min-width: 0;
+        overflow: hidden;
+        color: var(--muted);
+        font-size: 12px;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .layout {
+        grid-row: 3;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 360px;
+        gap: 12px;
+        min-height: 0;
+        padding: 12px 16px 16px;
+      }
+
+      .workspace,
+      .inspector,
+      .minimap,
+      .meterCard {
+        border: 1px solid rgba(216, 222, 232, 0.92);
+        border-radius: 6px;
+        background: var(--panel);
+        box-shadow: var(--shadow);
+      }
+
+      .workspace {
+        overflow: hidden;
+        min-width: 0;
+      }
+
+      .controls {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+        gap: 10px;
+        align-items: center;
+        padding: 9px 12px;
+        border-bottom: 1px solid var(--line-2);
+      }
+
+      .controlGroup {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        min-width: 0;
+        flex-wrap: wrap;
+      }
+
+      .controlTitle {
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+      }
+
+      .workspaceMeta {
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 600;
+        text-align: center;
+        white-space: nowrap;
+      }
+
+      .ganttFrame {
+        display: grid;
+        grid-template-columns: var(--left-width) minmax(0, 1fr);
+        height: clamp(560px, calc(100vh - 172px), 820px);
+        min-height: 0;
+        overflow: hidden;
+      }
+
+      .leftPane {
+        border-right: 1px solid var(--line);
+        background: #fff;
+        display: grid;
+        grid-template-rows: var(--header-height) minmax(0, 1fr);
+        min-width: 0;
+        min-height: 0;
+      }
+
+      .tableHeader {
+        display: grid;
+        grid-template-columns: 54px minmax(0, 1fr) 78px 76px 78px;
+        gap: 0;
+        align-items: center;
+        border-bottom: 1px solid var(--line);
+        background: linear-gradient(180deg, #fff, #f8fafc);
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.03em;
+        text-transform: uppercase;
+      }
+
+      .tableHeader span,
+      .taskCell {
+        padding: 0 10px;
+      }
+
+      .tableBody,
+      .timelineScroll {
+        min-height: 0;
+      }
+
+      .tableBody {
+        overflow: hidden auto;
+      }
+
+      .timelineScroll {
+        overflow: auto;
+      }
+
+      .tableBody {
+        position: relative;
+      }
+
+      .tableSpacer,
+      .timelineSpacer {
+        width: 1px;
+        pointer-events: none;
+      }
+
+      .tableVirtualLayer,
+      .timelineVirtualLayer {
+        position: absolute;
+        left: 0;
+        top: 0;
+      }
+
+      .tableVirtualLayer {
+        right: 0;
+      }
+
+      .taskRow {
+        display: grid;
+        grid-template-columns: 54px minmax(0, 1fr) 78px 76px 78px;
+        align-items: center;
+        height: var(--row-height);
+        border-bottom: 1px solid var(--line-2);
+        font-size: 12px;
+        background: #fff;
+      }
+
+      .taskRow:nth-child(even),
+      .taskRow.even {
+        background: #fbfcfe;
+      }
+
+      .taskRow:hover,
+      .taskRow.related {
+        background: #f3f8fd;
+      }
+
+      .taskRow.active {
+        background: #eaf4fd;
+        box-shadow: inset 3px 0 0 var(--brand);
+      }
+
+      .taskRow.summary {
+        background: #faf9f8;
+        font-weight: 700;
+      }
+
+      .taskRow.dimmed {
+        opacity: 0.36;
+      }
+
+      .taskName {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        min-width: 0;
+      }
+
+      .indent {
+        flex: 0 0 auto;
+        width: calc(var(--level) * 15px);
+      }
+
+      .caret {
+        width: 16px;
+        height: 16px;
+        border: 0;
+        background: transparent;
+        color: var(--muted);
+        padding: 0;
+        font-size: 12px;
+      }
+
+      .nameText {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .badge {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 20px;
+        border-radius: 999px;
+        padding: 0 7px;
+        border: 1px solid var(--line);
+        background: #fff;
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 700;
+        white-space: nowrap;
+      }
+
+      .badge.blocked {
+        border-color: #f0b8b4;
+        background: var(--blocked-soft);
+        color: var(--blocked);
+      }
+
+      .badge.delayed {
+        border-color: #efd28f;
+        background: var(--delayed-soft);
+        color: #8a5d02;
+      }
+
+      .badge.critical {
+        border-color: #ffb79a;
+        background: var(--critical-soft);
+        color: var(--critical);
+      }
+
+      .badge.complete {
+        border-color: #b7deb7;
+        background: var(--complete-soft);
+        color: var(--complete);
+      }
+
+      .timelinePane {
+        min-width: 0;
+        min-height: 0;
+        display: grid;
+        grid-template-rows: var(--header-height) minmax(0, 1fr);
+        background: var(--panel-2);
+      }
+
+      .timeHeader {
+        position: relative;
+        overflow: hidden;
+        border-bottom: 1px solid var(--line);
+        background: #faf9f8;
+      }
+
+      .timeHeaderInner,
+      .timelineInner {
+        position: relative;
+        min-width: 100%;
+        height: 100%;
+      }
+
+      .tick {
+        position: absolute;
+        top: 0;
+        height: 100%;
+        border-left: 1px solid var(--line-2);
+        color: var(--muted);
+        font-size: 11px;
+      }
+
+      .tick.major {
+        border-left-color: #c9d2df;
+      }
+
+      .tick span {
+        position: absolute;
+        top: 12px;
+        left: 8px;
+        white-space: nowrap;
+        font-weight: 650;
+      }
+
+      .tick small {
+        position: absolute;
+        top: 38px;
+        left: 8px;
+        color: var(--faint);
+        white-space: nowrap;
+      }
+
+      .timelineScroll {
+        position: relative;
+        background: #fff;
+      }
+
+      .timelineInner {
+        min-height: 100%;
+      }
+
+      .timelineVirtualLayer {
+        min-width: 100%;
+        height: 100%;
+        overflow: visible;
+      }
+
+      #gridCanvas,
+      #barsCanvas,
+      #miniCanvas {
+        display: block;
+      }
+
+      #gridCanvas,
+      #barsCanvas,
+      #depSvg,
+      #interactionSvg {
+        position: absolute;
+        inset: 0;
+      }
+
+      #depSvg {
+        pointer-events: auto;
+        overflow: visible;
+      }
+
+      #interactionSvg {
+        overflow: visible;
+      }
+
+      .hitTarget {
+        fill: transparent;
+        cursor: pointer;
+      }
+
+      .taskHover {
+        fill: rgba(15, 108, 189, 0.08);
+        stroke: rgba(15, 108, 189, 0.24);
+        stroke-width: 1;
+        pointer-events: none;
+      }
+
+      .taskHandle {
+        fill: #fff;
+        stroke: var(--brand);
+        stroke-width: 1.5;
+        cursor: ew-resize;
+      }
+
+      .linkAnchor {
+        fill: var(--brand);
+        stroke: #fff;
+        stroke-width: 2;
+        cursor: crosshair;
+      }
+
+      .endpointPort {
+        fill: #fff;
+        stroke: var(--brand);
+        stroke-width: 1.4;
+        pointer-events: none;
+      }
+
+      .endpointPort.finish {
+        fill: var(--brand-soft);
+      }
+
+      .endpointPort.gate {
+        stroke: var(--blocked);
+        fill: var(--blocked-soft);
+      }
+
+      .endpointLabel {
+        fill: var(--brand-2);
+        font-size: 9px;
+        font-weight: 800;
+        pointer-events: none;
+      }
+
+      .endpointLabel.gate {
+        fill: var(--blocked);
+      }
+
+      .depPath {
+        fill: none;
+        stroke: #7e8aa0;
+        stroke-width: 1.1;
+        opacity: 0.22;
+        marker-end: url(#arrow);
+        vector-effect: non-scaling-stroke;
+        pointer-events: stroke;
+      }
+
+      .depPath.critical {
+        stroke: var(--critical);
+        stroke-width: 1.8;
+        opacity: 0.95;
+        marker-end: url(#arrowCritical);
+      }
+
+      .depPath.active {
+        stroke: var(--brand);
+        stroke-width: 2.2;
+        opacity: 1;
+        marker-end: url(#arrowActive);
+      }
+
+      .depPath.violation {
+        stroke: var(--blocked);
+        stroke-dasharray: 5 4;
+        stroke-width: 1.8;
+        opacity: 0.95;
+        marker-end: url(#arrowBlocked);
+      }
+
+      .causalStep {
+        fill: #fff;
+        stroke: var(--brand);
+        stroke-width: 1.5;
+        filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.16));
+        pointer-events: none;
+      }
+
+      .causalStep.violation {
+        stroke: var(--blocked);
+      }
+
+      .causalText {
+        fill: var(--brand-2);
+        font-size: 10px;
+        font-weight: 800;
+        pointer-events: none;
+      }
+
+      .causalText.violation {
+        fill: var(--blocked);
+      }
+
+      .depBadge {
+        paint-order: stroke;
+        stroke: #fff;
+        stroke-width: 4px;
+        fill: var(--muted);
+        font-size: 10px;
+        font-weight: 800;
+        pointer-events: none;
+      }
+
+      .lagPill {
+        fill: #fff;
+        stroke: #c8d2df;
+      }
+
+      .lagText {
+        fill: #334155;
+        font-size: 10px;
+        font-weight: 800;
+        pointer-events: none;
+      }
+
+      .offscreenBadge {
+        fill: #f8fafc;
+        stroke: #c8d2df;
+        cursor: pointer;
+      }
+
+      .offscreenText {
+        fill: var(--brand-2);
+        font-size: 10px;
+        font-weight: 800;
+        pointer-events: none;
+      }
+
+      .tooltip {
+        position: fixed;
+        z-index: 100;
+        max-width: 320px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: rgba(255, 255, 255, 0.96);
+        box-shadow: var(--shadow);
+        padding: 10px 12px;
+        pointer-events: none;
+        opacity: 0;
+        transform: translateY(4px);
+        transition: opacity 120ms ease, transform 120ms ease;
+      }
+
+      .tooltip.visible {
+        opacity: 1;
+        transform: translateY(0);
+      }
+
+      .tooltip h4 {
+        margin: 0 0 6px;
+        font-size: 13px;
+      }
+
+      .tooltip p {
+        margin: 0;
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.45;
+      }
+
+      .rightRail {
+        display: grid;
+        grid-template-rows: auto auto minmax(0, 1fr);
+        gap: 10px;
+        min-width: 0;
+      }
+
+      .inspector {
+        min-height: 420px;
+        overflow: hidden auto;
+      }
+
+      .panelHeader {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        padding: 12px;
+        border-bottom: 1px solid var(--line-2);
+        background: #faf9f8;
+      }
+
+      .panelHeader h2 {
+        margin: 0;
+        font-size: 16px;
+        font-weight: 650;
+      }
+
+      .panelHeader p {
+        margin: 4px 0 0;
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .panelBody {
+        padding: 12px;
+      }
+
+      .auditVerdict {
+        border: 1px solid #f0b8b4;
+        border-left: 4px solid var(--blocked);
+        border-radius: 6px;
+        padding: 10px;
+        background: var(--blocked-soft);
+      }
+
+      .auditVerdict.critical {
+        border-color: #ffb79a;
+        border-left-color: var(--critical);
+        background: var(--critical-soft);
+      }
+
+      .auditVerdict.ok {
+        border-color: #d2d0ce;
+        border-left-color: var(--brand);
+        background: #fff;
+      }
+
+      .auditVerdict span {
+        display: block;
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+      }
+
+      .auditVerdict strong {
+        display: block;
+        margin-top: 4px;
+        font-size: 14px;
+      }
+
+      .auditVerdict p {
+        margin: 5px 0 0;
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.45;
+      }
+
+      .metricGrid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+      }
+
+      .metric {
+        border: 1px solid var(--line-2);
+        border-radius: 4px;
+        padding: 9px;
+        background: #faf9f8;
+      }
+
+      .metric span {
+        display: block;
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.03em;
+        text-transform: uppercase;
+      }
+
+      .metric strong {
+        display: block;
+        margin-top: 4px;
+        font-size: 17px;
+      }
+
+      .sectionTitle {
+        margin: 14px 0 7px;
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 800;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+      }
+
+      .chainList,
+      .depList,
+      .equationList {
+        display: grid;
+        gap: 8px;
+      }
+
+      .chainItem,
+      .depItem,
+      .diagnostic,
+      .equationItem {
+        border: 1px solid var(--line-2);
+        border-radius: 4px;
+        padding: 9px;
+        background: #fff;
+        font-size: 12px;
+      }
+
+      .chainItem.active,
+      .depItem.active {
+        border-color: #8ec7ff;
+        background: #eef6ff;
+      }
+
+      .depItem {
+        display: grid;
+        gap: 8px;
+      }
+
+      .depSelect {
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr);
+        gap: 8px;
+        align-items: start;
+        border: 0;
+        padding: 0;
+        background: transparent;
+        color: inherit;
+        text-align: left;
+      }
+
+      .depEditor {
+        display: grid;
+        grid-template-columns: minmax(76px, 1fr) auto auto;
+        gap: 6px;
+        align-items: center;
+        padding-top: 7px;
+        border-top: 1px solid var(--line-2);
+      }
+
+      .depEditor label {
+        display: grid;
+        gap: 3px;
+        color: var(--muted);
+        font-size: 10px;
+        font-weight: 800;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+      }
+
+      .depEditor select,
+      .lagStepper button,
+      .removeDep {
+        min-height: 26px;
+        border: 1px solid var(--line);
+        border-radius: 4px;
+        background: #fff;
+        color: var(--ink);
+        font-size: 12px;
+        font-weight: 650;
+      }
+
+      .depEditor select {
+        width: 100%;
+        padding: 0 6px;
+      }
+
+      .lagStepper {
+        display: inline-grid;
+        grid-template-columns: 26px minmax(32px, auto) 26px;
+        align-items: center;
+        border: 1px solid var(--line);
+        border-radius: 4px;
+        overflow: hidden;
+        background: #fff;
+      }
+
+      .lagStepper button {
+        min-height: 26px;
+        border: 0;
+        border-radius: 0;
+        padding: 0;
+      }
+
+      .lagValue {
+        min-width: 32px;
+        padding: 0 6px;
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 700;
+        text-align: center;
+      }
+
+      .removeDep {
+        padding: 0 8px;
+        color: var(--blocked);
+      }
+
+      .depType {
+        display: inline-flex;
+        width: 44px;
+        height: 24px;
+        align-items: center;
+        justify-content: center;
+        border-radius: 4px;
+        background: #f3f2f1;
+        color: #334155;
+        font-size: 11px;
+        font-weight: 800;
+      }
+
+      .depItem strong,
+      .chainItem strong {
+        display: block;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .depItem span,
+      .chainItem span,
+      .diagnostic span,
+      .equationItem span {
+        display: block;
+        margin-top: 3px;
+        color: var(--muted);
+        line-height: 1.45;
+      }
+
+      .depItem .depType,
+      .equationItem .stepToken {
+        display: inline-flex;
+        margin-top: 0;
+        line-height: 1;
+      }
+
+      .depItem .lagValue {
+        display: inline-flex;
+        margin-top: 0;
+        align-items: center;
+        justify-content: center;
+        line-height: 1;
+      }
+
+      .equationItem {
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr);
+        gap: 8px;
+        align-items: start;
+      }
+
+      .stepToken {
+        display: inline-flex;
+        width: 22px;
+        height: 22px;
+        align-items: center;
+        justify-content: center;
+        border: 1px solid #8ec7ff;
+        border-radius: 50%;
+        background: #fff;
+        color: var(--brand-2);
+        font-size: 11px;
+        font-weight: 800;
+      }
+
+      .equationItem.violation .stepToken {
+        border-color: #f0b8b4;
+        color: var(--blocked);
+      }
+
+      .miniChain {
+        height: 94px;
+        border: 1px solid var(--line-2);
+        border-radius: 4px;
+        background: #faf9f8;
+        overflow: hidden;
+      }
+
+      .minimap {
+        overflow: hidden;
+      }
+
+      .miniHeader {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 10px 12px;
+        border-bottom: 1px solid var(--line-2);
+        font-size: 12px;
+        color: var(--muted);
+        font-weight: 700;
+      }
+
+      .miniViewport {
+        position: absolute;
+        top: 0;
+        height: 100%;
+        border: 2px solid var(--brand);
+        background: rgba(15, 108, 189, 0.08);
+        pointer-events: none;
+      }
+
+      .miniWrap {
+        position: relative;
+        height: 116px;
+        cursor: grab;
+        touch-action: none;
+      }
+
+      .miniWrap.dragging {
+        cursor: grabbing;
+      }
+
+      .meterCard {
+        padding: 12px;
+      }
+
+      .meterTitle {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 12px;
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 700;
+      }
+
+      .meter {
+        position: relative;
+        height: 8px;
+        margin-top: 10px;
+        border-radius: 999px;
+        overflow: hidden;
+        background: #edebe9;
+      }
+
+      .meter > div {
+        height: 100%;
+        border-radius: inherit;
+        background: linear-gradient(90deg, var(--brand), var(--critical));
+      }
+
+      .impactToast {
+        position: fixed;
+        right: 392px;
+        bottom: 24px;
+        z-index: 80;
+        display: none;
+        max-width: 360px;
+        border: 1px solid #f3be93;
+        border-radius: 8px;
+        padding: 12px 14px;
+        background: #fff8f3;
+        box-shadow: var(--shadow);
+      }
+
+      .impactToast.visible {
+        display: block;
+      }
+
+      .impactToast strong {
+        display: block;
+        color: var(--critical);
+        font-size: 13px;
+      }
+
+      .impactToast span {
+        display: block;
+        margin-top: 4px;
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.45;
+      }
+
+      .legend {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        flex-wrap: wrap;
+        color: var(--muted);
+        font-size: 11px;
+      }
+
+      .legendItem {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        white-space: nowrap;
+      }
+
+      .swatch {
+        width: 12px;
+        height: 8px;
+        border-radius: 2px;
+        background: var(--progress);
+      }
+
+      .swatch.critical {
+        background: var(--critical);
+      }
+
+      .swatch.blocked {
+        background: var(--blocked);
+      }
+
+      .swatch.baseline {
+        height: 3px;
+        background: #9aa6b6;
+      }
+
+      .swatch.milestone {
+        width: 9px;
+        height: 9px;
+        transform: rotate(45deg);
+        background: #293241;
+      }
+
+      @media (max-width: 1260px) {
+        .layout {
+          grid-template-columns: 1fr;
+        }
+
+        .rightRail {
+          grid-template-columns: 1fr 1fr;
+          grid-template-rows: auto auto;
+        }
+
+        .inspector {
+          grid-column: 1 / -1;
+        }
+
+        .impactToast {
+          right: 24px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="shell">
+      <header class="topbar">
+        <div class="title">
+          <div class="crumb">Plan / Scheduling Engine</div>
+          <h1>OmniPlan Personal</h1>
+          <p id="scenarioSummary">Release gate schedule with audit-aware dependency tracing.</p>
+        </div>
+        <nav class="viewTabs" aria-label="Workspace views">
+          <button class="viewTab active">Plan</button>
+          <button class="viewTab">Resources</button>
+          <button class="viewTab">Audit Gates</button>
+          <button class="viewTab">Baselines</button>
+          <button class="viewTab">Reports</button>
+        </nav>
+        <div class="toolbar">
+          <span class="gatePill" id="gatePill">Gate blocked</span>
+          <button class="button icon" id="zoomOut" title="Zoom out">−</button>
+          <button class="button icon" id="zoomIn" title="Zoom in">+</button>
+          <button class="button" id="traceEnd">Trace to finish</button>
+          <button class="button primary" id="demoDrag">Simulate +3d slip</button>
+        </div>
+      </header>
+
+      <div class="scenarioBar">
+        <div class="scenarioMeta">
+          <span class="scenarioLabel">Scenario</span>
+          <strong id="scenarioTitle">Blocked release gate</strong>
+          <span id="scenarioStats">15 tasks · 16 weeks · 2 blocked</span>
+        </div>
+        <div class="scenarioSwitch">
+          <button class="scenario active" data-scenario="blocked">Blocked gate</button>
+          <button class="scenario" data-scenario="critical">Critical shift</button>
+          <button class="scenario" data-scenario="parallel">Parallel links</button>
+          <button class="scenario" data-scenario="stress">300 tasks</button>
+        </div>
+      </div>
+
+      <main class="layout">
+        <section class="workspace">
+          <div class="controls">
+            <div class="controlGroup">
+              <span class="controlTitle">Focus</span>
+              <button class="chip active" data-filter="all">All</button>
+              <button class="chip" data-filter="critical">Critical path</button>
+              <button class="chip" data-filter="blocked">Blocked</button>
+              <button class="chip" data-filter="delayed">Delayed</button>
+              <button class="chip" data-filter="baseline">Baseline Δ</button>
+            </div>
+            <div class="workspaceMeta" id="workspaceMeta">Showing 15 tasks · 12 dependencies</div>
+            <div class="controlGroup">
+              <span class="controlTitle">Dependencies</span>
+              <button class="chip active" data-dep-filter="all">All</button>
+              <button class="chip" data-dep-filter="FS">FS</button>
+              <button class="chip" data-dep-filter="SS">SS</button>
+              <button class="chip" data-dep-filter="FF">FF</button>
+              <button class="chip" data-dep-filter="SF">SF</button>
+            </div>
+          </div>
+
+          <div class="ganttFrame">
+            <aside class="leftPane">
+              <div class="tableHeader">
+                <span>WBS</span>
+                <span>Task</span>
+                <span>Status</span>
+                <span>Float</span>
+                <span>Owner</span>
+              </div>
+              <div class="tableBody" id="tableBody">
+                <div class="tableSpacer" id="tableSpacer"></div>
+                <div class="tableVirtualLayer" id="tableVirtualLayer"></div>
+              </div>
+            </aside>
+
+            <section class="timelinePane">
+              <div class="timeHeader" id="timeHeader">
+                <div class="timeHeaderInner" id="timeHeaderInner"></div>
+              </div>
+              <div class="timelineScroll" id="timelineScroll">
+                <div class="timelineInner" id="timelineInner">
+                  <div class="timelineSpacer" id="timelineSpacer"></div>
+                  <div class="timelineVirtualLayer" id="timelineVirtualLayer">
+                    <canvas id="gridCanvas"></canvas>
+                    <canvas id="barsCanvas"></canvas>
+                    <svg id="depSvg"></svg>
+                    <svg id="interactionSvg"></svg>
+                  </div>
+                </div>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <aside class="rightRail">
+          <section class="meterCard">
+            <div class="meterTitle"><span>Schedule pressure</span><strong id="pressureValue">72%</strong></div>
+            <div class="meter"><div id="pressureFill" style="width:72%"></div></div>
+          </section>
+
+          <section class="minimap">
+            <div class="miniHeader"><span>Project minimap</span><span id="miniRange">16 weeks</span></div>
+            <div class="miniWrap" id="miniWrap">
+              <canvas id="miniCanvas"></canvas>
+              <div class="miniViewport" id="miniViewport"></div>
+            </div>
+          </section>
+
+          <section class="inspector">
+            <div class="panelHeader">
+              <div>
+                <h2 id="inspectorTitle">Task inspector</h2>
+                <p id="inspectorSub">Select a task or dependency to inspect causality.</p>
+              </div>
+              <span class="badge critical" id="inspectorBadge">Critical</span>
+            </div>
+            <div class="panelBody" id="inspectorBody"></div>
+          </section>
+        </aside>
+      </main>
+    </div>
+
+    <div class="tooltip" id="tooltip"></div>
+    <div class="impactToast" id="impactToast"></div>
+
+    <script>
+      const dayMs = 24 * 60 * 60 * 1000;
+      const rowHeight = 42;
+      const leftWidth = 424;
+      const startDate = new Date("2026-07-01T00:00:00");
+      const stateColor = {
+        complete: "#107c10",
+        progress: "#0f6cbd",
+        delayed: "#c5850b",
+        blocked: "#b3261e",
+        todo: "#718096",
+        summary: "#1f2937",
+        hammock: "#744da9"
+      };
+
+      const scenarioInfo = {
+        blocked: {
+          pressure: 78,
+          range: 112,
+          title: "Blocked release gate",
+          summary: "Evidence is missing, so the core milestone cannot complete.",
+          gate: "Gate blocked",
+          gateTone: "blocked"
+        },
+        critical: {
+          pressure: 66,
+          range: 126,
+          title: "Critical path shift",
+          summary: "A schedule slip moves the active critical path into reporting.",
+          gate: "At risk",
+          gateTone: "warn"
+        },
+        parallel: {
+          pressure: 58,
+          range: 98,
+          title: "Parallel dependency plan",
+          summary: "SS, FF, and SF links make dependency grammar visible.",
+          gate: "Audit clear",
+          gateTone: "ok"
+        },
+        stress: {
+          pressure: 84,
+          range: 365,
+          title: "300-task portfolio stress",
+          summary: "Large-plan navigation stays bounded while showing schedule pressure.",
+          gate: "High pressure",
+          gateTone: "warn"
+        }
+      };
+
+      const baseTasks = [
+        task("sum-core", "1", "Scheduling Engine", "summary", 0, 4, 46, 3, 45, 0, "Chen", "summary", true),
+        task("schema", "1.1", "Domain schema and migration plan", "task", 1, 5, 9, 4, 8, 100, "Chen", "complete", false, 5),
+        task("calendars", "1.2", "Calendars, weekends, exceptions", "task", 1, 12, 7, 12, 6, 80, "Chen", "progress", true, 2),
+        task("scheduler", "1.3", "Deterministic scheduling core", "task", 1, 20, 12, 18, 9, 68, "Chen", "delayed", true, 0),
+        task("split-opt", "1.4", "Split task: optimizer worker", "split", 1, 31, 13, 29, 9, 46, "Chen", "progress", false, 6, [{ start: 31, duration: 4 }, { start: 39, duration: 5 }]),
+        task("monte", "1.5", "Monte Carlo risk engine", "task", 1, 35, 10, 33, 8, 40, "Chen", "progress", true, 0),
+        task("audit-window", "1.6", "Hammock: contrarian audit window", "hammock", 1, 12, 42, 11, 35, 25, "AI", "hammock", false, 10),
+        task("evidence", "1.7", "Evidence package for engine trust", "task", 1, 48, 8, 40, 6, 0, "Chen", "blocked", true, -5),
+        task("core-gate", "1.8", "Milestone: core engine trustworthy", "milestone", 1, 60, 0, 50, 0, 0, "Chen", "blocked", true, -6),
+        task("sum-ui", "2", "Project UI", "summary", 0, 52, 42, 48, 38, 0, "Chen", "summary", true),
+        task("outline", "2.1", "Outline table and inspector", "task", 1, 52, 10, 49, 9, 60, "Chen", "progress", false, 4),
+        task("gantt", "2.2", "Professional Gantt surface", "task", 1, 59, 16, 55, 11, 35, "Chen", "progress", true, 0),
+        task("network", "2.3", "Network graph cross-check", "task", 1, 67, 12, 61, 8, 20, "Chen", "delayed", true, 0),
+        task("reports", "2.4", "PDF / Markdown / CSV reports", "task", 1, 78, 10, 73, 7, 0, "Chen", "todo", true, 1),
+        task("launch", "2.5", "Milestone: personal daily use ready", "milestone", 1, 92, 0, 80, 0, 0, "Chen", "todo", true, -4)
+      ];
+
+      const baseDeps = [
+        dep("d1", "FS", "schema", "calendars", 0, false, "Calendar rules start after domain schema is stable."),
+        dep("d2", "FS", "calendars", "scheduler", 0, true, "Scheduler depends on working calendar arithmetic."),
+        dep("d3", "SS", "scheduler", "monte", 2, true, "Risk engine can start two days after scheduler internals begin."),
+        dep("d4", "FS", "scheduler", "split-opt", 0, false, "Optimizer worker waits for deterministic core."),
+        dep("d5", "FF", "monte", "network", 1, true, "Network graph cannot finish before risk calculations finish."),
+        dep("d6", "FS", "monte", "evidence", 3, true, "Evidence work should start after seeded risk output exists."),
+        dep("d7", "FS", "evidence", "core-gate", 0, true, "Milestone cannot close while evidence is blocked.", true),
+        dep("d8", "SS", "audit-window", "outline", -2, false, "UI outline can start while the audit window is still open."),
+        dep("d9", "FS", "outline", "gantt", 0, true, "Gantt surface needs the outline/inspector contract."),
+        dep("d10", "SS", "gantt", "network", 4, true, "Network graph starts once Gantt dependency model is visible."),
+        dep("d11", "SF", "gantt", "reports", 0, false, "Reporting should not finish before Gantt demo starts."),
+        dep("d12", "FS", "reports", "launch", 0, true, "Daily-use milestone waits for export reports.")
+      ];
+
+      const state = {
+        scenario: "blocked",
+        zoom: 1.15,
+        filter: "all",
+        depFilter: "all",
+        selectedTaskId: "evidence",
+        selectedDepId: null,
+        hoverTaskId: null,
+        traceMode: true,
+        collapsed: new Set(),
+        scrollTop: 0,
+        syncingScroll: false,
+        drag: null,
+        miniDrag: false,
+        renderFrame: null,
+        rowsCache: null,
+        layoutWidth: 0,
+        lastScrollTop: 0,
+        lastScrollLeft: 0,
+        lastVirtual: null,
+        tasks: [],
+        deps: []
+      };
+
+      const stressExtraTaskCount = 285;
+
+      const els = {
+        tableBody: document.getElementById("tableBody"),
+        tableSpacer: document.getElementById("tableSpacer"),
+        tableVirtualLayer: document.getElementById("tableVirtualLayer"),
+        timelineScroll: document.getElementById("timelineScroll"),
+        timelineInner: document.getElementById("timelineInner"),
+        timelineSpacer: document.getElementById("timelineSpacer"),
+        timelineVirtualLayer: document.getElementById("timelineVirtualLayer"),
+        timeHeader: document.getElementById("timeHeader"),
+        timeHeaderInner: document.getElementById("timeHeaderInner"),
+        gridCanvas: document.getElementById("gridCanvas"),
+        barsCanvas: document.getElementById("barsCanvas"),
+        depSvg: document.getElementById("depSvg"),
+        interactionSvg: document.getElementById("interactionSvg"),
+        tooltip: document.getElementById("tooltip"),
+        inspectorTitle: document.getElementById("inspectorTitle"),
+        inspectorSub: document.getElementById("inspectorSub"),
+        inspectorBadge: document.getElementById("inspectorBadge"),
+        inspectorBody: document.getElementById("inspectorBody"),
+        scenarioSummary: document.getElementById("scenarioSummary"),
+        scenarioTitle: document.getElementById("scenarioTitle"),
+        scenarioStats: document.getElementById("scenarioStats"),
+        workspaceMeta: document.getElementById("workspaceMeta"),
+        gatePill: document.getElementById("gatePill"),
+        pressureValue: document.getElementById("pressureValue"),
+        pressureFill: document.getElementById("pressureFill"),
+        miniCanvas: document.getElementById("miniCanvas"),
+        miniWrap: document.getElementById("miniWrap"),
+        miniViewport: document.getElementById("miniViewport"),
+        miniRange: document.getElementById("miniRange"),
+        impactToast: document.getElementById("impactToast")
+      };
+
+      function task(id, wbs, name, type, level, start, duration, baselineStart, baselineDuration, progress, owner, status, critical, float = 0, segments = null) {
+        return { id, wbs, name, type, level, start, duration, baselineStart, baselineDuration, progress, owner, status, critical, float, segments };
+      }
+
+      function dep(id, type, from, to, lag, critical, note, violation = false) {
+        return { id, type, from, to, lag, critical, note, violation };
+      }
+
+      function cloneData() {
+        state.tasks = baseTasks.map((item) => ({ ...item, segments: item.segments ? item.segments.map((segment) => ({ ...segment })) : null }));
+        state.deps = baseDeps.map((item) => ({ ...item }));
+        if (state.scenario === "critical") {
+          shiftTask("scheduler", 5, false);
+          getTask("reports").critical = true;
+          getTask("network").critical = false;
+          getDep("d5").critical = false;
+          getDep("d11").critical = true;
+        }
+        if (state.scenario === "parallel") {
+          ["scheduler", "monte", "gantt", "network"].forEach((id) => getTask(id).critical = false);
+          getTask("outline").start = 26;
+          getTask("gantt").start = 32;
+          getTask("network").start = 38;
+          getTask("reports").start = 51;
+          getTask("launch").start = 67;
+          getDep("d8").critical = true;
+          getDep("d10").critical = true;
+          state.selectedTaskId = "gantt";
+        }
+        if (state.scenario === "stress") {
+          const extra = [];
+          for (let i = 0; i < stressExtraTaskCount; i += 1) {
+            const phase = Math.floor(i / 50) + 3;
+            const level = i % 50 === 0 ? 0 : 1 + (i % 5 === 0 ? 1 : 0);
+            const id = `stress-${i}`;
+            const status = i % 23 === 0 ? "blocked" : i % 17 === 0 ? "delayed" : i % 7 === 0 ? "complete" : i % 3 === 0 ? "progress" : "todo";
+            extra.push(task(id, `${phase}.${i % 50}`, `${i % 50 === 0 ? "Summary" : "Work package"} ${i + 1}`, i % 50 === 0 ? "summary" : "task", level, 5 + (i % 240), 3 + (i % 11), 3 + (i % 240), 3 + (i % 8), i % 100, i % 4 === 0 ? "AI" : "Chen", status, i % 29 === 0, i % 13));
+          }
+          state.tasks = state.tasks.concat(extra);
+          for (let i = 1; i < stressExtraTaskCount; i += 7) {
+            state.deps.push(dep(`sd-${i}`, i % 28 === 0 ? "SS" : "FS", `stress-${i - 1}`, `stress-${i}`, i % 14 === 0 ? 2 : 0, i % 29 === 0, "Stress-test dependency."));
+          }
+          state.zoom = 0.55;
+          state.selectedTaskId = "stress-174";
+        }
+        invalidateRows();
+      }
+
+      function invalidateRows() {
+        state.rowsCache = null;
+      }
+
+      function currentRows() {
+        if (!state.rowsCache) state.rowsCache = visibleTasks();
+        return state.rowsCache;
+      }
+
+      function currentWidth() {
+        return Math.max(els.timelineScroll.clientWidth, x(scenarioInfo[state.scenario].range));
+      }
+
+      function getTask(id) {
+        return state.tasks.find((item) => item.id === id);
+      }
+
+      function getDep(id) {
+        return state.deps.find((item) => item.id === id);
+      }
+
+      function visibleTasks() {
+        let rows = state.tasks.filter((item) => !isHiddenByCollapse(item));
+        if (state.filter === "critical") rows = rows.filter((item) => item.critical || relatedTaskIds().has(item.id) || item.type === "summary");
+        if (state.filter === "blocked") rows = rows.filter((item) => item.status === "blocked" || item.type === "summary" || downstreamOfBlocked().has(item.id));
+        if (state.filter === "delayed") rows = rows.filter((item) => item.status === "delayed" || item.type === "summary");
+        if (state.filter === "baseline") rows = rows.filter((item) => Math.abs(baselineDelta(item)) >= 3 || item.type === "summary");
+        return rows;
+      }
+
+      function isHiddenByCollapse(item) {
+        if (item.level === 0) return false;
+        const parent = parentSummary(item);
+        return parent ? state.collapsed.has(parent.id) : false;
+      }
+
+      function parentSummary(item) {
+        const root = item.wbs.split(".")[0];
+        return state.tasks.find((candidate) => candidate.level === 0 && candidate.wbs === root);
+      }
+
+      function baselineDelta(item) {
+        const currentEnd = item.start + item.duration;
+        const baselineEnd = item.baselineStart + item.baselineDuration;
+        return Math.round(currentEnd - baselineEnd);
+      }
+
+      function dateFor(day) {
+        return new Date(startDate.getTime() + day * dayMs);
+      }
+
+      function dayLabel(day, zoom = state.zoom) {
+        const date = dateFor(day);
+        if (zoom < 0.75) return date.toLocaleDateString("en-US", { month: "short" });
+        if (zoom < 1.25) return date.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+        return date.toLocaleDateString("en-US", { weekday: "short", day: "numeric" });
+      }
+
+      function formatDate(day) {
+        return dateFor(day).toLocaleDateString("en-US", { month: "short", day: "numeric" });
+      }
+
+      function pxPerDay() {
+        return 16 * state.zoom;
+      }
+
+      function x(day) {
+        return Math.round(day * pxPerDay());
+      }
+
+      function clamp(value, min, max) {
+        return Math.min(max, Math.max(min, value));
+      }
+
+      function yForIndex(index) {
+        return index * rowHeight;
+      }
+
+      function taskStartX(item) {
+        return item.type === "milestone" ? x(item.start) : x(item.start);
+      }
+
+      function taskEndX(item) {
+        return item.type === "milestone" ? x(item.start) : x(item.start + item.duration);
+      }
+
+      function rowMap(rows) {
+        const map = new Map();
+        rows.forEach((row, index) => map.set(row.id, index));
+        return map;
+      }
+
+      function relatedTaskIds() {
+        const selected = state.selectedTaskId;
+        const related = new Set(selected ? [selected] : []);
+        if (!selected && !state.selectedDepId) return related;
+        if (state.selectedDepId) {
+          const selectedDep = getDep(state.selectedDepId);
+          if (selectedDep) {
+            related.add(selectedDep.from);
+            related.add(selectedDep.to);
+          }
+        }
+        if (selected) {
+          traverseDeps(selected, "backward").forEach((id) => related.add(id));
+          traverseDeps(selected, "forward").forEach((id) => related.add(id));
+        }
+        return related;
+      }
+
+      function downstreamOfBlocked() {
+        const ids = new Set();
+        state.tasks.filter((item) => item.status === "blocked").forEach((item) => {
+          traverseDeps(item.id, "forward").forEach((id) => ids.add(id));
+        });
+        return ids;
+      }
+
+      function traverseDeps(taskId, direction) {
+        const result = new Set();
+        const stack = [taskId];
+        while (stack.length) {
+          const id = stack.pop();
+          state.deps.forEach((link) => {
+            const next = direction === "forward" && link.from === id ? link.to : direction === "backward" && link.to === id ? link.from : null;
+            if (next && !result.has(next)) {
+              result.add(next);
+              stack.push(next);
+            }
+          });
+        }
+        return result;
+      }
+
+      function filteredDeps(rows) {
+        const visible = new Set(rows.map((item) => item.id));
+        return state.deps.filter((link) => {
+          if (state.depFilter !== "all" && link.type !== state.depFilter) return false;
+          if (state.filter === "critical" && !link.critical && state.selectedDepId !== link.id) return false;
+          return visible.has(link.from) || visible.has(link.to);
+        });
+      }
+
+      function virtualWindow(rows) {
+        const viewportHeight = Math.max(1, els.timelineScroll.clientHeight || 620);
+        const totalHeight = Math.max(rows.length * rowHeight, viewportHeight);
+        const scrollTop = Math.min(Math.max(0, els.timelineScroll.scrollTop), Math.max(0, totalHeight - viewportHeight));
+        const bufferRows = state.scenario === "stress" ? 16 : 10;
+        const startIndex = Math.max(0, Math.floor(scrollTop / rowHeight) - bufferRows);
+        const visibleCount = Math.ceil(viewportHeight / rowHeight) + bufferRows * 2 + 2;
+        const endIndex = Math.min(rows.length, startIndex + visibleCount);
+        const top = startIndex * rowHeight;
+        const height = Math.max(viewportHeight, (endIndex - startIndex) * rowHeight);
+        return {
+          allRows: rows,
+          rows: rows.slice(startIndex, endIndex),
+          startIndex,
+          endIndex,
+          top,
+          height,
+          totalHeight,
+          viewportHeight
+        };
+      }
+
+      function render() {
+        if (state.renderFrame) {
+          cancelAnimationFrame(state.renderFrame);
+          state.renderFrame = null;
+        }
+        const rows = currentRows();
+        const width = currentWidth();
+        els.timeHeaderInner.style.width = `${width}px`;
+        renderHeader(width);
+        renderViewport(rows, width);
+        renderInspector(rows);
+        renderMini(rows);
+        updateScenarioStats();
+      }
+
+      function renderViewport(rows = currentRows(), width = currentWidth()) {
+        const virtual = virtualWindow(rows);
+        state.lastVirtual = virtual;
+        state.layoutWidth = width;
+        els.timelineInner.style.width = `${width}px`;
+        els.timelineInner.style.height = `${virtual.totalHeight}px`;
+        els.timelineSpacer.style.height = `${virtual.totalHeight}px`;
+        els.tableSpacer.style.height = `${virtual.totalHeight}px`;
+        els.timelineVirtualLayer.style.width = `${width}px`;
+        els.timelineVirtualLayer.style.height = `${virtual.height}px`;
+        els.timelineVirtualLayer.style.transform = `translateY(${virtual.top}px)`;
+        els.tableVirtualLayer.style.transform = `translateY(${virtual.top}px)`;
+        els.timeHeaderInner.style.width = `${width}px`;
+        resizeCanvas(els.gridCanvas, width, virtual.height);
+        resizeCanvas(els.barsCanvas, width, virtual.height);
+        els.depSvg.setAttribute("width", width);
+        els.depSvg.setAttribute("height", virtual.height);
+        els.interactionSvg.setAttribute("width", width);
+        els.interactionSvg.setAttribute("height", virtual.height);
+        state.lastScrollTop = els.timelineScroll.scrollTop;
+        state.lastScrollLeft = els.timelineScroll.scrollLeft;
+        renderTable(virtual);
+        renderGrid(virtual, width);
+        renderBars(virtual, width);
+        renderDependencies(virtual, width);
+        renderInteraction(virtual, width);
+      }
+
+      function scheduleViewportRender() {
+        if (state.renderFrame) return;
+        state.renderFrame = requestAnimationFrame(() => {
+          state.renderFrame = null;
+          renderViewport();
+          updateMiniViewport();
+          updateScenarioStats();
+        });
+      }
+
+      function resizeCanvas(canvas, width, height) {
+        const ratio = window.devicePixelRatio || 1;
+        const pixelWidth = Math.max(1, Math.round(width * ratio));
+        const pixelHeight = Math.max(1, Math.round(height * ratio));
+        const cssWidth = `${width}px`;
+        const cssHeight = `${height}px`;
+        if (canvas.width !== pixelWidth || canvas.height !== pixelHeight || canvas.style.width !== cssWidth || canvas.style.height !== cssHeight) {
+          canvas.width = pixelWidth;
+          canvas.height = pixelHeight;
+          canvas.style.width = cssWidth;
+          canvas.style.height = cssHeight;
+        }
+        const ctx = canvas.getContext("2d");
+        ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+      }
+
+      function renderHeader(width) {
+        const step = state.zoom < 0.75 ? 28 : state.zoom < 1.2 ? 14 : 7;
+        let html = "";
+        for (let d = 0; d <= scenarioInfo[state.scenario].range; d += step) {
+          html += `<div class="tick ${d % 28 === 0 ? "major" : ""}" style="left:${x(d)}px;width:${Math.max(1, x(step))}px">
+            <span>${dayLabel(d)}</span>
+            <small>${state.zoom < 0.75 ? "month" : state.zoom < 1.2 ? "week" : "day view"}</small>
+          </div>`;
+        }
+        els.timeHeaderInner.innerHTML = html;
+      }
+
+      function renderTable(virtual) {
+        const related = relatedTaskIds();
+        els.tableVirtualLayer.innerHTML = virtual.rows.map((item, localIndex) => {
+          const absoluteIndex = virtual.startIndex + localIndex;
+          const active = item.id === state.selectedTaskId;
+          const dimmed = related.size > 1 && !related.has(item.id) && state.traceMode;
+          const statusBadge = statusLabel(item);
+          const caret = item.type === "summary" ? `<button class="caret" data-collapse="${item.id}">${state.collapsed.has(item.id) ? "▶" : "▼"}</button>` : `<span class="caret"></span>`;
+          return `<div class="taskRow ${absoluteIndex % 2 ? "even" : ""} ${item.type === "summary" ? "summary" : ""} ${active ? "active" : ""} ${related.has(item.id) && !active ? "related" : ""} ${dimmed ? "dimmed" : ""}" data-row-task="${item.id}">
+            <div class="taskCell">${item.wbs}</div>
+            <div class="taskCell taskName" style="--level:${item.level}">
+              <span class="indent"></span>${caret}<span class="nameText">${item.name}</span>
+            </div>
+            <div class="taskCell"><span class="badge ${item.status}">${statusBadge}</span></div>
+            <div class="taskCell">${item.type === "summary" ? "—" : `${item.float}d`}</div>
+            <div class="taskCell">${item.owner}</div>
+          </div>`;
+        }).join("");
+      }
+
+      function statusLabel(item) {
+        if (item.type === "summary") return "Summary";
+        if (item.status === "progress") return "Active";
+        if (item.status === "todo") return "Ready";
+        return item.status[0].toUpperCase() + item.status.slice(1);
+      }
+
+      function renderGrid(virtual, width) {
+        const ctx = els.gridCanvas.getContext("2d");
+        const height = virtual.height;
+        ctx.clearRect(0, 0, width, height);
+        ctx.fillStyle = "#fff";
+        ctx.fillRect(0, 0, width, height);
+        for (let i = 0; i < virtual.rows.length; i += 1) {
+          const absoluteIndex = virtual.startIndex + i;
+          ctx.fillStyle = absoluteIndex % 2 ? "#fbfcfe" : "#fff";
+          ctx.fillRect(0, yForIndex(i), width, rowHeight);
+          ctx.strokeStyle = "#edf1f6";
+          ctx.beginPath();
+          ctx.moveTo(0, yForIndex(i) + rowHeight + 0.5);
+          ctx.lineTo(width, yForIndex(i) + rowHeight + 0.5);
+          ctx.stroke();
+        }
+        const dayStep = state.zoom < 0.75 ? 14 : state.zoom < 1.2 ? 7 : 1;
+        for (let d = 0; d <= scenarioInfo[state.scenario].range; d += dayStep) {
+          const xpos = x(d) + 0.5;
+          const weekend = dateFor(d).getDay() === 0 || dateFor(d).getDay() === 6;
+          if (weekend && state.zoom >= 1.1) {
+            ctx.fillStyle = "rgba(15,108,189,0.035)";
+            ctx.fillRect(x(d), 0, x(1), height);
+          }
+          ctx.strokeStyle = d % 28 === 0 ? "#cbd5e1" : "#edf1f6";
+          ctx.beginPath();
+          ctx.moveTo(xpos, 0);
+          ctx.lineTo(xpos, height);
+          ctx.stroke();
+        }
+        const todayX = x(21) + 0.5;
+        ctx.strokeStyle = "#0f6cbd";
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(todayX, 0);
+        ctx.lineTo(todayX, height);
+        ctx.stroke();
+        ctx.lineWidth = 1;
+      }
+
+      function renderBars(virtual, width) {
+        const ctx = els.barsCanvas.getContext("2d");
+        const related = relatedTaskIds();
+        const height = virtual.height;
+        ctx.clearRect(0, 0, width, height);
+        virtual.rows.forEach((item, index) => {
+          const y = yForIndex(index) + rowHeight / 2;
+          const dimmed = related.size > 1 && !related.has(item.id) && state.traceMode;
+          ctx.globalAlpha = dimmed ? 0.24 : 1;
+          drawBaseline(ctx, item, y);
+          if (item.type === "summary") drawSummary(ctx, item, y);
+          else if (item.type === "milestone") drawMilestone(ctx, item, y);
+          else if (item.type === "split") drawSplitTask(ctx, item, y);
+          else if (item.type === "hammock") drawHammock(ctx, item, y);
+          else drawTask(ctx, item, y);
+          ctx.globalAlpha = 1;
+        });
+      }
+
+      function drawBaseline(ctx, item, y) {
+        if (item.type === "summary") return;
+        const start = x(item.baselineStart);
+        const width = Math.max(6, x(item.baselineDuration));
+        ctx.fillStyle = "rgba(100,116,139,0.36)";
+        if (item.type === "milestone") {
+          diamond(ctx, x(item.baselineStart), y + 12, 5, "rgba(100,116,139,0.36)", "rgba(100,116,139,0.36)");
+          return;
+        }
+        roundRect(ctx, start, y + 10, width, 3, 2);
+        ctx.fill();
+      }
+
+      function drawTask(ctx, item, y) {
+        const start = x(item.start);
+        const width = Math.max(8, x(item.duration));
+        const color = stateColor[item.status] || stateColor.todo;
+        ctx.fillStyle = "#e8edf4";
+        roundRect(ctx, start, y - 8, width, 16, 5);
+        ctx.fill();
+        ctx.fillStyle = color;
+        roundRect(ctx, start, y - 8, Math.max(4, width * (item.progress / 100)), 16, 5);
+        ctx.fill();
+        ctx.fillStyle = item.critical ? "#d83b01" : color;
+        roundRect(ctx, start, y - 11, width, 3, 2);
+        ctx.fill();
+        if (item.status === "blocked" || item.status === "delayed") drawHatch(ctx, start, y - 8, width, 16, item.status === "blocked" ? "#b3261e" : "#c5850b");
+      }
+
+      function drawSummary(ctx, item, y) {
+        const start = x(item.start);
+        const width = Math.max(20, x(item.duration));
+        ctx.strokeStyle = "#1f2937";
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        ctx.moveTo(start, y - 5);
+        ctx.lineTo(start + 8, y);
+        ctx.lineTo(start, y + 5);
+        ctx.moveTo(start + 8, y);
+        ctx.lineTo(start + width - 8, y);
+        ctx.moveTo(start + width, y - 5);
+        ctx.lineTo(start + width - 8, y);
+        ctx.lineTo(start + width, y + 5);
+        ctx.stroke();
+        ctx.lineWidth = 1;
+      }
+
+      function drawMilestone(ctx, item, y) {
+        const color = item.status === "blocked" ? stateColor.blocked : item.critical ? stateColor.delayed : "#293241";
+        diamond(ctx, x(item.start), y, 8, color, item.critical ? "#d83b01" : color);
+      }
+
+      function drawSplitTask(ctx, item, y) {
+        const color = stateColor[item.status];
+        item.segments.forEach((segment) => {
+          const start = x(segment.start);
+          const width = Math.max(8, x(segment.duration));
+          ctx.fillStyle = "#e8edf4";
+          roundRect(ctx, start, y - 8, width, 16, 5);
+          ctx.fill();
+          ctx.fillStyle = color;
+          roundRect(ctx, start, y - 8, width * 0.72, 16, 5);
+          ctx.fill();
+          ctx.fillStyle = color;
+          roundRect(ctx, start, y - 11, width, 3, 2);
+          ctx.fill();
+        });
+        if (item.segments.length > 1) {
+          const a = item.segments[0];
+          const b = item.segments[1];
+          ctx.strokeStyle = "rgba(15,108,189,0.55)";
+          ctx.setLineDash([4, 4]);
+          ctx.beginPath();
+          ctx.moveTo(x(a.start + a.duration), y);
+          ctx.lineTo(x(b.start), y);
+          ctx.stroke();
+          ctx.setLineDash([]);
+        }
+      }
+
+      function drawHammock(ctx, item, y) {
+        const start = x(item.start);
+        const width = Math.max(12, x(item.duration));
+        ctx.strokeStyle = stateColor.hammock;
+        ctx.lineWidth = 1.8;
+        ctx.setLineDash([4, 3]);
+        roundRect(ctx, start, y - 8, width, 16, 8);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.lineWidth = 1;
+      }
+
+      function drawHatch(ctx, x0, y0, width, height, color) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(x0, y0, width, height);
+        ctx.clip();
+        ctx.strokeStyle = color;
+        ctx.globalAlpha = 0.35;
+        for (let i = x0 - height; i < x0 + width + height; i += 7) {
+          ctx.beginPath();
+          ctx.moveTo(i, y0 + height);
+          ctx.lineTo(i + height, y0);
+          ctx.stroke();
+        }
+        ctx.restore();
+        ctx.globalAlpha = 1;
+      }
+
+      function roundRect(ctx, x0, y0, width, height, radius) {
+        const r = Math.min(radius, width / 2, height / 2);
+        ctx.beginPath();
+        ctx.moveTo(x0 + r, y0);
+        ctx.lineTo(x0 + width - r, y0);
+        ctx.quadraticCurveTo(x0 + width, y0, x0 + width, y0 + r);
+        ctx.lineTo(x0 + width, y0 + height - r);
+        ctx.quadraticCurveTo(x0 + width, y0 + height, x0 + width - r, y0 + height);
+        ctx.lineTo(x0 + r, y0 + height);
+        ctx.quadraticCurveTo(x0, y0 + height, x0, y0 + height - r);
+        ctx.lineTo(x0, y0 + r);
+        ctx.quadraticCurveTo(x0, y0, x0 + r, y0);
+      }
+
+      function diamond(ctx, cx, cy, radius, fill, stroke) {
+        ctx.beginPath();
+        ctx.moveTo(cx, cy - radius);
+        ctx.lineTo(cx + radius, cy);
+        ctx.lineTo(cx, cy + radius);
+        ctx.lineTo(cx - radius, cy);
+        ctx.closePath();
+        ctx.fillStyle = fill;
+        ctx.fill();
+        ctx.strokeStyle = stroke;
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        ctx.lineWidth = 1;
+      }
+
+      function renderDependencies(virtual, width) {
+        const rows = virtual.rows;
+        const map = rowMap(rows);
+        const related = relatedTaskIds();
+        const deps = filteredDeps(rows);
+        const causalOrder = causalDependencyOrder(deps, related);
+        els.depSvg.innerHTML = `
+          <defs>
+            <marker id="arrow" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#7e8aa0"></path></marker>
+            <marker id="arrowActive" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#0f6cbd"></path></marker>
+            <marker id="arrowCritical" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#d83b01"></path></marker>
+            <marker id="arrowBlocked" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#b3261e"></path></marker>
+          </defs>`;
+        const fragments = [];
+        deps.forEach((link) => {
+          const from = getTask(link.from);
+          const to = getTask(link.to);
+          if (!from || !to) return;
+          const fromIndex = map.get(link.from);
+          const toIndex = map.get(link.to);
+          if (fromIndex === undefined || toIndex === undefined) {
+            fragments.push(offscreenDependencyBadge(link, fromIndex, toIndex, rows));
+            return;
+          }
+          const active = isActiveDependency(link, related);
+          const path = dependencyPath(link, from, to, fromIndex, toIndex);
+          const mid = path.mid;
+          const cls = ["depPath", link.critical ? "critical" : "", active ? "active" : "", link.violation ? "violation" : ""].join(" ");
+          fragments.push(`<path class="${cls}" d="${path.d}" data-dep-hit="${link.id}"></path>`);
+          if (active && causalOrder.has(link.id)) {
+            const step = causalOrder.get(link.id);
+            const stepX = Math.max(12, mid.x - 18);
+            const stepY = Math.max(12, mid.y - 14);
+            const tone = link.violation ? "violation" : "";
+            fragments.push(`<g class="causalMarker" data-dep-hit="${link.id}"><circle class="causalStep ${tone}" cx="${stepX}" cy="${stepY}" r="9"></circle><text class="causalText ${tone}" x="${stepX}" y="${stepY + 4}" text-anchor="middle">${step}</text></g>`);
+          }
+          if (link.lag) {
+            fragments.push(`<rect class="lagPill" x="${mid.x - 16}" y="${mid.y - 9}" width="32" height="18" rx="9"></rect><text class="lagText" x="${mid.x}" y="${mid.y + 4}" text-anchor="middle">${link.lag > 0 ? "+" : ""}${link.lag}d</text>`);
+          }
+          if (active || link.violation || state.depFilter !== "all") {
+            fragments.push(`<text class="depBadge" x="${mid.x + 10}" y="${mid.y - 11}">${depLabel(link)}</text>`);
+          }
+        });
+        els.depSvg.insertAdjacentHTML("beforeend", fragments.join(""));
+      }
+
+      function isActiveDependency(link, related) {
+        return state.selectedDepId === link.id || (related.has(link.from) && related.has(link.to) && state.traceMode);
+      }
+
+      function causalDependencyOrder(deps, related) {
+        const order = new Map();
+        let index = 1;
+        deps.forEach((link) => {
+          if (isActiveDependency(link, related)) order.set(link.id, index++);
+        });
+        return order;
+      }
+
+      function dependencyPath(link, from, to, fromIndex, toIndex) {
+        const fromY = yForIndex(fromIndex) + rowHeight / 2;
+        const toY = yForIndex(toIndex) + rowHeight / 2;
+        const sourceX = link.type === "SS" || link.type === "SF" ? taskStartX(from) : taskEndX(from);
+        const targetX = link.type === "SS" || link.type === "FS" ? taskStartX(to) : taskEndX(to);
+        const elbow = sourceX <= targetX ? Math.max(sourceX + 18, Math.min(targetX - 14, sourceX + 40)) : sourceX + 28;
+        const d = `M${sourceX},${fromY} L${elbow},${fromY} L${elbow},${toY} L${targetX},${toY}`;
+        return { d, mid: { x: elbow, y: (fromY + toY) / 2 } };
+      }
+
+      function offscreenDependencyBadge(link, fromIndex, toIndex, rows) {
+        const visibleIds = new Set(rows.map((item) => item.id));
+        const fromVisible = visibleIds.has(link.from);
+        const toVisible = visibleIds.has(link.to);
+        const taskId = fromVisible ? link.from : toVisible ? link.to : null;
+        if (!taskId) return "";
+        const index = rows.findIndex((item) => item.id === taskId);
+        const y = yForIndex(index) + rowHeight / 2 - 10;
+        const xpos = fromVisible ? taskEndX(getTask(taskId)) + 8 : taskStartX(getTask(taskId)) - 78;
+        const label = fromVisible ? `Go to ${getTask(link.to).wbs}` : `From ${getTask(link.from).wbs}`;
+        return `<g data-jump-dep="${link.id}"><rect class="offscreenBadge" x="${xpos}" y="${y}" width="70" height="20" rx="10"></rect><text class="offscreenText" x="${xpos + 35}" y="${y + 14}" text-anchor="middle">${label}</text></g>`;
+      }
+
+      function renderInteraction(virtual, width) {
+        const rows = virtual.rows;
+        const map = rowMap(rows);
+        const related = relatedTaskIds();
+        const activeId = state.hoverTaskId || state.selectedTaskId;
+        let html = "";
+        rows.forEach((item, index) => {
+          if (item.type === "summary") return;
+          const y = yForIndex(index) + rowHeight / 2;
+          const start = taskStartX(item);
+          const end = taskEndX(item);
+          const barWidth = Math.max(16, end - start || 16);
+          html += `<rect class="hitTarget" x="${Math.min(start, end) - 8}" y="${y - 16}" width="${barWidth + 16}" height="32" data-task-hit="${item.id}"></rect>`;
+          if (item.id === activeId || related.has(item.id)) {
+            html += `<rect class="taskHover" x="${Math.min(start, end) - 5}" y="${y - 14}" width="${barWidth + 10}" height="28" rx="6"></rect>`;
+            html += renderEndpointPorts(item, start, end, y);
+          }
+          if (item.id === state.selectedTaskId) {
+            html += `<circle class="taskHandle" cx="${start}" cy="${y}" r="5" data-resize-start="${item.id}"></circle>
+              <circle class="taskHandle" cx="${end}" cy="${y}" r="5" data-resize-end="${item.id}"></circle>
+              <circle class="linkAnchor" cx="${end + 12}" cy="${y}" r="5" data-link-anchor="${item.id}"></circle>`;
+          }
+        });
+        els.interactionSvg.innerHTML = html;
+      }
+
+      function renderEndpointPorts(item, start, end, y) {
+        if (item.type === "milestone") {
+          return `<circle class="endpointPort gate" cx="${start}" cy="${y}" r="5"></circle><text class="endpointLabel gate" x="${start}" y="${y - 9}" text-anchor="middle">M</text>`;
+        }
+        const left = Math.min(start, end);
+        const right = Math.max(start, end);
+        return `<circle class="endpointPort start" cx="${left}" cy="${y}" r="4.5"></circle>
+          <circle class="endpointPort finish" cx="${right}" cy="${y}" r="4.5"></circle>
+          <text class="endpointLabel" x="${left}" y="${y - 9}" text-anchor="middle">S</text>
+          <text class="endpointLabel" x="${right}" y="${y - 9}" text-anchor="middle">F</text>`;
+      }
+
+      function renderInspector(rows) {
+        const depItem = state.selectedDepId ? getDep(state.selectedDepId) : null;
+        const item = depItem ? getTask(depItem.to) : getTask(state.selectedTaskId) || rows.find((row) => row.type !== "summary");
+        if (!item) return;
+        state.selectedTaskId = item.id;
+        const pred = state.deps.filter((link) => link.to === item.id);
+        const succ = state.deps.filter((link) => link.from === item.id);
+        const chainForward = Array.from(traverseDeps(item.id, "forward")).map(getTask).filter(Boolean);
+        const delta = baselineDelta(item);
+        els.inspectorTitle.textContent = depItem ? `${depItem.type} dependency` : item.name;
+        els.inspectorSub.textContent = depItem ? `${getTask(depItem.from).name} → ${getTask(depItem.to).name}` : `${item.wbs} • ${formatDate(item.start)} → ${formatDate(item.start + item.duration)}`;
+        els.inspectorBadge.textContent = item.status === "blocked" ? "Blocked gate" : item.critical ? "Critical" : statusLabel(item);
+        els.inspectorBadge.className = `badge ${item.status === "blocked" ? "blocked" : item.critical ? "critical" : item.status}`;
+        els.inspectorBody.innerHTML = `
+          <div class="auditVerdict ${verdictTone(item, delta)}">
+            <span>Constraint verdict</span>
+            <strong>${diagnosticHeadline(item, delta)}</strong>
+            <p>${constraintFormula(item, pred)}</p>
+          </div>
+
+          <div class="metricGrid">
+            <div class="metric"><span>Progress</span><strong>${item.progress}%</strong></div>
+            <div class="metric"><span>Baseline Δ</span><strong>${delta > 0 ? "+" : ""}${delta}d</strong></div>
+            <div class="metric"><span>Float</span><strong>${item.type === "summary" ? "—" : `${item.float}d`}</strong></div>
+            <div class="metric"><span>Downstream</span><strong>${chainForward.length}</strong></div>
+          </div>
+
+          <div class="sectionTitle">Mini chain</div>
+          <div class="miniChain">${renderMiniChain(item, chainForward.slice(0, 5))}</div>
+
+          <div class="sectionTitle">Causal equations</div>
+          <div class="equationList">${renderCausalEquations(item, pred, succ)}</div>
+
+          <div class="sectionTitle">Diagnostics</div>
+          <div class="diagnostic">
+            <strong>Recommended action</strong>
+            <span>${diagnosticCopy(item, pred, succ, delta)}</span>
+          </div>
+
+          <div class="sectionTitle">Dependencies</div>
+          <div class="depList">
+            ${pred.concat(succ).map((link) => depCard(link, item.id)).join("") || `<div class="depItem"><span class="depType">—</span><div><strong>No direct dependencies</strong><span>This task is isolated in the current scenario.</span></div></div>`}
+          </div>
+
+          <div class="sectionTitle">Successor chain</div>
+          <div class="chainList">
+            ${chainForward.slice(0, 6).map((row) => `<button class="chainItem ${row.id === state.selectedTaskId ? "active" : ""}" data-select-task="${row.id}"><strong>${row.wbs} ${row.name}</strong><span>${statusLabel(row)} • ${formatDate(row.start)} • ${row.critical ? "critical" : `${row.float}d float`}</span></button>`).join("") || `<div class="chainItem"><strong>No downstream chain</strong><span>This is a leaf task or finish milestone.</span></div>`}
+          </div>
+        `;
+      }
+
+      function renderMiniChain(item, chain) {
+        const all = [item, ...chain];
+        const min = Math.min(...all.map((row) => row.start));
+        const max = Math.max(...all.map((row) => row.start + Math.max(1, row.duration)));
+        const span = Math.max(1, max - min);
+        return `<svg width="100%" height="94" viewBox="0 0 320 94" preserveAspectRatio="none">
+          ${all.map((row, index) => {
+            const sx = 10 + ((row.start - min) / span) * 285;
+            const w = Math.max(6, (Math.max(1, row.duration) / span) * 285);
+            const y = 14 + index * 14;
+            if (row.type === "milestone") return `<rect x="${sx}" y="${y}" width="8" height="8" transform="rotate(45 ${sx + 4} ${y + 4})" fill="${row.critical ? "#d83b01" : "#1f2937"}"></rect>`;
+            return `<rect x="${sx}" y="${y}" width="${w}" height="8" rx="3" fill="${row.critical ? "#d83b01" : stateColor[row.status] || "#718096"}" opacity="${index === 0 ? 1 : 0.75}"></rect>`;
+          }).join("")}
+        </svg>`;
+      }
+
+      function depCard(link, selectedId) {
+        const incoming = link.to === selectedId;
+        const other = getTask(incoming ? link.from : link.to);
+        return `<div class="depItem ${state.selectedDepId === link.id ? "active" : ""}">
+          <button class="depSelect" data-select-dep="${link.id}">
+            <span class="depType">${depLabel(link)}</span>
+            <div><strong>${incoming ? "From" : "To"} ${other.wbs} ${other.name}</strong><span>${link.lag ? `${link.lag > 0 ? "+" : ""}${link.lag}d lag/lead • ` : ""}${link.violation ? "violated gate" : link.note}</span></div>
+          </button>
+          <div class="depEditor">
+            <label>Type
+              <select data-dep-type="${link.id}" aria-label="Dependency type for ${other.name}">
+                ${["FS", "SS", "FF", "SF"].map((type) => `<option value="${type}" ${link.type === type ? "selected" : ""}>${depGrammar(type)}</option>`).join("")}
+              </select>
+            </label>
+            <div class="lagStepper" aria-label="Dependency lag for ${other.name}">
+              <button data-lag-step="${link.id}" data-delta="-1" title="Decrease lag">−</button>
+              <span class="lagValue">${link.lag > 0 ? "+" : ""}${link.lag}d</span>
+              <button data-lag-step="${link.id}" data-delta="1" title="Increase lag">+</button>
+            </div>
+            <button class="removeDep" data-remove-dep="${link.id}" title="Remove dependency">Remove</button>
+          </div>
+        </div>`;
+      }
+
+      function depGrammar(type) {
+        const grammar = { FS: "F->S", SS: "S->S", FF: "F->F", SF: "S->F" };
+        return grammar[type] || type;
+      }
+
+      function depLabel(link) {
+        return `${depGrammar(link.type)}${link.lag ? ` ${link.lag > 0 ? "+" : ""}${link.lag}d` : ""}`;
+      }
+
+      function renderCausalEquations(item, pred, succ) {
+        const links = pred.concat(succ).slice(0, 4);
+        if (!links.length) return `<div class="equationItem"><span class="stepToken">0</span><div><strong>No direct constraint</strong><span>This item has no direct predecessor or successor link in the current view.</span></div></div>`;
+        return links.map((link, index) => {
+          const incoming = link.to === item.id;
+          const other = getTask(incoming ? link.from : link.to);
+          if (!other) return "";
+          const selectedSide = incoming ? "target" : "source";
+          const equation = causalEquation(link, selectedSide);
+          return `<div class="equationItem ${link.violation ? "violation" : ""}" data-select-dep="${link.id}">
+            <span class="stepToken">${index + 1}</span>
+            <div><strong>${depLabel(link)} ${incoming ? "from" : "to"} ${other.wbs}</strong><span>${equation}</span></div>
+          </div>`;
+        }).join("");
+      }
+
+      function causalEquation(link, selectedSide) {
+        const from = getTask(link.from);
+        const to = getTask(link.to);
+        if (!from || !to) return "Dependency endpoint cannot be resolved.";
+        const sourcePoint = link.type === "SS" || link.type === "SF" ? "start" : "finish";
+        const targetPoint = link.type === "SS" || link.type === "FS" ? "start" : "finish";
+        const sourceDay = sourcePoint === "start" ? from.start : from.start + from.duration;
+        const targetDay = targetPoint === "start" ? to.start : to.start + to.duration;
+        const lagCopy = link.lag ? ` ${link.lag > 0 ? "+" : ""}${link.lag}d lag` : "";
+        const resultDay = sourceDay + link.lag;
+        const focus = selectedSide === "target" ? `${to.wbs} ${targetPoint}` : `${from.wbs} ${sourcePoint}`;
+        return `${from.wbs} ${sourcePoint}${lagCopy} = ${formatDate(resultDay)}; ${focus} is ${formatDate(selectedSide === "target" ? targetDay : sourceDay)}.`;
+      }
+
+      function verdictTone(item, delta) {
+        if (item.status === "blocked") return "blocked";
+        if (item.critical || delta > 3) return "critical";
+        return "ok";
+      }
+
+      function constraintFormula(item, pred) {
+        const blocking = pred.find((link) => link.violation) || pred.find((link) => link.critical) || pred[0];
+        if (blocking) {
+          const from = getTask(blocking.from);
+          if (from) {
+            const source = blocking.type === "SS" || blocking.type === "SF" ? "start" : "finish";
+            const target = blocking.type === "SS" || blocking.type === "FS" ? "start" : "finish";
+            const sourceDay = source === "start" ? from.start : from.start + from.duration;
+            const lagCopy = blocking.lag ? ` ${blocking.lag > 0 ? "+" : ""}${blocking.lag}d lag` : "";
+            return `${from.wbs} ${source}${lagCopy} constrains this task ${target} at ${formatDate(sourceDay + blocking.lag)}.`;
+          }
+        }
+        if (item.status === "blocked") return "Completion is waiting on required evidence before the milestone can close.";
+        if (item.critical) return "This item has no usable float; moving it changes the finish milestone.";
+        return "No predecessor currently constrains the selected date beyond available float.";
+      }
+
+      function diagnosticHeadline(item, delta) {
+        if (item.status === "blocked") return "Blocked task is constraining downstream dates";
+        if (item.critical) return "This task is on the active critical path";
+        if (delta > 3) return "Baseline variance needs review";
+        return "No hard gate currently triggered";
+      }
+
+      function diagnosticCopy(item, pred, succ, delta) {
+        if (item.status === "blocked") return `${succ.length} successor dependency path(s) are waiting. Completing this task clears the next milestone gate.`;
+        if (item.critical) return `Moving this task changes the finish milestone unless downstream float absorbs the change.`;
+        if (delta > 3) return `Current finish is ${delta} days later than baseline. Keep the ghost bar visible during edits.`;
+        return `Task has ${pred.length} predecessor(s), ${succ.length} successor(s), and ${item.float} days of float.`;
+      }
+
+      function renderMini(rows) {
+        const canvas = els.miniCanvas;
+        const width = els.miniWrap.clientWidth;
+        const height = els.miniWrap.clientHeight;
+        resizeCanvas(canvas, width, height);
+        const ctx = canvas.getContext("2d");
+        ctx.clearRect(0, 0, width, height);
+        ctx.fillStyle = "#fff";
+        ctx.fillRect(0, 0, width, height);
+        drawMiniHeatBands(ctx, rows, width, height);
+        rows.forEach((item, index) => {
+          if (item.type === "summary") return;
+          const y = 10 + (index / Math.max(1, rows.length)) * (height - 20);
+          const start = (item.start / scenarioInfo[state.scenario].range) * width;
+          const w = Math.max(2, (Math.max(1, item.duration) / scenarioInfo[state.scenario].range) * width);
+          ctx.fillStyle = item.critical ? "#d83b01" : stateColor[item.status] || "#718096";
+          ctx.globalAlpha = item.critical ? 0.9 : 0.42;
+          ctx.fillRect(start, y, w, 2);
+        });
+        ctx.globalAlpha = 1;
+        updateMiniViewport();
+        els.miniRange.textContent = `${Math.round(scenarioInfo[state.scenario].range / 7)} weeks`;
+      }
+
+      function drawMiniHeatBands(ctx, rows, width, height) {
+        rows.forEach((item, index) => {
+          if (item.type === "summary" || item.type === "hammock") return;
+          if (item.status !== "blocked" && !item.critical) return;
+          const y = 8 + (index / Math.max(1, rows.length)) * (height - 16);
+          const start = (item.start / scenarioInfo[state.scenario].range) * width;
+          const w = Math.max(3, (Math.max(1, item.duration || 1) / scenarioInfo[state.scenario].range) * width);
+          ctx.fillStyle = item.status === "blocked" ? "rgba(179, 38, 30, 0.16)" : "rgba(216, 59, 1, 0.12)";
+          ctx.fillRect(start, Math.max(2, y - 3), w, 7);
+        });
+        ctx.fillStyle = "rgba(15, 108, 189, 0.06)";
+        ctx.fillRect(0, height - 4, width, 1);
+      }
+
+      function updateMiniViewport() {
+        const width = els.miniWrap.clientWidth;
+        const height = els.miniWrap.clientHeight;
+        const scrollLeft = els.timelineScroll.scrollLeft;
+        const scrollTop = els.timelineScroll.scrollTop;
+        const viewportW = els.timelineScroll.clientWidth;
+        const viewportH = els.timelineScroll.clientHeight;
+        const totalW = els.timelineScroll.scrollWidth;
+        const totalH = els.timelineScroll.scrollHeight;
+        const left = totalW ? (scrollLeft / totalW) * width : 0;
+        const top = totalH ? (scrollTop / totalH) * height : 0;
+        const vw = totalW ? (viewportW / totalW) * width : width;
+        const vh = totalH ? (viewportH / totalH) * height : height;
+        els.miniViewport.style.left = `${left}px`;
+        els.miniViewport.style.width = `${Math.max(24, vw)}px`;
+        els.miniViewport.style.top = `${top}px`;
+        els.miniViewport.style.height = `${Math.max(24, vh)}px`;
+      }
+
+      function syncTimelineFromMini(event) {
+        const rect = els.miniWrap.getBoundingClientRect();
+        const xRatio = clamp((event.clientX - rect.left) / Math.max(1, rect.width), 0, 1);
+        const yRatio = clamp((event.clientY - rect.top) / Math.max(1, rect.height), 0, 1);
+        const maxLeft = Math.max(0, els.timelineScroll.scrollWidth - els.timelineScroll.clientWidth);
+        const maxTop = Math.max(0, els.timelineScroll.scrollHeight - els.timelineScroll.clientHeight);
+        els.timelineScroll.scrollLeft = clamp(Math.round(xRatio * els.timelineScroll.scrollWidth - els.timelineScroll.clientWidth / 2), 0, maxLeft);
+        els.timelineScroll.scrollTop = clamp(Math.round(yRatio * els.timelineScroll.scrollHeight - els.timelineScroll.clientHeight / 2), 0, maxTop);
+        els.tableBody.scrollTop = els.timelineScroll.scrollTop;
+        els.timeHeader.scrollLeft = els.timelineScroll.scrollLeft;
+        updateMiniViewport();
+        scheduleViewportRender();
+      }
+
+      function updateScenarioStats() {
+        const info = scenarioInfo[state.scenario];
+        const rows = currentRows();
+        const blockedCount = state.tasks.filter((item) => item.status === "blocked").length;
+        const criticalCount = state.tasks.filter((item) => item.critical && item.type !== "summary").length;
+        const visibleStart = state.lastVirtual ? state.lastVirtual.startIndex + 1 : 1;
+        const visibleEnd = state.lastVirtual ? state.lastVirtual.endIndex : Math.min(rows.length, 1);
+        const weekCount = Math.round(info.range / 7);
+        els.pressureValue.textContent = `${info.pressure}%`;
+        els.pressureFill.style.width = `${info.pressure}%`;
+        els.scenarioTitle.textContent = info.title;
+        els.scenarioSummary.textContent = info.summary;
+        els.scenarioStats.textContent = `${state.tasks.length} tasks · ${weekCount} weeks · ${blockedCount} blocked · ${criticalCount} critical`;
+        els.workspaceMeta.textContent = `Showing ${visibleStart}-${visibleEnd} of ${rows.length} rows · ${state.deps.length} dependencies`;
+        els.gatePill.textContent = info.gate;
+        els.gatePill.className = `gatePill ${info.gateTone === "ok" ? "ok" : info.gateTone === "warn" ? "warn" : ""}`;
+      }
+
+      function shiftTask(id, delta, cascade = true) {
+        const item = getTask(id);
+        if (!item || item.type === "summary") return [];
+        item.start += delta;
+        item.baselineStart = item.baselineStart;
+        if (item.segments) item.segments.forEach((segment) => segment.start += delta);
+        const changed = [id];
+        if (cascade) {
+          traverseDeps(id, "forward").forEach((nextId) => {
+            const next = getTask(nextId);
+            if (!next || next.type === "summary") return;
+            const minimumStart = item.start + item.duration;
+            if (next.start < minimumStart && state.deps.some((link) => link.from === id && link.to === nextId && link.type === "FS")) {
+              const nextDelta = minimumStart - next.start;
+              next.start += nextDelta;
+              if (next.segments) next.segments.forEach((segment) => segment.start += nextDelta);
+            } else if (delta > 0 && next.critical) {
+              next.start += Math.max(1, Math.round(delta * 0.55));
+              if (next.segments) next.segments.forEach((segment) => segment.start += Math.max(1, Math.round(delta * 0.55)));
+            }
+            changed.push(nextId);
+          });
+        }
+        return changed;
+      }
+
+      function showImpact(taskId, delta, changed) {
+        const item = getTask(taskId);
+        els.impactToast.innerHTML = `<strong>${item.name} moved ${delta > 0 ? "+" : ""}${delta}d</strong><span>${changed.length - 1} downstream item(s) recalculated. Baselines stayed pinned, so variance is now visible.</span>`;
+        els.impactToast.classList.add("visible");
+        window.clearTimeout(showImpact.timer);
+        showImpact.timer = window.setTimeout(() => els.impactToast.classList.remove("visible"), 4200);
+      }
+
+      function selectTask(id) {
+        state.selectedTaskId = id;
+        state.selectedDepId = null;
+        state.traceMode = true;
+        render();
+      }
+
+      function selectDep(id) {
+        state.selectedDepId = id;
+        const link = getDep(id);
+        if (link) state.selectedTaskId = link.to;
+        state.traceMode = true;
+        render();
+      }
+
+      function updateDependencyType(id, type) {
+        const link = getDep(id);
+        if (!link || !["FS", "SS", "FF", "SF"].includes(type)) return;
+        link.type = type;
+        state.selectedDepId = id;
+        state.selectedTaskId = link.to;
+        state.traceMode = true;
+        render();
+      }
+
+      function updateDependencyLag(id, delta) {
+        const link = getDep(id);
+        if (!link) return;
+        link.lag = clamp(link.lag + delta, -10, 30);
+        state.selectedDepId = id;
+        state.selectedTaskId = link.to;
+        state.traceMode = true;
+        render();
+      }
+
+      function removeDependency(id) {
+        const link = getDep(id);
+        if (!link) return;
+        state.deps = state.deps.filter((item) => item.id !== id);
+        if (state.selectedDepId === id) state.selectedDepId = null;
+        state.selectedTaskId = link.to;
+        state.traceMode = true;
+        render();
+      }
+
+      function switchScenario(name) {
+        state.scenario = name;
+        state.filter = "all";
+        state.depFilter = "all";
+        state.selectedDepId = null;
+        state.selectedTaskId = name === "parallel" ? "gantt" : name === "stress" ? "stress-174" : "evidence";
+        document.querySelectorAll(".scenario").forEach((button) => button.classList.toggle("active", button.dataset.scenario === name));
+        document.querySelectorAll("[data-filter]").forEach((button) => button.classList.toggle("active", button.dataset.filter === "all"));
+        document.querySelectorAll("[data-dep-filter]").forEach((button) => button.classList.toggle("active", button.dataset.depFilter === "all"));
+        cloneData();
+        els.timelineScroll.scrollTop = 0;
+        els.timelineScroll.scrollLeft = 0;
+        render();
+      }
+
+      function pointerDay(event) {
+        const rect = els.timelineInner.getBoundingClientRect();
+        return Math.round((event.clientX - rect.left) / pxPerDay());
+      }
+
+      function taskFromPoint(event) {
+        const target = event.target.closest("[data-task-hit]");
+        return target ? target.dataset.taskHit : null;
+      }
+
+      function showTooltip(event, item) {
+        if (!item) return;
+        els.tooltip.innerHTML = `<h4>${item.wbs} ${item.name}</h4><p>${formatDate(item.start)} → ${formatDate(item.start + item.duration)} • ${statusLabel(item)} • ${item.progress}% complete<br>${item.critical ? "Critical path" : `${item.float}d float`} • Baseline Δ ${baselineDelta(item)}d</p>`;
+        els.tooltip.style.left = `${Math.min(window.innerWidth - 340, event.clientX + 14)}px`;
+        els.tooltip.style.top = `${event.clientY + 14}px`;
+        els.tooltip.classList.add("visible");
+      }
+
+      function hideTooltip() {
+        els.tooltip.classList.remove("visible");
+      }
+
+      document.addEventListener("click", (event) => {
+        const lagStep = event.target.closest("[data-lag-step]");
+        const removeDep = event.target.closest("[data-remove-dep]");
+        const taskButton = event.target.closest("[data-select-task], [data-row-task], [data-task-hit]");
+        const depButton = event.target.closest("[data-select-dep], [data-dep-hit]");
+        const collapse = event.target.closest("[data-collapse]");
+        const filter = event.target.closest("[data-filter]");
+        const depFilter = event.target.closest("[data-dep-filter]");
+        const scenario = event.target.closest("[data-scenario]");
+        const jump = event.target.closest("[data-jump-dep]");
+        if (lagStep) {
+          updateDependencyLag(lagStep.dataset.lagStep, Number(lagStep.dataset.delta || 0));
+          return;
+        }
+        if (removeDep) {
+          removeDependency(removeDep.dataset.removeDep);
+          return;
+        }
+        if (collapse) {
+          const id = collapse.dataset.collapse;
+          state.collapsed.has(id) ? state.collapsed.delete(id) : state.collapsed.add(id);
+          invalidateRows();
+          render();
+          return;
+        }
+        if (depButton) {
+          selectDep(depButton.dataset.selectDep || depButton.dataset.depHit);
+          return;
+        }
+        if (taskButton) {
+          selectTask(taskButton.dataset.selectTask || taskButton.dataset.rowTask || taskButton.dataset.taskHit);
+          return;
+        }
+        if (filter) {
+          state.filter = filter.dataset.filter;
+          document.querySelectorAll("[data-filter]").forEach((button) => button.classList.toggle("active", button === filter));
+          invalidateRows();
+          render();
+          return;
+        }
+        if (depFilter) {
+          state.depFilter = depFilter.dataset.depFilter;
+          document.querySelectorAll("[data-dep-filter]").forEach((button) => button.classList.toggle("active", button === depFilter));
+          render();
+          return;
+        }
+        if (scenario) {
+          switchScenario(scenario.dataset.scenario);
+          return;
+        }
+        if (jump) {
+          const link = getDep(jump.dataset.jumpDep);
+          selectTask(link.to);
+        }
+      });
+
+      document.addEventListener("change", (event) => {
+        const typeSelect = event.target.closest("[data-dep-type]");
+        if (!typeSelect) return;
+        updateDependencyType(typeSelect.dataset.depType, typeSelect.value);
+      });
+
+      els.interactionSvg.addEventListener("pointermove", (event) => {
+        if (state.drag) return;
+        const id = taskFromPoint(event);
+        if (id !== state.hoverTaskId) {
+          state.hoverTaskId = id;
+          if (state.lastVirtual && state.scenario !== "stress") renderInteraction(state.lastVirtual, state.layoutWidth || els.timelineInner.clientWidth);
+          if (id) showTooltip(event, getTask(id)); else hideTooltip();
+        } else if (id) {
+          showTooltip(event, getTask(id));
+        }
+      });
+
+      els.interactionSvg.addEventListener("pointerleave", () => {
+        state.hoverTaskId = null;
+        hideTooltip();
+        if (state.lastVirtual && state.scenario !== "stress") renderInteraction(state.lastVirtual, state.layoutWidth || els.timelineInner.clientWidth);
+      });
+
+      els.interactionSvg.addEventListener("pointerdown", (event) => {
+        const id = taskFromPoint(event);
+        if (!id) return;
+        const item = getTask(id);
+        if (!item || item.type === "milestone") return;
+        state.drag = { id, startDay: pointerDay(event), originalStart: item.start };
+        els.interactionSvg.setPointerCapture(event.pointerId);
+      });
+
+      els.interactionSvg.addEventListener("pointerup", (event) => {
+        if (!state.drag) return;
+        const item = getTask(state.drag.id);
+        const delta = item.start - state.drag.originalStart;
+        if (delta !== 0) {
+          const changed = shiftTask(item.id, 0, true);
+          showImpact(item.id, delta, changed);
+        }
+        state.drag = null;
+        els.interactionSvg.releasePointerCapture(event.pointerId);
+        render();
+      });
+
+      els.interactionSvg.addEventListener("pointermove", (event) => {
+        if (!state.drag) return;
+        const item = getTask(state.drag.id);
+        const delta = pointerDay(event) - state.drag.startDay;
+        item.start = state.drag.originalStart + delta;
+        if (item.segments) {
+          const original = baseTasks.find((row) => row.id === item.id);
+          item.segments.forEach((segment, index) => segment.start = original.segments[index].start + delta);
+        }
+        scheduleViewportRender();
+      });
+
+      els.timelineScroll.addEventListener("scroll", () => {
+        const previousTop = state.lastScrollTop;
+        if (!state.syncingScroll) {
+          state.syncingScroll = true;
+          els.tableBody.scrollTop = els.timelineScroll.scrollTop;
+          state.syncingScroll = false;
+        }
+        els.timeHeader.scrollLeft = els.timelineScroll.scrollLeft;
+        updateMiniViewport();
+        state.lastScrollLeft = els.timelineScroll.scrollLeft;
+        if (els.timelineScroll.scrollTop !== previousTop) scheduleViewportRender();
+      }, { passive: true });
+
+      els.tableBody.addEventListener("scroll", () => {
+        const previousTop = state.lastScrollTop;
+        if (!state.syncingScroll) {
+          state.syncingScroll = true;
+          els.timelineScroll.scrollTop = els.tableBody.scrollTop;
+          state.syncingScroll = false;
+        }
+        if (els.tableBody.scrollTop !== previousTop) scheduleViewportRender();
+      }, { passive: true });
+
+      els.miniWrap.addEventListener("pointerdown", (event) => {
+        state.miniDrag = true;
+        els.miniWrap.classList.add("dragging");
+        els.miniWrap.setPointerCapture(event.pointerId);
+        syncTimelineFromMini(event);
+      });
+
+      els.miniWrap.addEventListener("pointermove", (event) => {
+        if (!state.miniDrag) return;
+        syncTimelineFromMini(event);
+      });
+
+      els.miniWrap.addEventListener("pointerup", (event) => {
+        state.miniDrag = false;
+        els.miniWrap.classList.remove("dragging");
+        els.miniWrap.releasePointerCapture(event.pointerId);
+      });
+
+      els.miniWrap.addEventListener("pointercancel", () => {
+        state.miniDrag = false;
+        els.miniWrap.classList.remove("dragging");
+      });
+
+      document.getElementById("zoomIn").addEventListener("click", () => {
+        state.zoom = Math.min(2.25, state.zoom + 0.25);
+        render();
+      });
+
+      document.getElementById("zoomOut").addEventListener("click", () => {
+        state.zoom = Math.max(0.42, state.zoom - 0.25);
+        render();
+      });
+
+      document.getElementById("traceEnd").addEventListener("click", () => {
+        state.traceMode = !state.traceMode;
+        render();
+      });
+
+      document.getElementById("demoDrag").addEventListener("click", () => {
+        const id = state.selectedTaskId || "scheduler";
+        const item = getTask(id);
+        if (!item || item.type === "summary") return;
+        const changed = shiftTask(id, 3, true);
+        showImpact(id, 3, changed);
+        render();
+      });
+
+      window.addEventListener("resize", () => render());
+
+      cloneData();
+      render();
+    </script>
+  </body>
+</html>

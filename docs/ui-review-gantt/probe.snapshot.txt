@@ -1,0 +1,348 @@
+- banner:
+  - heading "Professional Gantt Dependency Demo" [level=1]
+  - paragraph: Canvas/SVG hybrid prototype for task causality, dependency tracing, critical path, baseline variance, and blocked cascades.
+  - button "−"
+  - button "+"
+  - button "Trace to finish"
+  - button "Simulate +3d slip"
+- generic: Scenario
+- button "Blocked Cascade"
+- button "Critical Path Shift"
+- button "Parallel Release"
+- button "300 Task Stress" [active]
+- main:
+  - generic: Focus
+  - button "All"
+  - button "Critical path"
+  - button "Blocked"
+  - button "Delayed"
+  - button "Baseline Δ"
+  - generic: Dependencies
+  - button "All"
+  - button "FS"
+  - button "SS"
+  - button "FF"
+  - button "SF"
+  - complementary:
+    - generic: WBS
+    - generic: Task
+    - generic: Status
+    - generic: Float
+    - generic: Owner
+    - generic: "1"
+    - button "▼"
+    - generic: Scheduling Engine
+    - generic: Summary
+    - generic: —
+    - generic: Chen
+    - generic: "1.1"
+    - generic: Domain schema and migration plan
+    - generic: Complete
+    - generic: 5d
+    - generic: Chen
+    - generic: "1.2"
+    - generic: Calendars, weekends, exceptions
+    - generic: Active
+    - generic: 2d
+    - generic: Chen
+    - generic: "1.3"
+    - generic: Deterministic scheduling core
+    - generic: Delayed
+    - generic: 0d
+    - generic: Chen
+    - generic: "1.4"
+    - generic: "Split task: optimizer worker"
+    - generic: Active
+    - generic: 6d
+    - generic: Chen
+    - generic: "1.5"
+    - generic: Monte Carlo risk engine
+    - generic: Active
+    - generic: 0d
+    - generic: Chen
+    - generic: "1.6"
+    - generic: "Hammock: contrarian audit window"
+    - generic: Hammock
+    - generic: 10d
+    - generic: AI
+    - generic: "1.7"
+    - generic: Evidence package for engine trust
+    - generic: Blocked
+    - generic: "-5d"
+    - generic: Chen
+    - generic: "1.8"
+    - generic: "Milestone: core engine trustworthy"
+    - generic: Blocked
+    - generic: "-6d"
+    - generic: Chen
+    - generic: "2"
+    - button "▼"
+    - generic: Project UI
+    - generic: Summary
+    - generic: —
+    - generic: Chen
+    - generic: "2.1"
+    - generic: Outline table and inspector
+    - generic: Active
+    - generic: 4d
+    - generic: Chen
+    - generic: "2.2"
+    - generic: Professional Gantt surface
+    - generic: Active
+    - generic: 0d
+    - generic: Chen
+    - generic: "2.3"
+    - generic: Network graph cross-check
+    - generic: Delayed
+    - generic: 0d
+    - generic: Chen
+    - generic: "2.4"
+    - generic: PDF / Markdown / CSV reports
+    - generic: Ready
+    - generic: 1d
+    - generic: Chen
+    - generic: "2.5"
+    - generic: "Milestone: personal daily use ready"
+    - generic: Ready
+    - generic: "-4d"
+    - generic: Chen
+    - generic: "3.0"
+    - button "▼"
+    - generic: Summary 1
+    - generic: Summary
+    - generic: —
+    - generic: AI
+    - generic: "3.1"
+    - generic: Work package 2
+    - generic: Ready
+    - generic: 1d
+    - generic: Chen
+    - generic: "3.2"
+    - generic: Work package 3
+    - generic: Ready
+    - generic: 2d
+    - generic: Chen
+    - generic: "3.3"
+    - generic: Work package 4
+    - generic: Active
+    - generic: 3d
+    - generic: Chen
+    - generic: "3.4"
+    - generic: Work package 5
+    - generic: Ready
+    - generic: 4d
+    - generic: AI
+    - generic: "3.5"
+    - generic: Work package 6
+    - generic: Ready
+    - generic: 5d
+    - generic: Chen
+    - generic: "3.6"
+    - generic: Work package 7
+    - generic: Active
+    - generic: 6d
+    - generic: Chen
+    - generic: "3.7"
+    - generic: Work package 8
+    - generic: Complete
+    - generic: 7d
+    - generic: Chen
+    - generic: "3.8"
+    - generic: Work package 9
+    - generic: Ready
+    - generic: 8d
+    - generic: AI
+    - generic: "3.9"
+    - generic: Work package 10
+    - generic: Active
+    - generic: 9d
+    - generic: Chen
+    - generic: "3.10"
+    - generic: Work package 11
+    - generic: Ready
+    - generic: 10d
+    - generic: Chen
+    - generic: "3.11"
+    - generic: Work package 12
+    - generic: Ready
+    - generic: 11d
+    - generic: Chen
+    - generic: "3.12"
+    - generic: Work package 13
+    - generic: Active
+    - generic: 12d
+    - generic: AI
+    - generic: "3.13"
+    - generic: Work package 14
+    - generic: Ready
+    - generic: 0d
+    - generic: Chen
+    - generic: "3.14"
+    - generic: Work package 15
+    - generic: Complete
+    - generic: 1d
+    - generic: Chen
+    - generic: "3.15"
+    - generic: Work package 16
+    - generic: Active
+    - generic: 2d
+    - generic: Chen
+    - generic: "3.16"
+    - generic: Work package 17
+    - generic: Ready
+    - generic: 3d
+    - generic: AI
+    - generic: "3.17"
+    - generic: Work package 18
+    - generic: Delayed
+    - generic: 4d
+    - generic: Chen
+    - generic: "3.18"
+    - generic: Work package 19
+    - generic: Active
+    - generic: 5d
+    - generic: Chen
+    - generic: "3.19"
+    - generic: Work package 20
+    - generic: Ready
+    - generic: 6d
+    - generic: Chen
+    - generic: "3.20"
+    - generic: Work package 21
+    - generic: Ready
+    - generic: 7d
+    - generic: AI
+    - generic: "3.21"
+    - generic: Work package 22
+    - generic: Complete
+    - generic: 8d
+    - generic: Chen
+    - generic: "3.22"
+    - generic: Work package 23
+    - generic: Ready
+    - generic: 9d
+    - generic: Chen
+    - generic: "3.23"
+    - generic: Work package 24
+    - generic: Blocked
+    - generic: 10d
+    - generic: Chen
+    - generic: "3.24"
+    - generic: Work package 25
+    - generic: Active
+    - generic: 11d
+    - generic: AI
+    - generic: "3.25"
+    - generic: Work package 26
+    - generic: Ready
+    - generic: 12d
+    - generic: Chen
+    - generic: "3.26"
+    - generic: Work package 27
+    - generic: Ready
+    - generic: 0d
+    - generic: Chen
+    - generic: "3.27"
+    - generic: Work package 28
+    - generic: Active
+    - generic: 1d
+    - generic: Chen
+    - generic: "3.28"
+    - generic: Work package 29
+    - generic: Complete
+    - generic: 2d
+    - generic: AI
+    - generic: "3.29"
+    - generic: Work package 30
+    - generic: Ready
+    - generic: 3d
+    - generic: Chen
+    - generic: "3.30"
+    - generic: Work package 31
+    - generic: Active
+    - generic: 4d
+    - generic: Chen
+    - generic: "3.31"
+    - generic: Work package 32
+    - generic: Ready
+    - generic: 5d
+    - generic: Chen
+    - generic: "3.32"
+    - generic: Work package 33
+    - generic: Ready
+    - generic: 6d
+    - generic: AI
+    - generic: "3.33"
+    - generic: Work package 34
+    - generic: Active
+    - generic: 7d
+    - generic: Chen
+    - generic: "3.34"
+    - generic: Work package 35
+    - generic: Delayed
+    - generic: 8d
+    - generic: Chen
+    - generic: "3.35"
+    - generic: Work package 36
+    - generic: Complete
+    - generic: 9d
+    - generic: Chen
+  - generic: Jul
+  - generic: month
+  - generic: Jul
+  - generic: month
+  - generic: Aug
+  - generic: month
+  - generic: Sep
+  - generic: month
+  - generic: Oct
+  - generic: month
+  - generic: Nov
+  - generic: month
+  - generic: Dec
+  - generic: month
+  - generic: Jan
+  - generic: month
+  - generic: Feb
+  - generic: month
+  - generic: Mar
+  - generic: month
+  - generic: Apr
+  - generic: month
+  - generic: May
+  - generic: month
+  - generic: Jun
+  - generic: month
+  - generic: Jun
+  - generic: month
+  - complementary:
+    - generic: Schedule pressure
+    - strong: 84%
+    - generic: Project minimap
+    - generic: 52 weeks
+    - heading "Work package 175" [level=2]
+    - paragraph: 6.24 • Dec 27 → Jan 8
+    - generic: Critical
+    - generic: Progress
+    - strong: 74%
+    - generic: Baseline Δ
+    - strong: +5d
+    - generic: Float
+    - strong: 5d
+    - generic: Downstream
+    - strong: "0"
+    - generic: Mini chain
+    - generic: Diagnostics
+    - strong: This task is on the active critical path
+    - generic: Moving this task changes the finish milestone unless downstream float absorbs the change.
+    - generic: Dependencies
+    - generic: —
+    - strong: No direct dependencies
+    - generic: This task is isolated in the current scenario.
+    - generic: Successor chain
+    - strong: No downstream chain
+    - generic: This is a leaf task or finish milestone.
+- heading "2.2 Professional Gantt surface" [level=4]
+- paragraph:
+  - text: Aug 29 → Sep 14 • Active • 35% complete
+  - text: Critical path • Baseline Δ 9d

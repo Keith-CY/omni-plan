@@ -1,0 +1,23 @@
+{
+  "activeDepFilter": "All",
+  "activeFilter": "All",
+  "activeScenario": "300 Task Stress",
+  "depsRendered": 17,
+  "rowsRendered": 51,
+  "selectedSubtitle": "6.24 • Dec 27 → Jan 8",
+  "selectedTitle": "Work package 175",
+  "timeline": {
+    "clientHeight": 688,
+    "clientWidth": 1053,
+    "scrollHeight": 12600,
+    "scrollLeft": 0,
+    "scrollTop": 0,
+    "scrollWidth": 3212
+  },
+  "title": "Professional Gantt Dependency Demo - OmniPlan Personal",
+  "url": "http://127.0.0.1:5173/gantt-dependencies-demo.html",
+  "viewport": {
+    "height": 1773,
+    "width": 1889
+  }
+}

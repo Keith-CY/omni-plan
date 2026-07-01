@@ -1,0 +1,1362 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>OmniPlan Personal - Fluent 2 Preview</title>
+    <style>
+      :root {
+        color-scheme: light;
+        font-family: "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+        --colorNeutralBackground1: #ffffff;
+        --colorNeutralBackground2: #fafafa;
+        --colorNeutralBackground3: #f5f5f5;
+        --colorNeutralBackground4: #f0f0f0;
+        --colorNeutralForeground1: #242424;
+        --colorNeutralForeground2: #424242;
+        --colorNeutralForeground3: #616161;
+        --colorNeutralStroke1: #d1d1d1;
+        --colorNeutralStroke2: #e0e0e0;
+        --colorBrandBackground: #0f6cbd;
+        --colorBrandBackgroundHover: #115ea3;
+        --colorBrandForeground1: #0f6cbd;
+        --colorStatusDangerBackground1: #fdf3f4;
+        --colorStatusDangerForeground1: #b10e1c;
+        --colorStatusWarningBackground1: #fff8f0;
+        --colorStatusWarningForeground1: #bc4b09;
+        --colorStatusSuccessBackground1: #f1faf1;
+        --colorStatusSuccessForeground1: #107c10;
+        --shadow4: 0 2px 4px rgba(0, 0, 0, 0.08), 0 0 2px rgba(0, 0, 0, 0.08);
+        --shadow8: 0 4px 8px rgba(0, 0, 0, 0.1), 0 0 2px rgba(0, 0, 0, 0.08);
+        --radiusSmall: 4px;
+        --radiusMedium: 6px;
+        --radiusLarge: 8px;
+        --spaceXS: 4px;
+        --spaceS: 8px;
+        --spaceM: 12px;
+        --spaceL: 16px;
+        --spaceXL: 24px;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-width: 320px;
+        background: var(--colorNeutralBackground3);
+        color: var(--colorNeutralForeground1);
+      }
+
+      button,
+      input,
+      select {
+        font: inherit;
+      }
+
+      button {
+        cursor: pointer;
+      }
+
+      .app {
+        display: grid;
+        grid-template-columns: 248px minmax(0, 1fr);
+        min-height: 100vh;
+      }
+
+      .nav {
+        border-right: 1px solid var(--colorNeutralStroke2);
+        background: var(--colorNeutralBackground1);
+      }
+
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: var(--spaceM);
+        height: 64px;
+        padding: 0 var(--spaceL);
+        border-bottom: 1px solid var(--colorNeutralStroke2);
+      }
+
+      .brandMark {
+        display: grid;
+        place-items: center;
+        width: 32px;
+        height: 32px;
+        border-radius: var(--radiusMedium);
+        background: var(--colorBrandBackground);
+        color: white;
+        font-weight: 700;
+      }
+
+      .brand strong {
+        display: block;
+        font-size: 14px;
+      }
+
+      .brand span {
+        display: block;
+        color: var(--colorNeutralForeground3);
+        font-size: 12px;
+      }
+
+      .navList {
+        display: grid;
+        gap: 2px;
+        padding: var(--spaceM);
+      }
+
+      .navItem {
+        display: flex;
+        align-items: center;
+        gap: var(--spaceM);
+        min-height: 40px;
+        border-radius: var(--radiusMedium);
+        padding: 0 var(--spaceM);
+        color: var(--colorNeutralForeground2);
+        text-decoration: none;
+      }
+
+      .navItem:hover {
+        background: var(--colorNeutralBackground3);
+      }
+
+      .navItem.active {
+        position: relative;
+        background: #ebf3fc;
+        color: var(--colorBrandForeground1);
+        font-weight: 600;
+      }
+
+      .navItem.active::before {
+        position: absolute;
+        left: 0;
+        width: 3px;
+        height: 20px;
+        border-radius: 999px;
+        background: var(--colorBrandBackground);
+        content: "";
+      }
+
+      .navIcon {
+        display: grid;
+        place-items: center;
+        width: 20px;
+        height: 20px;
+        color: currentColor;
+        font-size: 13px;
+        font-weight: 700;
+      }
+
+      .main {
+        min-width: 0;
+        display: grid;
+        grid-template-rows: auto minmax(0, 1fr);
+      }
+
+      .topbar {
+        position: sticky;
+        z-index: 5;
+        top: 0;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: var(--spaceL);
+        min-height: 64px;
+        border-bottom: 1px solid var(--colorNeutralStroke2);
+        padding: 0 var(--spaceXL);
+        background: rgba(255, 255, 255, 0.94);
+        backdrop-filter: blur(16px);
+      }
+
+      .breadcrumb {
+        color: var(--colorNeutralForeground3);
+        font-size: 12px;
+      }
+
+      .toolbar {
+        display: flex;
+        align-items: center;
+        gap: var(--spaceS);
+        flex-wrap: wrap;
+        justify-content: flex-end;
+      }
+
+      .searchBox {
+        display: flex;
+        align-items: center;
+        gap: var(--spaceS);
+        width: min(340px, 36vw);
+        min-height: 36px;
+        border: 1px solid var(--colorNeutralStroke1);
+        border-radius: var(--radiusMedium);
+        padding: 0 var(--spaceM);
+        background: var(--colorNeutralBackground1);
+        color: var(--colorNeutralForeground3);
+        font-size: 14px;
+      }
+
+      .content {
+        min-width: 0;
+        padding: var(--spaceXL);
+      }
+
+      .pageHeader {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: var(--spaceXL);
+        margin-bottom: var(--spaceL);
+      }
+
+      .pageHeader h1 {
+        margin: 0;
+        font-size: 28px;
+        font-weight: 600;
+        line-height: 1.2;
+      }
+
+      .pageHeader p {
+        margin: 6px 0 0;
+        color: var(--colorNeutralForeground3);
+        font-size: 14px;
+      }
+
+      .button {
+        min-height: 36px;
+        border: 1px solid var(--colorNeutralStroke1);
+        border-radius: var(--radiusMedium);
+        padding: 0 var(--spaceM);
+        background: var(--colorNeutralBackground1);
+        color: var(--colorNeutralForeground1);
+        font-weight: 600;
+      }
+
+      .button.primary {
+        border-color: var(--colorBrandBackground);
+        background: var(--colorBrandBackground);
+        color: white;
+      }
+
+      .button.primary:hover {
+        background: var(--colorBrandBackgroundHover);
+      }
+
+      .badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        min-height: 24px;
+        border-radius: 999px;
+        padding: 0 9px;
+        background: var(--colorNeutralBackground4);
+        color: var(--colorNeutralForeground2);
+        font-size: 12px;
+        font-weight: 600;
+        white-space: nowrap;
+      }
+
+      .badge.brand {
+        background: #ebf3fc;
+        color: var(--colorBrandForeground1);
+      }
+
+      .badge.danger {
+        background: var(--colorStatusDangerBackground1);
+        color: var(--colorStatusDangerForeground1);
+      }
+
+      .badge.warning {
+        background: var(--colorStatusWarningBackground1);
+        color: var(--colorStatusWarningForeground1);
+      }
+
+      .badge.success {
+        background: var(--colorStatusSuccessBackground1);
+        color: var(--colorStatusSuccessForeground1);
+      }
+
+      .messageBar {
+        display: grid;
+        grid-template-columns: 24px minmax(0, 1fr) auto;
+        align-items: center;
+        gap: var(--spaceM);
+        min-height: 48px;
+        border: 1px solid #f1bbbc;
+        border-radius: var(--radiusLarge);
+        padding: var(--spaceM);
+        background: var(--colorStatusDangerBackground1);
+        color: var(--colorNeutralForeground1);
+      }
+
+      .messageIcon {
+        display: grid;
+        place-items: center;
+        width: 24px;
+        height: 24px;
+        border-radius: 50%;
+        background: var(--colorStatusDangerForeground1);
+        color: white;
+        font-weight: 700;
+      }
+
+      .messageBar strong {
+        display: block;
+        font-size: 14px;
+      }
+
+      .messageBar span {
+        display: block;
+        color: var(--colorNeutralForeground2);
+        font-size: 13px;
+      }
+
+      .grid {
+        display: grid;
+        gap: var(--spaceL);
+      }
+
+      .portfolioGrid {
+        grid-template-columns: minmax(360px, 1.1fr) minmax(320px, 0.9fr);
+      }
+
+      .metricGrid {
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+      }
+
+      .card {
+        min-width: 0;
+        border: 1px solid var(--colorNeutralStroke2);
+        border-radius: var(--radiusLarge);
+        background: var(--colorNeutralBackground1);
+        box-shadow: var(--shadow4);
+      }
+
+      .cardHeader {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: var(--spaceM);
+        min-height: 48px;
+        border-bottom: 1px solid var(--colorNeutralStroke2);
+        padding: 0 var(--spaceL);
+      }
+
+      .cardHeader h2 {
+        margin: 0;
+        font-size: 16px;
+        font-weight: 600;
+      }
+
+      .cardBody {
+        padding: var(--spaceL);
+      }
+
+      .metric {
+        min-height: 108px;
+      }
+
+      .metric .value {
+        margin-top: var(--spaceS);
+        font-size: 30px;
+        font-weight: 600;
+      }
+
+      .metric .label {
+        color: var(--colorNeutralForeground3);
+        font-size: 12px;
+        font-weight: 600;
+      }
+
+      .split {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: var(--spaceM);
+      }
+
+      .brief {
+        border: 1px solid var(--colorNeutralStroke2);
+        border-radius: var(--radiusMedium);
+        padding: var(--spaceM);
+        background: var(--colorNeutralBackground2);
+      }
+
+      .brief span,
+      .rowMeta,
+      .table th {
+        color: var(--colorNeutralForeground3);
+        font-size: 12px;
+        font-weight: 600;
+      }
+
+      .brief strong {
+        display: block;
+        margin-top: 5px;
+        font-size: 15px;
+      }
+
+      .focusList,
+      .taskList {
+        display: grid;
+        gap: 2px;
+      }
+
+      .listRow {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: var(--spaceM);
+        align-items: center;
+        min-height: 64px;
+        border-radius: var(--radiusMedium);
+        padding: var(--spaceM);
+        background: var(--colorNeutralBackground1);
+      }
+
+      .listRow:hover {
+        background: var(--colorNeutralBackground2);
+      }
+
+      .rowTitle {
+        display: block;
+        overflow: hidden;
+        font-weight: 600;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .rowMeta {
+        display: block;
+        margin-top: 4px;
+      }
+
+      .matrix {
+        position: relative;
+        height: 290px;
+        border: 1px solid var(--colorNeutralStroke2);
+        border-radius: var(--radiusLarge);
+        background:
+          linear-gradient(90deg, transparent 49.5%, var(--colorNeutralStroke2) 50%, transparent 50.5%),
+          linear-gradient(0deg, transparent 49.5%, var(--colorNeutralStroke2) 50%, transparent 50.5%),
+          var(--colorNeutralBackground2);
+      }
+
+      .matrixNode {
+        position: absolute;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        min-height: 30px;
+        border: 1px solid #8ab7e4;
+        border-radius: var(--radiusMedium);
+        padding: 0 10px;
+        background: #ebf3fc;
+        color: var(--colorBrandForeground1);
+        font-size: 12px;
+        font-weight: 600;
+        transform: translate(-50%, 50%);
+        white-space: nowrap;
+      }
+
+      .axis {
+        position: absolute;
+        color: var(--colorNeutralForeground3);
+        font-size: 12px;
+        font-weight: 600;
+      }
+
+      .axis.x {
+        right: 12px;
+        bottom: 10px;
+      }
+
+      .axis.y {
+        top: 12px;
+        left: 12px;
+      }
+
+      .sectionStack {
+        display: grid;
+        gap: var(--spaceL);
+        margin-top: var(--spaceL);
+      }
+
+      .projectGrid {
+        grid-template-columns: minmax(420px, 1fr) minmax(320px, 0.72fr);
+      }
+
+      .tabs {
+        display: flex;
+        gap: var(--spaceXS);
+        border-bottom: 1px solid var(--colorNeutralStroke2);
+        padding: 0 var(--spaceL);
+      }
+
+      .tab {
+        min-height: 44px;
+        border: 0;
+        border-bottom: 2px solid transparent;
+        background: transparent;
+        color: var(--colorNeutralForeground2);
+        font-weight: 600;
+      }
+
+      .tab.active {
+        border-bottom-color: var(--colorBrandBackground);
+        color: var(--colorBrandForeground1);
+      }
+
+      .table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 13px;
+      }
+
+      .table th,
+      .table td {
+        border-bottom: 1px solid var(--colorNeutralStroke2);
+        padding: 10px 12px;
+        text-align: left;
+        vertical-align: top;
+      }
+
+      .table tr:hover td {
+        background: var(--colorNeutralBackground2);
+      }
+
+      .ganttPreview {
+        overflow: auto;
+        border: 1px solid var(--colorNeutralStroke2);
+        border-radius: var(--radiusLarge);
+        background: var(--colorNeutralBackground1);
+      }
+
+      .ganttCanvas {
+        min-width: 920px;
+        display: grid;
+        grid-template-columns: 250px 1fr;
+        color: var(--colorNeutralForeground2);
+        font-size: 12px;
+      }
+
+      .ganttHeaderLeft,
+      .ganttHeader {
+        position: sticky;
+        top: 0;
+        z-index: 2;
+        min-height: 40px;
+        border-bottom: 1px solid var(--colorNeutralStroke1);
+        background: var(--colorNeutralBackground2);
+      }
+
+      .ganttHeaderLeft {
+        display: flex;
+        align-items: center;
+        border-right: 1px solid var(--colorNeutralStroke2);
+        padding: 0 12px;
+        font-weight: 600;
+      }
+
+      .ganttHeader {
+        display: grid;
+        grid-template-columns: repeat(10, 1fr);
+      }
+
+      .ganttDate {
+        display: grid;
+        place-items: center;
+        min-width: 64px;
+        border-right: 1px solid var(--colorNeutralStroke2);
+        color: var(--colorNeutralForeground3);
+        font-weight: 600;
+      }
+
+      .ganttRows {
+        grid-column: 1 / -1;
+        display: grid;
+      }
+
+      .ganttRowFull {
+        display: grid;
+        grid-template-columns: 250px 1fr;
+        min-height: 44px;
+      }
+
+      .ganttTaskCell {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        min-width: 0;
+        border-right: 1px solid var(--colorNeutralStroke2);
+        border-bottom: 1px solid var(--colorNeutralStroke2);
+        padding: 0 12px;
+        background: var(--colorNeutralBackground1);
+      }
+
+      .ganttTaskCell.summary {
+        background: var(--colorNeutralBackground2);
+        font-weight: 600;
+      }
+
+      .ganttOutline {
+        flex: 0 0 34px;
+        color: var(--colorNeutralForeground3);
+        font-variant-numeric: tabular-nums;
+      }
+
+      .ganttTitle {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .ganttTimelineCell {
+        position: relative;
+        min-width: 670px;
+        border-bottom: 1px solid var(--colorNeutralStroke2);
+        background:
+          linear-gradient(90deg, transparent calc(10% - 1px), var(--colorNeutralStroke2) 10%, transparent calc(10% + 1px)),
+          linear-gradient(90deg, transparent calc(20% - 1px), var(--colorNeutralStroke2) 20%, transparent calc(20% + 1px)),
+          linear-gradient(90deg, transparent calc(30% - 1px), var(--colorNeutralStroke2) 30%, transparent calc(30% + 1px)),
+          linear-gradient(90deg, transparent calc(40% - 1px), var(--colorNeutralStroke2) 40%, transparent calc(40% + 1px)),
+          linear-gradient(90deg, transparent calc(50% - 1px), var(--colorNeutralStroke2) 50%, transparent calc(50% + 1px)),
+          linear-gradient(90deg, transparent calc(60% - 1px), var(--colorNeutralStroke2) 60%, transparent calc(60% + 1px)),
+          linear-gradient(90deg, transparent calc(70% - 1px), var(--colorNeutralStroke2) 70%, transparent calc(70% + 1px)),
+          linear-gradient(90deg, transparent calc(80% - 1px), var(--colorNeutralStroke2) 80%, transparent calc(80% + 1px)),
+          linear-gradient(90deg, transparent calc(90% - 1px), var(--colorNeutralStroke2) 90%, transparent calc(90% + 1px)),
+          var(--colorNeutralBackground1);
+      }
+
+      .ganttTimelineCell.weekend {
+        background:
+          linear-gradient(90deg, transparent calc(10% - 1px), var(--colorNeutralStroke2) 10%, transparent calc(10% + 1px)),
+          linear-gradient(90deg, transparent calc(20% - 1px), var(--colorNeutralStroke2) 20%, transparent calc(20% + 1px)),
+          linear-gradient(90deg, transparent calc(30% - 1px), var(--colorNeutralStroke2) 30%, transparent calc(30% + 1px)),
+          linear-gradient(90deg, transparent calc(40% - 1px), var(--colorNeutralStroke2) 40%, transparent calc(40% + 1px)),
+          linear-gradient(90deg, transparent calc(50% - 1px), var(--colorNeutralStroke2) 50%, transparent calc(50% + 1px)),
+          linear-gradient(90deg, transparent calc(60% - 1px), var(--colorNeutralStroke2) 60%, transparent calc(60% + 1px)),
+          linear-gradient(90deg, transparent calc(70% - 1px), var(--colorNeutralStroke2) 70%, transparent calc(70% + 1px)),
+          linear-gradient(90deg, transparent calc(80% - 1px), var(--colorNeutralStroke2) 80%, transparent calc(80% + 1px)),
+          linear-gradient(90deg, transparent calc(90% - 1px), var(--colorNeutralStroke2) 90%, transparent calc(90% + 1px)),
+          linear-gradient(90deg, transparent 0 62%, rgba(0, 0, 0, 0.025) 62% 82%, transparent 82%),
+          var(--colorNeutralBackground1);
+      }
+
+      .baselineBar {
+        position: absolute;
+        top: 9px;
+        height: 4px;
+        border-radius: 999px;
+        background: #8a8886;
+        opacity: 0.6;
+      }
+
+      .ganttBar {
+        position: absolute;
+        top: 17px;
+        height: 16px;
+        border-radius: 999px;
+        background: var(--colorBrandBackground);
+        box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.08);
+        overflow: hidden;
+      }
+
+      .ganttBar.summary {
+        height: 12px;
+        top: 18px;
+        border-radius: var(--radiusSmall);
+        background: #605e5c;
+      }
+
+      .ganttBar.critical {
+        background: var(--colorStatusDangerForeground1);
+      }
+
+      .ganttBar.warning {
+        background: var(--colorStatusWarningForeground1);
+      }
+
+      .progressFill {
+        height: 100%;
+        border-radius: inherit;
+        background: rgba(255, 255, 255, 0.35);
+        border-right: 1px solid rgba(255, 255, 255, 0.75);
+      }
+
+      .milestone {
+        position: absolute;
+        top: 15px;
+        width: 18px;
+        height: 18px;
+        background: var(--colorStatusDangerForeground1);
+        transform: rotate(45deg);
+        box-shadow: var(--shadow4);
+      }
+
+      .todayLine {
+        position: absolute;
+        z-index: 1;
+        top: 0;
+        bottom: 0;
+        width: 2px;
+        background: var(--colorBrandBackground);
+      }
+
+      .todayLabel {
+        position: absolute;
+        top: -21px;
+        transform: translateX(-50%);
+        border-radius: 999px;
+        padding: 2px 8px;
+        background: var(--colorBrandBackground);
+        color: white;
+        font-size: 11px;
+        font-weight: 600;
+        white-space: nowrap;
+      }
+
+      .dependencyLayer {
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+      }
+
+      .dependencyLine {
+        position: absolute;
+        height: 2px;
+        background: #605e5c;
+      }
+
+      .dependencyLine::after {
+        position: absolute;
+        right: -4px;
+        top: -3px;
+        width: 0;
+        height: 0;
+        border-top: 4px solid transparent;
+        border-bottom: 4px solid transparent;
+        border-left: 6px solid #605e5c;
+        content: "";
+      }
+
+      .ganttLegend {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        flex-wrap: wrap;
+        margin-top: 12px;
+        color: var(--colorNeutralForeground3);
+        font-size: 12px;
+      }
+
+      .legendItem {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+      }
+
+      .legendSwatch {
+        width: 22px;
+        height: 8px;
+        border-radius: 999px;
+        background: var(--colorBrandBackground);
+      }
+
+      .legendSwatch.critical {
+        background: var(--colorStatusDangerForeground1);
+      }
+
+      .legendSwatch.baseline {
+        height: 4px;
+        background: #8a8886;
+      }
+
+      .legendSwatch.milestone {
+        width: 10px;
+        height: 10px;
+        border-radius: 2px;
+        background: var(--colorStatusDangerForeground1);
+        transform: rotate(45deg);
+      }
+
+      .inspector {
+        display: grid;
+        gap: var(--spaceM);
+      }
+
+      .fieldRow {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: var(--spaceM);
+        min-height: 44px;
+        border-bottom: 1px solid var(--colorNeutralStroke2);
+      }
+
+      .twoColumn {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .previewFooter {
+        margin-top: var(--spaceXL);
+        color: var(--colorNeutralForeground3);
+        font-size: 12px;
+      }
+
+      @media (max-width: 1100px) {
+        .app {
+          grid-template-columns: 1fr;
+        }
+
+        .nav {
+          position: sticky;
+          z-index: 10;
+          top: 0;
+          border-right: 0;
+          border-bottom: 1px solid var(--colorNeutralStroke2);
+        }
+
+        .brand {
+          display: none;
+        }
+
+        .navList {
+          grid-auto-flow: column;
+          grid-auto-columns: max-content;
+          overflow-x: auto;
+        }
+
+        .portfolioGrid,
+        .projectGrid,
+        .twoColumn {
+          grid-template-columns: 1fr;
+        }
+      }
+
+      @media (max-width: 720px) {
+        .topbar,
+        .pageHeader {
+          display: grid;
+        }
+
+        .topbar,
+        .content {
+          padding-left: var(--spaceL);
+          padding-right: var(--spaceL);
+        }
+
+        .searchBox {
+          width: 100%;
+        }
+
+        .metricGrid,
+        .split {
+          grid-template-columns: 1fr;
+        }
+
+        .messageBar {
+          grid-template-columns: 24px minmax(0, 1fr);
+        }
+
+        .messageBar .button {
+          grid-column: 1 / -1;
+          justify-self: start;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="app">
+      <aside class="nav" aria-label="Preview navigation">
+        <div class="brand">
+          <div class="brandMark">OP</div>
+          <div>
+            <strong>OmniPlan Personal</strong>
+            <span>Fluent 2 preview</span>
+          </div>
+        </div>
+        <nav class="navList">
+          <a class="navItem active" href="#portfolio"><span class="navIcon">P</span>Portfolio</a>
+          <a class="navItem" href="#project"><span class="navIcon">W</span>Project</a>
+          <a class="navItem" href="#today"><span class="navIcon">T</span>Today</a>
+          <a class="navItem" href="#audit"><span class="navIcon">A</span>Audit</a>
+          <a class="navItem" href="#reports"><span class="navIcon">R</span>Reports</a>
+          <a class="navItem" href="#settings"><span class="navIcon">S</span>Settings</a>
+        </nav>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <div>
+            <div class="breadcrumb">Portfolio / OmniPlan Personal</div>
+          </div>
+          <div class="toolbar" aria-label="Top toolbar">
+            <div class="searchBox" role="searchbox" aria-label="Search projects, tasks, and evidence">Search projects, tasks, evidence</div>
+            <span class="badge brand">Sample as of 2026-07-08</span>
+            <span class="badge danger">4 hard gates</span>
+            <button class="button primary">New review</button>
+          </div>
+        </header>
+
+        <div class="content">
+          <section id="portfolio">
+            <div class="pageHeader">
+              <div>
+                <h1>Portfolio Control</h1>
+                <p>Fluent 2 direction: compact, neutral, status-aware, and built for focus.</p>
+              </div>
+              <div class="toolbar">
+                <button class="button">Filter</button>
+                <button class="button">Export</button>
+              </div>
+            </div>
+
+            <div class="messageBar" role="status">
+              <div class="messageIcon">!</div>
+              <div>
+                <strong>4 hard gates require review before reports can be treated as approved.</strong>
+                <span>Milestone evidence, baseline approval, and scope expansion checks are open.</span>
+              </div>
+              <button class="button">Open Audit</button>
+            </div>
+
+            <div class="sectionStack">
+              <div class="grid metricGrid">
+                <div class="card metric">
+                  <div class="cardBody">
+                    <span class="label">Active projects</span>
+                    <div class="value">2</div>
+                    <span class="badge success">Healthy focus</span>
+                  </div>
+                </div>
+                <div class="card metric">
+                  <div class="cardBody">
+                    <span class="label">Hard gates</span>
+                    <div class="value">4</div>
+                    <span class="badge danger">Blocked</span>
+                  </div>
+                </div>
+                <div class="card metric">
+                  <div class="cardBody">
+                    <span class="label">Critical items</span>
+                    <div class="value">8</div>
+                    <span class="badge warning">Review path</span>
+                  </div>
+                </div>
+                <div class="card metric">
+                  <div class="cardBody">
+                    <span class="label">Overloads</span>
+                    <div class="value">4</div>
+                    <span class="badge warning">Attention</span>
+                  </div>
+                </div>
+              </div>
+
+              <div class="grid portfolioGrid">
+                <div class="card">
+                  <div class="cardHeader">
+                    <h2>Control brief</h2>
+                    <span class="badge danger">Action required</span>
+                  </div>
+                  <div class="cardBody">
+                    <div class="split">
+                      <div class="brief">
+                        <span>Focus now</span>
+                        <strong>OmniPlan Personal</strong>
+                        <p>Core engine milestone is complete but missing linked evidence.</p>
+                      </div>
+                      <div class="brief">
+                        <span>Overdue action</span>
+                        <strong>Define project domain schema</strong>
+                        <p>07-01 00:00 to 07-01 16:00</p>
+                      </div>
+                      <div class="brief">
+                        <span>Evidence freshness</span>
+                        <strong>6d old</strong>
+                        <p>Attach evidence before milestone approval.</p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="card">
+                  <div class="cardHeader">
+                    <h2>Momentum x Risk</h2>
+                    <button class="button">Details</button>
+                  </div>
+                  <div class="cardBody">
+                    <div class="matrix">
+                      <span class="matrixNode" style="left: 70%; bottom: 66%;">OmniPlan Personal</span>
+                      <span class="matrixNode" style="left: 56%; bottom: 45%;">Agent Launch</span>
+                      <span class="matrixNode" style="left: 28%; bottom: 32%;">Risk Research</span>
+                      <span class="axis x">Momentum</span>
+                      <span class="axis y">Risk</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="card">
+                  <div class="cardHeader">
+                    <h2>Recommended focus</h2>
+                    <span class="badge brand">Ranked</span>
+                  </div>
+                  <div class="cardBody">
+                    <div class="focusList">
+                      <div class="listRow">
+                        <div>
+                          <span class="rowTitle">OmniPlan Personal</span>
+                          <span class="rowMeta">Overdue action / 3 hard gates / Evidence 6d old</span>
+                        </div>
+                        <span class="badge danger">Blocked</span>
+                      </div>
+                      <div class="listRow">
+                        <div>
+                          <span class="rowTitle">Agent Launch System</span>
+                          <span class="rowMeta">Upcoming report / 1 hard gate / Evidence 2d old</span>
+                        </div>
+                        <span class="badge warning">Narrow</span>
+                      </div>
+                      <div class="listRow">
+                        <div>
+                          <span class="rowTitle">Scheduling Risk Research</span>
+                          <span class="rowMeta">Waiting / Missing Direction Card</span>
+                        </div>
+                        <span class="badge">Waiting</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="card">
+                  <div class="cardHeader">
+                    <h2>Audit signals</h2>
+                    <span class="badge danger">4 open</span>
+                  </div>
+                  <div class="cardBody taskList">
+                    <div class="listRow">
+                      <div>
+                        <span class="rowTitle">Milestone evidence missing</span>
+                        <span class="rowMeta">Core engine trustworthy enough for UI</span>
+                      </div>
+                      <span class="badge danger">Hard</span>
+                    </div>
+                    <div class="listRow">
+                      <div>
+                        <span class="rowTitle">Baseline change queued</span>
+                        <span class="rowMeta">Move engine milestone after Monte Carlo spike</span>
+                      </div>
+                      <span class="badge danger">Hard</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section id="project" class="sectionStack">
+            <div class="pageHeader">
+              <div>
+                <h1>Project workspace</h1>
+                <p>Tabs and dense data surfaces replace nested dashboard cards.</p>
+              </div>
+              <div class="toolbar">
+                <select class="button" aria-label="Project">
+                  <option>OmniPlan Personal</option>
+                  <option>Agent Launch System</option>
+                </select>
+                <span class="badge brand">Build</span>
+              </div>
+            </div>
+
+            <div class="grid projectGrid">
+              <div class="card">
+                <div class="tabs" role="tablist">
+                  <button class="tab active">Outline</button>
+                  <button class="tab">Gantt</button>
+                  <button class="tab">Network</button>
+                  <button class="tab">Evidence</button>
+                </div>
+                <div class="cardBody">
+                  <table class="table">
+                    <thead>
+                      <tr>
+                        <th>WBS</th>
+                        <th>Item</th>
+                        <th>Start</th>
+                        <th>Finish</th>
+                        <th>Status</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr>
+                        <td>1</td>
+                        <td>Scheduling Core</td>
+                        <td>07-01 00:00</td>
+                        <td>07-03 08:00</td>
+                        <td><span class="badge danger">Critical</span></td>
+                      </tr>
+                      <tr>
+                        <td>1.2</td>
+                        <td>Implement deterministic scheduler</td>
+                        <td>07-01 16:00</td>
+                        <td>07-02 16:00</td>
+                        <td><span class="badge warning">Warning</span></td>
+                      </tr>
+                      <tr>
+                        <td>1.4</td>
+                        <td>Core engine trustworthy enough for UI</td>
+                        <td>07-03 08:00</td>
+                        <td>07-03 08:00</td>
+                        <td><span class="badge danger">Hard gate</span></td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              <div class="card">
+                <div class="cardHeader">
+                  <h2>Inspector</h2>
+                  <span class="badge danger">Blocked</span>
+                </div>
+                <div class="cardBody inspector">
+                  <div class="fieldRow"><span>Critical path</span><strong>6 items</strong></div>
+                  <div class="fieldRow"><span>Diagnostics</span><strong>0</strong></div>
+                  <div class="fieldRow"><span>Open gates</span><strong>4</strong></div>
+                  <div class="messageBar">
+                    <div class="messageIcon">!</div>
+                    <div>
+                      <strong>Evidence required</strong>
+                      <span>Attach structured evidence before milestone completion.</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="card">
+                <div class="cardHeader">
+                  <h2>Fluent Gantt preview</h2>
+                  <span class="badge brand">Timeline / baseline / dependencies</span>
+                </div>
+                <div class="cardBody">
+                  <div class="ganttPreview" aria-label="Fluent styled Gantt chart preview">
+                    <div class="ganttCanvas">
+                      <div class="ganttHeaderLeft">Work breakdown</div>
+                      <div class="ganttHeader">
+                        <div class="ganttDate">Jul 01</div>
+                        <div class="ganttDate">Jul 02</div>
+                        <div class="ganttDate">Jul 03</div>
+                        <div class="ganttDate">Jul 04</div>
+                        <div class="ganttDate">Jul 05</div>
+                        <div class="ganttDate">Jul 06</div>
+                        <div class="ganttDate">Jul 07</div>
+                        <div class="ganttDate">Jul 08</div>
+                        <div class="ganttDate">Jul 09</div>
+                        <div class="ganttDate">Jul 10</div>
+                      </div>
+                      <div class="ganttRows">
+                        <div class="ganttRowFull">
+                          <div class="ganttTaskCell summary">
+                            <span class="ganttOutline">1</span>
+                            <span class="ganttTitle">Scheduling Core</span>
+                            <span class="badge danger">Critical</span>
+                          </div>
+                          <div class="ganttTimelineCell weekend">
+                            <span class="todayLine" style="left: 75%;"><span class="todayLabel">Today</span></span>
+                            <span class="baselineBar" style="left: 2%; width: 67%;"></span>
+                            <span class="ganttBar summary" style="left: 0%; width: 82%;"><span class="progressFill" style="width: 45%;"></span></span>
+                          </div>
+                        </div>
+
+                        <div class="ganttRowFull">
+                          <div class="ganttTaskCell">
+                            <span class="ganttOutline">1.1</span>
+                            <span class="ganttTitle">Define project domain schema</span>
+                            <span class="badge danger">Overdue</span>
+                          </div>
+                          <div class="ganttTimelineCell weekend">
+                            <span class="baselineBar" style="left: 0%; width: 18%;"></span>
+                            <span class="ganttBar critical" style="left: 0%; width: 16%;"><span class="progressFill" style="width: 80%;"></span></span>
+                            <span class="dependencyLine" style="left: 16%; top: 38px; width: 9%;"></span>
+                          </div>
+                        </div>
+
+                        <div class="ganttRowFull">
+                          <div class="ganttTaskCell">
+                            <span class="ganttOutline">1.2</span>
+                            <span class="ganttTitle">Implement deterministic scheduler</span>
+                            <span class="badge warning">Warning</span>
+                          </div>
+                          <div class="ganttTimelineCell weekend">
+                            <span class="baselineBar" style="left: 19%; width: 26%;"></span>
+                            <span class="ganttBar critical" style="left: 24%; width: 24%;"><span class="progressFill" style="width: 45%;"></span></span>
+                            <span class="dependencyLine" style="left: 48%; top: 38px; width: 9%;"></span>
+                          </div>
+                        </div>
+
+                        <div class="ganttRowFull">
+                          <div class="ganttTaskCell">
+                            <span class="ganttOutline">1.3</span>
+                            <span class="ganttTitle">Add Monte Carlo and EVM</span>
+                            <span class="badge brand">Risk</span>
+                          </div>
+                          <div class="ganttTimelineCell weekend">
+                            <span class="baselineBar" style="left: 50%; width: 20%;"></span>
+                            <span class="ganttBar" style="left: 57%; width: 18%;"><span class="progressFill" style="width: 20%;"></span></span>
+                            <span class="dependencyLine" style="left: 75%; top: 38px; width: 7%;"></span>
+                          </div>
+                        </div>
+
+                        <div class="ganttRowFull">
+                          <div class="ganttTaskCell">
+                            <span class="ganttOutline">1.4</span>
+                            <span class="ganttTitle">Core engine trustworthy enough for UI</span>
+                            <span class="badge danger">Gate</span>
+                          </div>
+                          <div class="ganttTimelineCell weekend">
+                            <span class="baselineBar" style="left: 69%; width: 2%;"></span>
+                            <span class="milestone" style="left: 81%;"></span>
+                          </div>
+                        </div>
+
+                        <div class="ganttRowFull">
+                          <div class="ganttTaskCell">
+                            <span class="ganttOutline">1.5</span>
+                            <span class="ganttTitle">Contrarian audit window</span>
+                            <span class="badge warning">Hammock</span>
+                          </div>
+                          <div class="ganttTimelineCell weekend">
+                            <span class="baselineBar" style="left: 4%; width: 66%;"></span>
+                            <span class="ganttBar warning" style="left: 4%; width: 78%;"><span class="progressFill" style="width: 15%;"></span></span>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="ganttLegend" aria-label="Gantt legend">
+                    <span class="legendItem"><span class="legendSwatch"></span>Scheduled</span>
+                    <span class="legendItem"><span class="legendSwatch critical"></span>Critical path</span>
+                    <span class="legendItem"><span class="legendSwatch baseline"></span>Baseline</span>
+                    <span class="legendItem"><span class="legendSwatch milestone"></span>Milestone</span>
+                    <span class="legendItem"><span class="badge brand">Today marker</span></span>
+                  </div>
+                </div>
+              </div>
+
+              <div class="card">
+                <div class="cardHeader">
+                  <h2>Network preview</h2>
+                  <span class="badge">FS dependencies</span>
+                </div>
+                <div class="cardBody">
+                  <div class="focusList">
+                    <div class="listRow"><span class="rowTitle">Schema -> Scheduler</span><span class="badge">FS</span></div>
+                    <div class="listRow"><span class="rowTitle">Scheduler -> Monte Carlo</span><span class="badge">FS</span></div>
+                    <div class="listRow"><span class="rowTitle">Monte Carlo -> Trustworthy UI</span><span class="badge">FS</span></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section id="today" class="sectionStack">
+            <div class="pageHeader">
+              <div>
+                <h1>Today and Audit surfaces</h1>
+                <p>Dense Fluent list rows, badges, and message bars instead of custom warning panels.</p>
+              </div>
+            </div>
+            <div class="grid twoColumn">
+              <div class="card">
+                <div class="cardHeader"><h2>Today</h2><span class="badge danger">Overdue</span></div>
+                <div class="cardBody taskList">
+                  <div class="listRow">
+                    <div>
+                      <span class="rowTitle">Define project domain schema</span>
+                      <span class="rowMeta">OmniPlan Personal / Overdue / 5h</span>
+                    </div>
+                    <span class="badge danger">Critical</span>
+                  </div>
+                  <div class="listRow">
+                    <div>
+                      <span class="rowTitle">Implement deterministic scheduler</span>
+                      <span class="rowMeta">Warning: moved quickly but lacks value evidence</span>
+                    </div>
+                    <span class="badge warning">Warning</span>
+                  </div>
+                </div>
+              </div>
+
+              <div class="card">
+                <div class="cardHeader"><h2>Audit</h2><span class="badge danger">Hard gates</span></div>
+                <div class="cardBody taskList">
+                  <div class="messageBar">
+                    <div class="messageIcon">!</div>
+                    <div>
+                      <strong>Baseline change is not approved.</strong>
+                      <span>Attach a Decision Log entry and approve the Change Set after review.</span>
+                    </div>
+                  </div>
+                  <div class="listRow">
+                    <div>
+                      <span class="rowTitle">Contrarian decision</span>
+                      <span class="rowMeta">Narrow until hard gates clear.</span>
+                    </div>
+                    <span class="badge warning">Narrow</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section id="reports" class="sectionStack">
+            <div class="pageHeader">
+              <div>
+                <h1>Reports and Settings</h1>
+                <p>Toolbar actions, neutral previews, and settings fields replace static blocks.</p>
+              </div>
+              <div class="toolbar">
+                <button class="button">Copy Markdown</button>
+                <button class="button primary">Download CSV</button>
+              </div>
+            </div>
+            <div class="grid twoColumn">
+              <div class="card">
+                <div class="cardHeader"><h2>Report preview</h2><span class="badge danger">Not approved</span></div>
+                <div class="cardBody">
+                  <div class="messageBar">
+                    <div class="messageIcon">!</div>
+                    <div>
+                      <strong>3 hard gates must be cleared before approval.</strong>
+                      <span>EVM is available, but milestone evidence and baseline approval are still open.</span>
+                    </div>
+                  </div>
+                  <table class="table" style="margin-top: 16px;">
+                    <tbody>
+                      <tr><td>SPI</td><td>0.82</td></tr>
+                      <tr><td>CPI</td><td>1.09</td></tr>
+                      <tr><td>Monte Carlo P90</td><td>2026-07-10</td></tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+              <div class="card" id="settings">
+                <div class="cardHeader"><h2>Settings</h2><span class="badge warning">Adapters pending</span></div>
+                <div class="cardBody inspector">
+                  <div class="fieldRow"><span>LLM providers</span><span class="badge">OpenAI / Anthropic / Google</span></div>
+                  <div class="fieldRow"><span>GitHub PAT</span><span class="badge warning">Encrypted adapter pending</span></div>
+                  <div class="fieldRow"><span>SQLite-wasm</span><span class="badge warning">Pending</span></div>
+                  <div class="fieldRow"><span>Preview clock</span><span class="badge brand">2026-07-08</span></div>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <p class="previewFooter">
+            Static style preview only. This page shows the intended Fluent 2 visual direction without changing the live React app.
+          </p>
+        </div>
+      </main>
+    </div>
+  </body>
+</html>

@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="OmniPlan Personal">
+  <rect width="128" height="128" rx="24" fill="#20251f"/>
+  <path d="M24 84h80" stroke="#f4f5f2" stroke-width="8" stroke-linecap="round"/>
+  <path d="M32 44h30v24H32zM72 36h24v44H72z" fill="#f0b84f"/>
+  <path d="M47 56h37" stroke="#56a0a6" stroke-width="6" stroke-linecap="round"/>
+  <circle cx="47" cy="56" r="8" fill="#df5d42"/>
+  <circle cx="84" cy="56" r="8" fill="#7aa95c"/>
+</svg>
