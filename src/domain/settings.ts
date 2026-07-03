@@ -14,6 +14,23 @@ export interface GitHubSyncSettings {
   updatedAt?: string;
 }
 
+export interface FirebaseSyncSettings {
+  projectId: string;
+  apiKey: string;
+  databaseId: string;
+  collectionPath: string;
+  workspaceId: string;
+  deviceId: string;
+  autoSyncEnabled: boolean;
+  autoSyncIntervalSeconds: number;
+  autoPushDebounceSeconds: number;
+  lastSyncedRevision?: string;
+  lastSyncedChecksum?: string;
+  lastPulledAt?: string;
+  lastPushedAt?: string;
+  updatedAt?: string;
+}
+
 export interface AiProviderSettings {
   id: string;
   provider: "custom-openai-compatible";
@@ -27,6 +44,7 @@ export interface AiProviderSettings {
 export interface AppSettings {
   schemaVersion: 1;
   githubSync: GitHubSyncSettings;
+  firebaseSync: FirebaseSyncSettings;
   aiProviders: AiProviderSettings[];
 }
 
@@ -37,6 +55,18 @@ export const defaultGitHubSyncSettings: GitHubSyncSettings = {
   rootPath: ".omni-plan",
   workspaceId: "personal",
   deviceId: "current-device"
+};
+
+export const defaultFirebaseSyncSettings: FirebaseSyncSettings = {
+  projectId: "",
+  apiKey: "",
+  databaseId: "(default)",
+  collectionPath: "omniPlanSync",
+  workspaceId: "personal",
+  deviceId: "current-device",
+  autoSyncEnabled: false,
+  autoSyncIntervalSeconds: 45,
+  autoPushDebounceSeconds: 8
 };
 
 export const defaultCustomAiProviderSettings: AiProviderSettings = {
@@ -50,6 +80,7 @@ export const defaultCustomAiProviderSettings: AiProviderSettings = {
 export const defaultAppSettings: AppSettings = {
   schemaVersion: 1,
   githubSync: defaultGitHubSyncSettings,
+  firebaseSync: defaultFirebaseSyncSettings,
   aiProviders: [defaultCustomAiProviderSettings]
 };
 
@@ -66,7 +97,8 @@ export class BrowserAppSettingsRepository {
     return {
       schemaVersion: 1,
       githubSync: { ...defaultGitHubSyncSettings, ...parsed.githubSync },
-      aiProviders: parsed.aiProviders.length ? parsed.aiProviders : [defaultCustomAiProviderSettings]
+      firebaseSync: { ...defaultFirebaseSyncSettings, ...parsed.firebaseSync },
+      aiProviders: parsed.aiProviders?.length ? parsed.aiProviders : [defaultCustomAiProviderSettings]
     };
   }
 

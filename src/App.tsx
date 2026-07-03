@@ -21,7 +21,7 @@ import {
   Workflow,
   Zap
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type PointerEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent, type ReactNode } from "react";
 import { Navigate, Route, Routes, useNavigate, useParams } from "react-router-dom";
 import { evaluateAuditGates, recommendAuditDecision } from "./domain/audit";
 import { calculateEvm } from "./domain/evm";
@@ -31,17 +31,33 @@ import { runMonteCarlo } from "./domain/monteCarlo";
 import { calculateProjectHealth } from "./domain/portfolio";
 import {
   detectCrossProjectOverload,
-  generateLevelingProposals,
-  schedulePortfolio,
-  scheduleProject
+  generateLevelingProposals
 } from "./domain/scheduler";
 import { sampleWorkspace } from "./domain/sampleData";
-import { BrowserEncryptedSecretVault, browserSecretVaultStatus, encryptProviderSecret } from "./domain/secrets";
+import { BrowserEncryptedSecretVault, BrowserRememberedPassphraseVault, browserSecretVaultStatus, encryptProviderSecret } from "./domain/secrets";
+import {
+  buildShapeUpBet,
+  canBetShapeUpProject,
+  confirmedShapeUpScopes,
+  createShapeUpPitch,
+  executableDependenciesForItems,
+  isShapeUpBet,
+  isShapeUpCycleExpired,
+  isShapeUpPitchComplete,
+  isShapeUpProject,
+  scheduleShapeUpAwareProject,
+  scheduleShapeUpAwarePortfolio,
+  shapeUpAppetiteDays,
+  shapeUpMissingBetRequirements,
+  shapeUpScopeStatus
+} from "./domain/shapeUp";
 import {
   BrowserAppSettingsRepository,
   defaultCustomAiProviderSettings,
   providerSecretSummary,
+  type AppSettings,
   type AiProviderSettings,
+  type FirebaseSyncSettings,
   type GitHubSyncSettings
 } from "./domain/settings";
 import { BrowserWorkspaceRepository, browserWorkspaceStorageStatus } from "./domain/storage";
@@ -50,9 +66,14 @@ import {
   buildGitHubSyncPaths,
   createSyncChangeEnvelope,
   createSyncManifest,
+  FirebaseE2eeSyncClient,
+  firebaseE2eeSyncStatus,
   githubPrivateRepoSyncStatus,
   githubSyncCommitMessage,
   GitHubPrivateRepoSyncClient,
+  workspacePlaintextChecksum,
+  type FirebaseAnonymousSession,
+  type FirebaseE2eeSyncConfig,
   type GitHubSyncConfig,
   type SyncManifest
 } from "./domain/sync";
@@ -73,6 +94,9 @@ import type {
   ProjectStatus,
   ScheduleResult,
   ScheduledItem,
+  ShapeUpAppetiteKind,
+  ShapeUpPitch,
+  ShapeUpScope,
   WorkItem,
   WorkItemKind,
   WorkspaceSnapshot
@@ -103,23 +127,24 @@ const projectStatuses: ProjectStatus[] = ["active", "waiting", "paused", "done",
 const auditActions: AuditAction[] = ["Accelerate", "Continue", "Narrow", "Pivot", "Stop"];
 const evidenceKinds: EvidenceKind[] = ["note", "commit", "pr", "ci", "doc", "screenshot", "release", "feedback", "metric", "email", "calendar", "minutes", "booking"];
 
+type AutoSyncState = "disabled" | "locked" | "ready" | "pending" | "syncing" | "conflict" | "error";
+
+interface AutoSyncStatus {
+  state: AutoSyncState;
+  message: string;
+  lastRunAt?: string;
+  lastPulledAt?: string;
+  lastPushedAt?: string;
+}
+
 type DependencyPatch = Partial<Pick<Dependency, "type" | "lagSeconds">>;
 
 interface ProjectCreateValues {
   name: string;
   mode: ProjectMode;
   startDate: string;
-  horizonDate: string;
-  northStar: string;
-  currentOutcome: string;
-  targetUser: string;
   userProblem: string;
-  coreHypothesis: string;
-  successMetric: string;
-  failureCondition: string;
-  validationMethod: string;
-  timeboxDays: number;
-  opportunityCost: string;
+  appetiteKind: ShapeUpAppetiteKind;
 }
 
 interface WorkItemCreateValues {
@@ -248,6 +273,21 @@ function uniqueId(prefix: string, seed: string, existingIds: Iterable<string>) {
   let index = 2;
   while (existing.has(`${base}-${index}`)) index += 1;
   return `${base}-${index}`;
+}
+
+function firebaseSettingsReady(settings: FirebaseSyncSettings) {
+  return Boolean(settings.projectId.trim() && settings.apiKey.trim() && settings.workspaceId.trim());
+}
+
+function firebaseConfigFromSettings(settings: FirebaseSyncSettings): FirebaseE2eeSyncConfig {
+  return {
+    projectId: settings.projectId.trim(),
+    apiKey: settings.apiKey.trim(),
+    databaseId: settings.databaseId.trim() || "(default)",
+    collectionPath: settings.collectionPath.trim() || "omniPlanSync",
+    workspaceId: settings.workspaceId.trim() || "personal",
+    deviceId: settings.deviceId.trim() || "current-device"
+  };
 }
 
 function toUtcStart(date: string) {
@@ -437,19 +477,193 @@ function RoutedApp() {
   const routerNavigate = useNavigate();
   const route = routeFromParams(params);
   const workspaceRepository = useMemo(() => new BrowserWorkspaceRepository(), []);
+  const settingsRepository = useMemo(() => new BrowserAppSettingsRepository(), []);
+  const rememberedPassphraseVault = useMemo(() => new BrowserRememberedPassphraseVault(), []);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [focusedWorkItemId, setFocusedWorkItemId] = useState<string | undefined>();
   const [workspace, setWorkspace] = useState(sampleWorkspace);
+  const [appSettings, setAppSettings] = useState<AppSettings>(() => settingsRepository.load());
+  const [sessionPassphrase, setSessionPassphrase] = useState("");
+  const [rememberedPassphraseSavedAt, setRememberedPassphraseSavedAt] = useState<string | undefined>();
+  const [rememberedPassphraseLoaded, setRememberedPassphraseLoaded] = useState(false);
+  const [autoSyncStatus, setAutoSyncStatus] = useState<AutoSyncStatus>({
+    state: appSettings.firebaseSync.autoSyncEnabled ? "locked" : "disabled",
+    message: appSettings.firebaseSync.autoSyncEnabled ? "Auto sync is enabled. Enter the workspace passphrase to unlock this browser session." : "Auto sync is off."
+  });
   const [workspacePersistence, setWorkspacePersistence] = useState({
     loaded: false,
     status: "Loading local workspace...",
     lastSavedAt: ""
   });
   const pageTitleRef = useRef<HTMLHeadingElement>(null);
+  const workspaceRef = useRef(workspace);
+  const appSettingsRef = useRef(appSettings);
+  const sessionPassphraseRef = useRef(sessionPassphrase);
+  const autoSyncBusyRef = useRef(false);
+  const autoPushTimerRef = useRef<number | undefined>();
+  const firebaseSessionRef = useRef<FirebaseAnonymousSession | undefined>();
+  const suppressNextAutoPushRef = useRef(false);
   const view = route.view;
   const selectedProject = workspace.projects.find((project) => project.id === route.selectedProjectId) ?? workspace.projects[0] ?? sampleWorkspace.projects[0];
   const selectedProjectId = selectedProject.id;
+
+  useEffect(() => {
+    workspaceRef.current = workspace;
+  }, [workspace]);
+
+  useEffect(() => {
+    appSettingsRef.current = appSettings;
+  }, [appSettings]);
+
+  useEffect(() => {
+    sessionPassphraseRef.current = sessionPassphrase;
+  }, [sessionPassphrase]);
+
+  useEffect(() => {
+    let active = true;
+    void rememberedPassphraseVault.read().then((record) => {
+      if (!active) return;
+      if (record?.passphrase) {
+        setSessionPassphrase(record.passphrase);
+        setRememberedPassphraseSavedAt(record.savedAt);
+      }
+      setRememberedPassphraseLoaded(true);
+    }).catch(() => {
+      if (!active) return;
+      setRememberedPassphraseLoaded(true);
+    });
+    return () => {
+      active = false;
+    };
+  }, [rememberedPassphraseVault]);
+
+  const saveAppSettings = useCallback((nextSettings: AppSettings) => {
+    settingsRepository.save(nextSettings);
+    appSettingsRef.current = nextSettings;
+    setAppSettings(nextSettings);
+  }, [settingsRepository]);
+
+  const rememberSessionPassphrase = useCallback(async () => {
+    const passphrase = sessionPassphraseRef.current.trim();
+    if (!passphrase) throw new Error("Enter the workspace passphrase before remembering it.");
+    const record = await rememberedPassphraseVault.save(passphrase, timestamp());
+    setRememberedPassphraseSavedAt(record.savedAt);
+    setSessionPassphrase(record.passphrase);
+    return record;
+  }, [rememberedPassphraseVault]);
+
+  const forgetRememberedPassphrase = useCallback(async () => {
+    await rememberedPassphraseVault.clear();
+    setRememberedPassphraseSavedAt(undefined);
+  }, [rememberedPassphraseVault]);
+
+  const updateFirebaseSyncSettings = useCallback((patch: Partial<FirebaseSyncSettings>) => {
+    const current = appSettingsRef.current;
+    const nextSettings = {
+      ...current,
+      firebaseSync: {
+        ...current.firebaseSync,
+        ...patch,
+        updatedAt: timestamp()
+      }
+    };
+    saveAppSettings(nextSettings);
+  }, [saveAppSettings]);
+
+  const runFirebaseAutoSync = useCallback(async (intent: "poll" | "push") => {
+    const settings = appSettingsRef.current.firebaseSync;
+    if (!settings.autoSyncEnabled) {
+      setAutoSyncStatus({ state: "disabled", message: "Auto sync is off." });
+      return;
+    }
+    if (!firebaseSettingsReady(settings)) {
+      setAutoSyncStatus({ state: "disabled", message: "Auto sync needs Firebase Project ID, Web API key, and Workspace ID." });
+      return;
+    }
+    const passphrase = sessionPassphraseRef.current.trim();
+    if (!passphrase) {
+      setAutoSyncStatus({ state: "locked", message: "Auto sync is enabled but locked. Enter the workspace passphrase in Settings." });
+      return;
+    }
+    if (autoSyncBusyRef.current) return;
+
+    autoSyncBusyRef.current = true;
+    const startedAt = timestamp();
+    setAutoSyncStatus({ state: "syncing", message: intent === "push" ? "Auto sync is preparing encrypted push." : "Auto sync is checking Firebase.", lastRunAt: startedAt });
+
+    try {
+      const client = new FirebaseE2eeSyncClient(firebaseConfigFromSettings(settings));
+      const session = firebaseSessionRef.current ?? await client.signInAnonymously();
+      firebaseSessionRef.current = session;
+      const manifest = await client.readManifest(session);
+      const localChecksum = await workspacePlaintextChecksum(workspaceRef.current);
+      const latestSettings = appSettingsRef.current.firebaseSync;
+      const localDirty = Boolean(latestSettings.lastSyncedChecksum && localChecksum !== latestSettings.lastSyncedChecksum);
+      const remoteRevision = manifest?.latestRevision;
+      const remoteAdvanced = Boolean(remoteRevision && remoteRevision !== latestSettings.lastSyncedRevision);
+
+      if (remoteAdvanced && localDirty) {
+        setAutoSyncStatus({
+          state: "conflict",
+          message: `Remote revision ${remoteRevision!.slice(0, 12)} and local workspace both changed. Pull or push manually after review.`,
+          lastRunAt: startedAt
+        });
+        return;
+      }
+
+      if (remoteAdvanced) {
+        const result = await client.pullWorkspaceSnapshot(passphrase, session);
+        suppressNextAutoPushRef.current = true;
+        workspaceRef.current = result.workspace;
+        setWorkspace(result.workspace);
+        const pulledChecksum = await workspacePlaintextChecksum(result.workspace);
+        updateFirebaseSyncSettings({
+          lastSyncedRevision: result.manifest.latestRevision,
+          lastSyncedChecksum: pulledChecksum,
+          lastPulledAt: timestamp()
+        });
+        setAutoSyncStatus({
+          state: "ready",
+          message: `Auto-pulled Firebase revision ${result.manifest.latestRevision.slice(0, 12)}.`,
+          lastRunAt: startedAt,
+          lastPulledAt: timestamp()
+        });
+        return;
+      }
+
+      if (!manifest || localDirty || (intent === "push" && !latestSettings.lastSyncedRevision)) {
+        const result = await client.pushWorkspaceSnapshot(workspaceRef.current, passphrase, session, manifest);
+        const pushedChecksum = await workspacePlaintextChecksum(workspaceRef.current);
+        updateFirebaseSyncSettings({
+          lastSyncedRevision: result.manifest.latestRevision,
+          lastSyncedChecksum: pushedChecksum,
+          lastPushedAt: result.manifest.updatedAt
+        });
+        setAutoSyncStatus({
+          state: "ready",
+          message: `Auto-pushed Firebase revision ${result.manifest.latestRevision.slice(0, 12)}.`,
+          lastRunAt: startedAt,
+          lastPushedAt: result.manifest.updatedAt
+        });
+        return;
+      }
+
+      setAutoSyncStatus({
+        state: "ready",
+        message: remoteRevision ? `Auto sync is up to date at ${remoteRevision.slice(0, 12)}.` : "Auto sync is ready; no remote workspace exists yet.",
+        lastRunAt: startedAt
+      });
+    } catch (error) {
+      setAutoSyncStatus({
+        state: "error",
+        message: `Auto sync failed: ${error instanceof Error ? error.message : "unknown error"}`,
+        lastRunAt: startedAt
+      });
+    } finally {
+      autoSyncBusyRef.current = false;
+    }
+  }, [updateFirebaseSyncSettings]);
 
   useEffect(() => {
     let active = true;
@@ -479,6 +693,87 @@ function RoutedApp() {
       setWorkspacePersistence((current) => ({ ...current, status: `Workspace save failed: ${error instanceof Error ? error.message : "unknown error"}` }));
     });
   }, [workspace, workspacePersistence.loaded, workspaceRepository]);
+
+  useEffect(() => {
+    if (!workspacePersistence.loaded) return;
+    setWorkspace((previous) => {
+      const checkedAt = timestamp();
+      const expired = previous.projects.filter((project) => isShapeUpCycleExpired(project, checkedAt));
+      if (!expired.length) return previous;
+      return {
+        ...previous,
+        projects: previous.projects.map((project) => expired.some((candidate) => candidate.id === project.id) ? { ...project, status: "paused" } : project),
+        changeSets: [
+          ...expired.map((project, index) => createChangeSet(
+            project.id,
+            `Pause ${project.name} at Shape Up circuit breaker`,
+            "Circuit breaker expired. Choose Ship as-is, Cut scope, Kill, or Re-bet before continuing.",
+            [{ entity: "Project", entityId: project.id, field: "status", before: project.status, after: "paused" }],
+            previous.changeSets.length + index
+          )),
+          ...previous.changeSets
+        ]
+      };
+    });
+  }, [workspace.projects, workspacePersistence.loaded]);
+
+  useEffect(() => {
+    const settings = appSettings.firebaseSync;
+    if (!settings.autoSyncEnabled) {
+      setAutoSyncStatus({ state: "disabled", message: "Auto sync is off." });
+      return;
+    }
+    if (!firebaseSettingsReady(settings)) {
+      setAutoSyncStatus({ state: "disabled", message: "Auto sync needs Firebase Project ID, Web API key, and Workspace ID." });
+      return;
+    }
+    if (!sessionPassphrase.trim()) {
+      setAutoSyncStatus({ state: "locked", message: "Auto sync is enabled but locked. Enter the workspace passphrase in Settings." });
+      return;
+    }
+
+    void runFirebaseAutoSync("poll");
+    const intervalMs = Math.max(15, settings.autoSyncIntervalSeconds || 45) * 1000;
+    const intervalId = window.setInterval(() => {
+      void runFirebaseAutoSync("poll");
+    }, intervalMs);
+    return () => window.clearInterval(intervalId);
+  }, [
+    appSettings.firebaseSync.projectId,
+    appSettings.firebaseSync.apiKey,
+    appSettings.firebaseSync.databaseId,
+    appSettings.firebaseSync.collectionPath,
+    appSettings.firebaseSync.workspaceId,
+    appSettings.firebaseSync.deviceId,
+    appSettings.firebaseSync.autoSyncEnabled,
+    appSettings.firebaseSync.autoSyncIntervalSeconds,
+    sessionPassphrase,
+    runFirebaseAutoSync
+  ]);
+
+  useEffect(() => {
+    if (!workspacePersistence.loaded) return;
+    const settings = appSettings.firebaseSync;
+    if (!settings.autoSyncEnabled || !firebaseSettingsReady(settings) || !sessionPassphrase.trim()) return;
+    if (suppressNextAutoPushRef.current) {
+      suppressNextAutoPushRef.current = false;
+      return;
+    }
+
+    if (autoPushTimerRef.current) window.clearTimeout(autoPushTimerRef.current);
+    const debounceMs = Math.max(3, settings.autoPushDebounceSeconds || 8) * 1000;
+    setAutoSyncStatus((current) => ({
+      ...current,
+      state: current.state === "conflict" || current.state === "error" ? current.state : "pending",
+      message: current.state === "conflict" || current.state === "error" ? current.message : `Local changes will auto-push in ${Math.round(debounceMs / 1000)}s.`
+    }));
+    autoPushTimerRef.current = window.setTimeout(() => {
+      void runFirebaseAutoSync("push");
+    }, debounceMs);
+    return () => {
+      if (autoPushTimerRef.current) window.clearTimeout(autoPushTimerRef.current);
+    };
+  }, [workspace, workspacePersistence.loaded, appSettings.firebaseSync.autoSyncEnabled, appSettings.firebaseSync.autoPushDebounceSeconds, sessionPassphrase, runFirebaseAutoSync, appSettings.firebaseSync.projectId, appSettings.firebaseSync.apiKey, appSettings.firebaseSync.workspaceId]);
 
   useEffect(() => {
     pageTitleRef.current?.focus({ preventScroll: true });
@@ -553,58 +848,51 @@ function RoutedApp() {
   };
 
   const createProject = (values: ProjectCreateValues) => {
-    const name = values.name.trim();
-    if (!name) return;
+    const problem = values.userProblem.trim();
+    if (!problem) return;
+    const name = values.name.trim() || problem.split(/\s+/).slice(0, 8).join(" ");
     const projectId = uniqueId("p", name, workspace.projects.map((project) => project.id));
     const createdAt = timestamp();
+    const appetiteDays = shapeUpAppetiteDays[values.appetiteKind];
+    const shapeUpPitch = createShapeUpPitch({
+      problem,
+      appetiteKind: values.appetiteKind,
+      now: createdAt
+    });
     const directionCard: DirectionCard = {
-      targetUser: values.targetUser.trim(),
-      userProblem: values.userProblem.trim(),
-      businessGoal: values.currentOutcome.trim(),
-      coreHypothesis: values.coreHypothesis.trim(),
-      successMetric: values.successMetric.trim(),
-      failureCondition: values.failureCondition.trim(),
-      validationMethod: values.validationMethod.trim(),
-      timeboxDays: Math.max(1, Math.round(values.timeboxDays || 14)),
-      opportunityCost: values.opportunityCost.trim()
+      targetUser: "Personal project operator",
+      userProblem: problem,
+      businessGoal: "Shape the project before committing execution time.",
+      coreHypothesis: "",
+      successMetric: "",
+      failureCondition: "Betting Gate cannot be approved with missing Shape Up pitch fields.",
+      validationMethod: "Complete the Shape Up Pitch and review it at the Betting Gate.",
+      timeboxDays: appetiteDays,
+      opportunityCost: ""
     };
     const project: Project = {
       id: projectId,
       name,
-      status: "active",
+      status: "waiting",
       mode: values.mode,
       priority: 3,
-      northStar: values.northStar.trim() || `Deliver ${name} with evidence-backed direction control.`,
-      currentOutcome: values.currentOutcome.trim() || "Create the first trustworthy milestone plan.",
-      horizon: toUtcStart(values.horizonDate),
+      northStar: `Shape ${name} into a bounded bet before execution.`,
+      currentOutcome: "Complete the Shape Up pitch and decide whether to bet.",
+      horizon: addSeconds(toUtcStart(values.startDate), appetiteDays * daySeconds),
       start: toUtcStart(values.startDate),
       directionCard,
+      shapeUpPitch,
       reviewCadenceDays: 7
-    };
-    const firstTaskId = uniqueId("w", `${name} first milestone`, workspace.workItems.map((item) => item.id));
-    const firstTask: WorkItem = {
-      id: firstTaskId,
-      projectId,
-      kind: "milestone",
-      title: "First evidence review",
-      outline: "1",
-      durationSeconds: 0,
-      estimate: { mostLikelySeconds: 0 },
-      assignmentIds: [],
-      percentComplete: 0,
-      evidenceRequired: true,
-      isKeyTask: true
     };
     setWorkspace((previous) => ({
       ...previous,
       projects: [project, ...previous.projects],
-      workItems: [firstTask, ...previous.workItems],
       changeSets: [
         createChangeSet(
           projectId,
-          `Create project ${name}`,
-          "Created from the portfolio project wizard.",
-          [{ entity: "Project", entityId: projectId, field: "created", before: null, after: { name, createdAt } }],
+          `Create Shape Up project ${name}`,
+          "Created as a waiting Shape Up pitch. It cannot enter execution until the Betting Gate is approved.",
+          [{ entity: "Project", entityId: projectId, field: "created", before: null, after: { name, createdAt, status: "waiting", appetiteDays } }],
           previous.changeSets.length
         ),
         ...previous.changeSets
@@ -626,6 +914,146 @@ function RoutedApp() {
             `Update direction card for ${project.name}`,
             "Edited project-level Direction Card.",
             [{ entity: "Project", entityId: projectId, field: "directionCard", before: project.directionCard ?? null, after: directionCard }],
+            previous.changeSets.length
+          ),
+          ...previous.changeSets
+        ]
+      };
+    });
+  };
+
+  const updateShapeUpPitch = (projectId: string, pitch: ShapeUpPitch) => {
+    setWorkspace((previous) => {
+      const project = previous.projects.find((candidate) => candidate.id === projectId);
+      if (!project) return previous;
+      const nextPitch = { ...pitch, updatedAt: timestamp() };
+      return {
+        ...previous,
+        projects: previous.projects.map((candidate) => candidate.id === projectId ? { ...candidate, shapeUpPitch: nextPitch } : candidate),
+        changeSets: [
+          createChangeSet(
+            projectId,
+            `Update Shape Up pitch for ${project.name}`,
+            "Edited Shape Up pitch fields, scopes, or hill positions.",
+            [{ entity: "Project", entityId: projectId, field: "shapeUpPitch", before: project.shapeUpPitch ?? null, after: nextPitch }],
+            previous.changeSets.length
+          ),
+          ...previous.changeSets
+        ]
+      };
+    });
+  };
+
+  const convertProjectToShapeUp = (projectId: string) => {
+    setWorkspace((previous) => {
+      const project = previous.projects.find((candidate) => candidate.id === projectId);
+      if (!project || project.shapeUpPitch) return previous;
+      const createdAt = timestamp();
+      const shapeUpPitch = createShapeUpPitch({
+        problem: project.directionCard?.userProblem || project.currentOutcome,
+        appetiteKind: "small-batch",
+        solutionSketch: "",
+        rabbitHoles: "",
+        noGos: "",
+        successBaseline: project.directionCard?.successMetric || "",
+        now: createdAt
+      });
+      const nextProject = {
+        ...project,
+        status: "waiting" as ProjectStatus,
+        currentOutcome: "Complete the Shape Up pitch and decide whether to bet.",
+        shapeUpPitch
+      };
+      return {
+        ...previous,
+        projects: previous.projects.map((candidate) => candidate.id === projectId ? nextProject : candidate),
+        changeSets: [
+          createChangeSet(
+            projectId,
+            `Convert ${project.name} to Shape Up`,
+            "Converted existing project into a waiting Shape Up pitch. Existing work remains stored but is not executable until bet rules allow it.",
+            [{ entity: "Project", entityId: projectId, field: "shapeUpPitch", before: null, after: shapeUpPitch }],
+            previous.changeSets.length
+          ),
+          ...previous.changeSets
+        ]
+      };
+    });
+  };
+
+  const approveShapeUpBet = (projectId: string) => {
+    setWorkspace((previous) => {
+      const project = previous.projects.find((candidate) => candidate.id === projectId);
+      if (!project || !canBetShapeUpProject(project)) return previous;
+      const approvedAt = timestamp();
+      const auditDecisionId = `decision-shapeup-bet-${projectId}-${approvedAt}`;
+      const bet = buildShapeUpBet(project, auditDecisionId, approvedAt);
+      const nextPitch: ShapeUpPitch = { ...project.shapeUpPitch!, bet, updatedAt: approvedAt };
+      const nextProject: Project = {
+        ...project,
+        status: "active",
+        currentOutcome: `Build the approved Shape Up bet by ${bet.cycleEnd.slice(0, 10)}.`,
+        horizon: bet.cycleEnd,
+        shapeUpPitch: nextPitch
+      };
+      const existingScopeIds = new Set(previous.workItems.filter((item) => item.projectId === projectId && item.shapeUpScopeId).map((item) => item.shapeUpScopeId));
+      const existingIds = previous.workItems.map((item) => item.id);
+      const confirmedScopes = confirmedShapeUpScopes(nextProject);
+      const scopeWorkItems: WorkItem[] = confirmedScopes
+        .filter((scope) => !existingScopeIds.has(scope.id))
+        .map((scope, index) => ({
+          id: uniqueId("w", `${project.name} ${scope.id}`, existingIds),
+          projectId,
+          kind: "phase",
+          title: `Scope: ${scope.title}`,
+          outline: String(index + 1),
+          durationSeconds: 0,
+          estimate: { mostLikelySeconds: 0 },
+          assignmentIds: [],
+          percentComplete: 0,
+          shapeUpScopeId: scope.id
+        }));
+      const cycleMarkerId = uniqueId("w", `${project.name} circuit breaker`, [...previous.workItems.map((item) => item.id), ...scopeWorkItems.map((item) => item.id)]);
+      const cycleMarker: WorkItem = {
+        id: cycleMarkerId,
+        projectId,
+        kind: "milestone",
+        title: "Circuit breaker / ship decision",
+        outline: String(scopeWorkItems.length + 1),
+        durationSeconds: 0,
+        estimate: { mostLikelySeconds: 0 },
+        constraint: { fixedFinish: bet.circuitBreakerAt },
+        assignmentIds: [],
+        percentComplete: 0,
+        evidenceRequired: true,
+        isKeyTask: true,
+        isShapeUpCycleMarker: true
+      };
+      const auditDecision: AuditDecision = {
+        id: auditDecisionId,
+        projectId,
+        action: "Continue",
+        strongestContinueEvidence: nextPitch.successBaseline,
+        strongestStopReason: nextPitch.noGos,
+        rationale: `Human-approved Shape Up bet. Appetite is ${nextPitch.appetiteDays} days; scope is variable inside fixed time.`,
+        createdAt: approvedAt,
+        sourceGateIds: [`gate-shapeup-bet-${projectId}`]
+      };
+
+      return {
+        ...previous,
+        projects: previous.projects.map((candidate) => candidate.id === projectId ? nextProject : candidate),
+        workItems: [cycleMarker, ...scopeWorkItems, ...previous.workItems],
+        auditDecisions: [auditDecision, ...previous.auditDecisions],
+        changeSets: [
+          createChangeSet(
+            projectId,
+            `Approve Shape Up bet for ${project.name}`,
+            "Human-approved Betting Gate changed the project from waiting to active and generated Shape Up execution scaffolding.",
+            [
+              { entity: "Project", entityId: projectId, field: "status", before: project.status, after: "active" },
+              { entity: "Project", entityId: projectId, field: "shapeUpPitch.bet", before: null, after: bet }
+            ],
             previous.changeSets.length
           ),
           ...previous.changeSets
@@ -662,6 +1090,7 @@ function RoutedApp() {
       const id = uniqueId("w", title, previous.workItems.map((item) => item.id));
       const durationSeconds = values.kind === "milestone" ? 0 : daysToSeconds(values.durationDays);
       const resourceId = previous.resources[0]?.id;
+      const parent = values.parentId ? previous.workItems.find((item) => item.id === values.parentId) : undefined;
       const workItem: WorkItem = {
         id,
         projectId,
@@ -681,7 +1110,8 @@ function RoutedApp() {
         evidenceRequired: values.evidenceRequired,
         isKeyTask: values.isKeyTask,
         isScopeExpansion: values.isScopeExpansion,
-        isFastDelivery: values.isFastDelivery
+        isFastDelivery: values.isFastDelivery,
+        shapeUpScopeId: parent?.shapeUpScopeId
       };
       return {
         ...previous,
@@ -1096,7 +1526,7 @@ function RoutedApp() {
   }, [searchQuery, workspace]);
 
   const model = useMemo(() => {
-    const schedules = schedulePortfolio(workspace.projects, workspace.workItems, workspace.dependencies);
+    const schedules = scheduleShapeUpAwarePortfolio(workspace.projects, workspace.workItems, workspace.dependencies);
     const calculatedGates = workspace.projects.flatMap((project) => {
       const schedule = schedules.find((candidate) => candidate.projectId === project.id);
       return evaluateAuditGates(
@@ -1127,7 +1557,13 @@ function RoutedApp() {
     return { schedules, gates, decisions, health, overloads, leveling };
   }, [workspace]);
 
-  const selectedSchedule = model.schedules.find((schedule) => schedule.projectId === selectedProject.id) ?? scheduleProject(selectedProject, workspace.workItems, workspace.dependencies);
+  const selectedSchedule = model.schedules.find((schedule) => schedule.projectId === selectedProject.id) ?? scheduleShapeUpAwarePortfolio([selectedProject], workspace.workItems, workspace.dependencies)[0];
+  const selectedDependencies = isShapeUpProject(selectedProject)
+    ? executableDependenciesForItems(
+      workspace.dependencies.filter((dependency) => dependency.projectId === selectedProject.id),
+      selectedSchedule.items.map((item) => item.workItem)
+    )
+    : workspace.dependencies.filter((dependency) => dependency.projectId === selectedProject.id);
   const selectedBaseline = workspace.baselines.find((baseline) => baseline.projectId === selectedProject.id);
   const selectedApprovedBaseline = isBaselineApproved(selectedBaseline, workspace.changeSets) ? selectedBaseline : undefined;
   const selectedGates = model.gates.filter((gate) => gate.projectId === selectedProject.id);
@@ -1269,7 +1705,7 @@ function RoutedApp() {
             project={selectedProject}
             baseline={selectedBaseline}
             baselineApproved={isBaselineApproved(selectedBaseline, workspace.changeSets)}
-            dependencies={workspace.dependencies.filter((dependency) => dependency.projectId === selectedProject.id)}
+            dependencies={selectedDependencies}
             schedule={selectedSchedule}
             gates={selectedGates}
             health={model.health.find((item) => item.projectId === selectedProject.id)}
@@ -1277,6 +1713,9 @@ function RoutedApp() {
             onProjectChange={(projectId) => navigate("project", projectId)}
             onProjectStatusUpdate={updateProjectStatus}
             onDirectionCardUpdate={updateDirectionCard}
+            onShapeUpPitchUpdate={updateShapeUpPitch}
+            onShapeUpBetApprove={approveShapeUpBet}
+            onShapeUpConvert={convertProjectToShapeUp}
             onWorkItemCreate={createWorkItem}
             onDependencyCreate={createDependency}
             onEvidenceCreate={createEvidence}
@@ -1340,6 +1779,15 @@ function RoutedApp() {
             workspace={workspace}
             schedules={model.schedules}
             gates={model.gates}
+            settings={appSettings}
+            onSettingsSave={saveAppSettings}
+            sessionPassphrase={sessionPassphrase}
+            onSessionPassphraseChange={setSessionPassphrase}
+            rememberedPassphraseLoaded={rememberedPassphraseLoaded}
+            rememberedPassphraseSavedAt={rememberedPassphraseSavedAt}
+            onRememberPassphrase={rememberSessionPassphrase}
+            onForgetRememberedPassphrase={forgetRememberedPassphrase}
+            autoSyncStatus={autoSyncStatus}
             workspacePersistence={workspacePersistence}
             onWorkspaceImport={(nextWorkspace) => setWorkspace(nextWorkspace)}
             onWorkspaceReset={() => setWorkspace(sampleWorkspace)}
@@ -1426,6 +1874,26 @@ function PortfolioDashboard({
   });
   const openHardGates = gates.filter((gate) => gate.severity === "hard" && gate.status !== "cleared").length;
   const criticalCount = schedules.reduce((sum, schedule) => sum + schedule.items.filter((item) => item.isCritical).length, 0);
+  const activeDeliveryProjects = projects.filter((project) => project.status === "active" && (!isShapeUpProject(project) || isShapeUpBet(project)));
+  const shapeUpProjects = projects.filter(isShapeUpProject);
+  const shapeUpStreams = [
+    {
+      label: "Shaping",
+      projects: shapeUpProjects.filter((project) => project.status === "waiting" && !isShapeUpPitchComplete(project.shapeUpPitch))
+    },
+    {
+      label: "Betting",
+      projects: shapeUpProjects.filter((project) => project.status === "waiting" && isShapeUpPitchComplete(project.shapeUpPitch))
+    },
+    {
+      label: "Building",
+      projects: shapeUpProjects.filter((project) => project.status === "active")
+    },
+    {
+      label: "Circuit Breaker",
+      projects: shapeUpProjects.filter((project) => project.status === "paused")
+    }
+  ];
   const focusProject = sorted[0];
   const focusHealth = health.find((item) => item.projectId === focusProject.id);
   const focusSchedule = schedules.find((schedule) => schedule.projectId === focusProject.id);
@@ -1451,7 +1919,7 @@ function PortfolioDashboard({
         <Metric
           icon={<Layers3 />}
           label="Active projects"
-          value={projects.filter((project) => project.status === "active").length}
+          value={activeDeliveryProjects.length}
           detail="Open focus list"
           href={hashForRoute({ view: "portfolio", selectedProjectId: focusProject.id, target: "portfolio-focus-list" })}
         />
@@ -1479,6 +1947,34 @@ function PortfolioDashboard({
           href={hashForRoute({ view: "audit", selectedProjectId: focusProject.id, target: "leveling-proposals" })}
         />
       </div>
+
+      <Card id="shape-up-streams">
+        <CardHeader className="pb-3">
+          <CardTitle className="flex items-center gap-2"><Target className="h-4 w-4" /> Shape Up Flow</CardTitle>
+          <CardDescription>Unbet projects are excluded from active delivery until a human approves the Betting Gate.</CardDescription>
+        </CardHeader>
+        <CardContent className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+          {shapeUpStreams.map((stream) => (
+            <div key={stream.label} className="rounded-lg border bg-background p-3">
+              <div className="mb-3 flex items-center justify-between gap-2">
+                <h3 className="text-sm font-semibold">{stream.label}</h3>
+                <Badge variant={stream.projects.length ? "secondary" : "outline"}>{stream.projects.length}</Badge>
+              </div>
+              <div className="grid gap-2">
+                {stream.projects.slice(0, 3).map((project) => (
+                  <a key={project.id} className="rounded-md border bg-muted/30 p-2 text-sm hover:bg-accent/50" href={hashForRoute({ view: "project", selectedProjectId: project.id, target: "shape-up" })}>
+                    <strong className="block truncate">{project.name}</strong>
+                    <span className="text-xs text-muted-foreground">
+                      {project.shapeUpPitch?.bet ? `ends ${project.shapeUpPitch.bet.cycleEnd.slice(0, 10)}` : `${shapeUpMissingBetRequirements(project).length} pitch gaps`}
+                    </span>
+                  </a>
+                ))}
+                {!stream.projects.length && <span className="rounded-md border border-dashed p-2 text-xs text-muted-foreground">No projects</span>}
+              </div>
+            </div>
+          ))}
+        </CardContent>
+      </Card>
 
       <Card>
         <CardHeader className="pb-3">
@@ -1651,26 +2147,17 @@ function CreateProjectSheet({ onCreate }: { onCreate: (values: ProjectCreateValu
     name: "",
     mode: "build",
     startDate: today,
-    horizonDate: addSeconds(`${today}T00:00:00.000Z`, 30 * daySeconds).slice(0, 10),
-    northStar: "",
-    currentOutcome: "",
-    targetUser: "",
     userProblem: "",
-    coreHypothesis: "",
-    successMetric: "",
-    failureCondition: "",
-    validationMethod: "",
-    timeboxDays: 14,
-    opportunityCost: ""
+    appetiteKind: "small-batch"
   });
   const update = (patch: Partial<ProjectCreateValues>) => setDraft((current) => ({ ...current, ...patch }));
 
   const submit = (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (!draft.name.trim()) return;
+    if (!draft.userProblem.trim()) return;
     onCreate(draft);
     setOpen(false);
-    setDraft((current) => ({ ...current, name: "", northStar: "", currentOutcome: "", targetUser: "", userProblem: "", coreHypothesis: "", successMetric: "", failureCondition: "", validationMethod: "", opportunityCost: "", timeboxDays: 14 }));
+    setDraft((current) => ({ ...current, name: "", userProblem: "", appetiteKind: "small-batch" }));
   };
 
   return (
@@ -1683,12 +2170,12 @@ function CreateProjectSheet({ onCreate }: { onCreate: (values: ProjectCreateValu
       </SheetTrigger>
       <SheetContent className="w-[94vw] overflow-y-auto sm:max-w-2xl">
         <SheetHeader>
-          <SheetTitle>Create Project</SheetTitle>
-          <SheetDescription>Start a real local project with an initial Direction Card and evidence milestone.</SheetDescription>
+          <SheetTitle>Create Shape Up Project</SheetTitle>
+          <SheetDescription>Capture a bounded pitch candidate. It starts waiting and cannot enter execution until Betting Gate approval.</SheetDescription>
         </SheetHeader>
         <form className="mt-4 grid gap-4" onSubmit={submit}>
           <div className="grid gap-3 md:grid-cols-2">
-            <SettingsInput label="Project name" name="project-name" value={draft.name} onChange={(value) => update({ name: value })} placeholder="SaaS MVP / Meeting plan / Japan trip" autoComplete="off" testId="project-name" />
+            <SettingsInput label="Project name" name="project-name" value={draft.name} onChange={(value) => update({ name: value })} placeholder="Optional; otherwise derived from the problem" autoComplete="off" testId="project-name" />
             <NativeSelectField
               label="Mode"
               value={draft.mode}
@@ -1697,24 +2184,19 @@ function CreateProjectSheet({ onCreate }: { onCreate: (values: ProjectCreateValu
               testId="project-mode"
             />
             <SettingsInput label="Start date" name="project-start" value={draft.startDate} onChange={(value) => update({ startDate: value })} placeholder="2026-07-01" autoComplete="off" testId="project-start" />
-            <SettingsInput label="Horizon date" name="project-horizon" value={draft.horizonDate} onChange={(value) => update({ horizonDate: value })} placeholder="2026-08-01" autoComplete="off" testId="project-horizon" />
+            <NativeSelectField
+              label="Appetite"
+              value={draft.appetiteKind}
+              onChange={(value) => update({ appetiteKind: value as ShapeUpAppetiteKind })}
+              options={[
+                { value: "small-batch", label: "Small Batch - 2 weeks" },
+                { value: "big-batch", label: "Big Batch - 6 weeks" }
+              ]}
+              testId="shapeup-appetite"
+            />
           </div>
-          <SettingsInput label="North star" name="project-north-star" value={draft.northStar} onChange={(value) => update({ northStar: value })} placeholder="What must this project become true?" autoComplete="off" testId="project-north-star" />
-          <SettingsInput label="Current outcome" name="project-outcome" value={draft.currentOutcome} onChange={(value) => update({ currentOutcome: value })} placeholder="The next concrete outcome to manage toward" autoComplete="off" testId="project-current-outcome" />
-          <div className="grid gap-3 md:grid-cols-2">
-            <SettingsInput label="Target user" name="direction-target-user" value={draft.targetUser} onChange={(value) => update({ targetUser: value })} placeholder="Who is this for?" autoComplete="off" testId="direction-target-user" />
-            <SettingsInput label="User problem" name="direction-user-problem" value={draft.userProblem} onChange={(value) => update({ userProblem: value })} placeholder="What problem justifies the work?" autoComplete="off" testId="direction-user-problem" />
-            <SettingsInput label="Core hypothesis" name="direction-hypothesis" value={draft.coreHypothesis} onChange={(value) => update({ coreHypothesis: value })} placeholder="What must be proven?" autoComplete="off" testId="direction-core-hypothesis" />
-            <SettingsInput label="Success metric" name="direction-success" value={draft.successMetric} onChange={(value) => update({ successMetric: value })} placeholder="How will evidence show success?" autoComplete="off" testId="direction-success-metric" />
-            <SettingsInput label="Failure condition" name="direction-failure" value={draft.failureCondition} onChange={(value) => update({ failureCondition: value })} placeholder="When should this narrow, pivot, or stop?" autoComplete="off" testId="direction-failure-condition" />
-            <SettingsInput label="Validation method" name="direction-validation" value={draft.validationMethod} onChange={(value) => update({ validationMethod: value })} placeholder="How will this be checked?" autoComplete="off" testId="direction-validation-method" />
-            <SettingsInput label="Opportunity cost" name="direction-opportunity-cost" value={draft.opportunityCost} onChange={(value) => update({ opportunityCost: value })} placeholder="What is being displaced?" autoComplete="off" testId="direction-opportunity-cost" />
-            <label className="block">
-              <span className="text-sm font-medium">Timebox days</span>
-              <Input className="mt-2" type="number" min={1} max={365} value={draft.timeboxDays} onChange={(event) => update({ timeboxDays: Number(event.target.value) || 14 })} />
-            </label>
-          </div>
-          <Button type="submit" disabled={!draft.name.trim()}>Create project</Button>
+          <FormTextarea label="Problem" value={draft.userProblem} onChange={(value) => update({ userProblem: value })} placeholder="What problem is worth shaping before betting execution time?" />
+          <Button type="submit" disabled={!draft.userProblem.trim()}>Create waiting pitch</Button>
         </form>
       </SheetContent>
     </Sheet>
@@ -1734,6 +2216,9 @@ function ProjectWorkspace({
   onProjectChange,
   onProjectStatusUpdate,
   onDirectionCardUpdate,
+  onShapeUpPitchUpdate,
+  onShapeUpBetApprove,
+  onShapeUpConvert,
   onWorkItemCreate,
   onDependencyCreate,
   onEvidenceCreate,
@@ -1758,6 +2243,9 @@ function ProjectWorkspace({
   onProjectChange: (projectId: string) => void;
   onProjectStatusUpdate: (projectId: string, status: ProjectStatus) => void;
   onDirectionCardUpdate: (projectId: string, directionCard: DirectionCard) => void;
+  onShapeUpPitchUpdate: (projectId: string, pitch: ShapeUpPitch) => void;
+  onShapeUpBetApprove: (projectId: string) => void;
+  onShapeUpConvert: (projectId: string) => void;
   onWorkItemCreate: (projectId: string, values: WorkItemCreateValues) => void;
   onDependencyCreate: (projectId: string, values: DependencyCreateValues) => void;
   onEvidenceCreate: (projectId: string, values: EvidenceCreateValues) => void;
@@ -1773,6 +2261,8 @@ function ProjectWorkspace({
   const next = nextScheduledItem(schedule.items);
   const blockingGate = gates.find((gate) => gate.severity === "hard" && gate.status !== "cleared");
   const latestEvidence = [...evidence].sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
+  const shapeUpLocked = isShapeUpProject(project) && !isShapeUpBet(project);
+  const shapeUpGanttEmpty = isShapeUpBet(project) && schedule.items.length === 0;
 
   return (
     <section className="grid gap-4">
@@ -1816,6 +2306,13 @@ function ProjectWorkspace({
           <DirectionCardPanel project={project} onSave={(directionCard) => onDirectionCardUpdate(project.id, directionCard)} />
         </CardContent>
       </Card>
+
+      <ShapeUpProjectPanel
+        project={project}
+        onSave={(pitch) => onShapeUpPitchUpdate(project.id, pitch)}
+        onBet={() => onShapeUpBetApprove(project.id)}
+        onConvert={() => onShapeUpConvert(project.id)}
+      />
 
       <Tabs defaultValue="plan" className="w-full">
         <TabsList className="grid w-full grid-cols-5 lg:w-auto">
@@ -1871,13 +2368,25 @@ function ProjectWorkspace({
                 />
               </CardContent>
               <CardContent className="p-0">
-                <GanttChart
-                  items={schedule.items}
-                  dependencies={dependencies}
-                  baseline={baseline}
-                  onDependencyUpdate={onDependencyUpdate}
-                  onDependencyRemove={onDependencyRemove}
-                />
+                {shapeUpLocked ? (
+                  <div className="grid gap-2 p-6 text-sm text-muted-foreground">
+                    <div className="flex items-center gap-2 font-medium text-foreground"><Lock size={16} /> Gantt locked until Betting Gate approval</div>
+                    <p>Shape Up projects stay out of Today and Gantt until a human approves the bet.</p>
+                  </div>
+                ) : shapeUpGanttEmpty ? (
+                  <div className="grid gap-2 p-6 text-sm text-muted-foreground">
+                    <div className="flex items-center gap-2 font-medium text-foreground"><AlertTriangle size={16} /> No downhill scope is ready</div>
+                    <p>Move at least one confirmed scope past the hill crest before adding discovered tasks to the execution network.</p>
+                  </div>
+                ) : (
+                  <GanttChart
+                    items={schedule.items}
+                    dependencies={dependencies}
+                    baseline={baseline}
+                    onDependencyUpdate={onDependencyUpdate}
+                    onDependencyRemove={onDependencyRemove}
+                  />
+                )}
               </CardContent>
             </Card>
             <Card>
@@ -2008,6 +2517,194 @@ function DirectionCardPanel({ project, onSave }: { project: Project; onSave: (di
       </div>
       <FormTextarea label="User problem" value={draft.userProblem} onChange={(value) => update({ userProblem: value })} placeholder="Describe the problem in plain language." />
     </form>
+  );
+}
+
+function ShapeUpProjectPanel({
+  project,
+  onSave,
+  onBet,
+  onConvert
+}: {
+  project: Project;
+  onSave: (pitch: ShapeUpPitch) => void;
+  onBet: () => void;
+  onConvert: () => void;
+}) {
+  const savedPitch = project.shapeUpPitch;
+  const fallbackPitch = savedPitch ?? createShapeUpPitch({
+    problem: project.directionCard?.userProblem || project.currentOutcome,
+    appetiteKind: "small-batch",
+    successBaseline: project.directionCard?.successMetric || "",
+    now: timestamp()
+  });
+  const [draft, setDraft] = useState<ShapeUpPitch>(fallbackPitch);
+  const [scopeTitle, setScopeTitle] = useState("");
+  const [scopeDescription, setScopeDescription] = useState("");
+  useEffect(() => setDraft(fallbackPitch), [project.id, savedPitch?.updatedAt]);
+  const draftProject = { ...project, shapeUpPitch: draft };
+  const missing = shapeUpMissingBetRequirements(draftProject);
+  const savedCanBet = canBetShapeUpProject(project);
+  const bet = project.shapeUpPitch?.bet;
+
+  const update = (patch: Partial<ShapeUpPitch>) => setDraft((current) => ({ ...current, ...patch }));
+  const updateScope = (scopeId: string, patch: Partial<ShapeUpScope>) => {
+    setDraft((current) => ({
+      ...current,
+      scopes: current.scopes.map((scope) => scope.id === scopeId ? { ...scope, ...patch, hillPosition: Math.max(0, Math.min(100, patch.hillPosition ?? scope.hillPosition)) } : scope)
+    }));
+  };
+  const addScope = () => {
+    const title = scopeTitle.trim();
+    if (!title) return;
+    setDraft((current) => ({
+      ...current,
+      scopes: [
+        ...current.scopes,
+        {
+          id: uniqueId("scope", title, current.scopes.map((scope) => scope.id)),
+          title,
+          description: scopeDescription.trim(),
+          confirmed: true,
+          hillPosition: 20
+        }
+      ]
+    }));
+    setScopeTitle("");
+    setScopeDescription("");
+  };
+  const removeScope = (scopeId: string) => {
+    setDraft((current) => ({ ...current, scopes: current.scopes.filter((scope) => scope.id !== scopeId) }));
+  };
+
+  if (!savedPitch) {
+    return (
+      <Card id="shape-up">
+        <CardHeader>
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <CardTitle className="flex items-center gap-2"><Target className="h-4 w-4" /> Shape Up</CardTitle>
+              <CardDescription>This existing project is not using Shape Up yet.</CardDescription>
+            </div>
+            <Button type="button" variant="outline" onClick={onConvert}>Convert to Shape Up</Button>
+          </div>
+        </CardHeader>
+      </Card>
+    );
+  }
+
+  return (
+    <Card id="shape-up">
+      <CardHeader>
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <CardTitle className="flex items-center gap-2"><Target className="h-4 w-4" /> Shape Up Pitch</CardTitle>
+            <CardDescription>Fixed appetite, variable scope, human-approved bet before execution.</CardDescription>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge variant={isShapeUpBet(project) ? "success" : project.status === "paused" ? "warning" : "outline"}>
+              {isShapeUpBet(project) ? "bet accepted" : project.status === "paused" ? "circuit review" : "waiting"}
+            </Badge>
+            {bet && <Badge variant="outline">Ends {bet.cycleEnd.slice(0, 10)}</Badge>}
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent className="grid gap-4">
+        <div className="grid gap-3 md:grid-cols-2">
+          <NativeSelectField
+            label="Appetite"
+            value={draft.appetiteKind}
+            onChange={(value) => update({ appetiteKind: value as ShapeUpAppetiteKind, appetiteDays: shapeUpAppetiteDays[value as ShapeUpAppetiteKind] })}
+            options={[
+              { value: "small-batch", label: "Small Batch - 2 weeks" },
+              { value: "big-batch", label: "Big Batch - 6 weeks" }
+            ]}
+          />
+          <SettingsRow label="Betting status" value={savedCanBet ? "ready for human approval" : missing.length ? `missing ${missing.length}` : "not ready"} />
+        </div>
+        <div className="grid gap-3 lg:grid-cols-2">
+          <FormTextarea label="Problem" value={draft.problem} onChange={(value) => update({ problem: value })} placeholder="What problem matters enough to spend this appetite?" />
+          <FormTextarea label="Solution sketch" value={draft.solutionSketch} onChange={(value) => update({ solutionSketch: value })} placeholder="Breadboard or fat-marker solution, not a detailed spec." />
+          <FormTextarea label="Rabbit holes" value={draft.rabbitHoles} onChange={(value) => update({ rabbitHoles: value })} placeholder="Known traps, unknowns, or technical holes to patch before betting." />
+          <FormTextarea label="No-gos" value={draft.noGos} onChange={(value) => update({ noGos: value })} placeholder="Explicitly out-of-bounds scope." />
+          <FormTextarea label="Success baseline" value={draft.successBaseline} onChange={(value) => update({ successBaseline: value })} placeholder="What evidence makes this bet worth continuing?" />
+          <div className="rounded-lg border bg-muted/30 p-3">
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <div>
+                <h3 className="text-sm font-semibold">Betting Gate</h3>
+                <p className="text-xs text-muted-foreground">AI may suggest; human approval is required.</p>
+              </div>
+              <Badge variant={isShapeUpPitchComplete(draft) ? "success" : "warning"}>{isShapeUpPitchComplete(draft) ? "complete" : "incomplete"}</Badge>
+            </div>
+            {missing.length ? (
+              <div className="flex flex-wrap gap-2">
+                {missing.map((item) => <Badge key={item} variant="outline">{item}</Badge>)}
+              </div>
+            ) : (
+              <p className="text-sm text-muted-foreground">Pitch is complete. Save it, then approve the bet when you are ready to commit fixed time.</p>
+            )}
+          </div>
+        </div>
+
+        <div className="grid gap-3 rounded-lg border bg-background p-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <h3 className="text-sm font-semibold">Scopes / Hill Chart</h3>
+              <p className="text-xs text-muted-foreground">Confirmed scopes become hill-chart scopes after bet. Downhill scopes can enter Gantt.</p>
+            </div>
+            <Badge variant="outline">{draft.scopes.filter((scope) => scope.confirmed).length} confirmed</Badge>
+          </div>
+          <div className="grid gap-2 md:grid-cols-[1fr_1fr_auto]">
+            <SettingsInput label="Scope title" name={`shape-scope-title-${project.id}`} value={scopeTitle} onChange={setScopeTitle} placeholder="Authentication slice / Invitation flow / Day 1 itinerary" autoComplete="off" />
+            <SettingsInput label="Scope description" name={`shape-scope-desc-${project.id}`} value={scopeDescription} onChange={setScopeDescription} placeholder="What belongs inside this scope?" autoComplete="off" />
+            <Button type="button" className="self-end" variant="outline" onClick={addScope} disabled={!scopeTitle.trim()}><Plus />Add scope</Button>
+          </div>
+          <div className="grid gap-2">
+            {draft.scopes.length ? draft.scopes.map((scope) => (
+              <article key={scope.id} className="grid gap-3 rounded-lg border bg-muted/20 p-3">
+                <div className="flex flex-wrap items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <strong className="text-sm">{scope.title}</strong>
+                      <Badge variant={shapeUpScopeStatus(scope) === "downhill" || shapeUpScopeStatus(scope) === "done" ? "success" : shapeUpScopeStatus(scope) === "crest" ? "warning" : "secondary"}>{shapeUpScopeStatus(scope)}</Badge>
+                      {!scope.confirmed && <Badge variant="outline">candidate</Badge>}
+                    </div>
+                    <p className="mt-1 text-xs text-muted-foreground">{scope.description || "No description."}</p>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <label className="inline-flex h-8 items-center gap-2 rounded-md border px-2 text-xs font-medium">
+                      <input type="checkbox" checked={scope.confirmed} onChange={(event) => updateScope(scope.id, { confirmed: event.target.checked })} />
+                      Confirm
+                    </label>
+                    <Button type="button" variant="ghost" size="sm" onClick={() => removeScope(scope.id)}>Remove</Button>
+                  </div>
+                </div>
+                <div className="grid gap-2 md:grid-cols-[1fr_72px]">
+                  <input
+                    type="range"
+                    min={0}
+                    max={100}
+                    value={scope.hillPosition}
+                    onChange={(event) => updateScope(scope.id, { hillPosition: Number(event.target.value) })}
+                    aria-label={`${scope.title} hill position`}
+                  />
+                  <Input type="number" min={0} max={100} value={scope.hillPosition} onChange={(event) => updateScope(scope.id, { hillPosition: Number(event.target.value) || 0 })} />
+                </div>
+              </article>
+            )) : (
+              <div className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">Add at least one confirmed scope before betting.</div>
+            )}
+          </div>
+        </div>
+
+        <div className="flex flex-wrap gap-2">
+          <Button type="button" onClick={() => onSave(draft)}>Save Shape Up pitch</Button>
+          <Button type="button" variant="outline" onClick={onBet} disabled={!savedCanBet || Boolean(bet)}>Approve Betting Gate</Button>
+          {bet && <Badge variant="success">Approved {bet.approvedAt.slice(0, 10)}</Badge>}
+          {project.status === "paused" && <Badge variant="warning">Circuit breaker review required</Badge>}
+        </div>
+      </CardContent>
+    </Card>
   );
 }
 
@@ -2867,6 +3564,15 @@ function Settings({
   workspace,
   schedules,
   gates,
+  settings,
+  onSettingsSave,
+  sessionPassphrase,
+  onSessionPassphraseChange,
+  rememberedPassphraseLoaded,
+  rememberedPassphraseSavedAt,
+  onRememberPassphrase,
+  onForgetRememberedPassphrase,
+  autoSyncStatus,
   workspacePersistence,
   onWorkspaceImport,
   onWorkspaceReset,
@@ -2876,20 +3582,27 @@ function Settings({
   workspace: WorkspaceSnapshot;
   schedules: ScheduleResult[];
   gates: AuditGate[];
+  settings: AppSettings;
+  onSettingsSave: (settings: AppSettings) => void;
+  sessionPassphrase: string;
+  onSessionPassphraseChange: (passphrase: string) => void;
+  rememberedPassphraseLoaded: boolean;
+  rememberedPassphraseSavedAt?: string;
+  onRememberPassphrase: () => Promise<{ savedAt: string }>;
+  onForgetRememberedPassphrase: () => Promise<void>;
+  autoSyncStatus: AutoSyncStatus;
   workspacePersistence: { loaded: boolean; status: string; lastSavedAt: string };
   onWorkspaceImport: (workspace: WorkspaceSnapshot) => void;
   onWorkspaceReset: () => void;
   onEvidenceImport: (projectId: string, evidenceItems: Evidence[], reason: string) => void;
   onAuditDecisionSave: (decision: AuditDecision, reason: string) => void;
 }) {
-  const settingsRepository = useMemo(() => new BrowserAppSettingsRepository(), []);
   const secretVault = useMemo(() => new BrowserEncryptedSecretVault(), []);
   const workspaceRepository = useMemo(() => new BrowserWorkspaceRepository(), []);
   const workspaceImportRef = useRef<HTMLInputElement>(null);
-  const [settings, setSettings] = useState(() => settingsRepository.load());
   const [githubDraft, setGithubDraft] = useState<GitHubSyncSettings>(() => settings.githubSync);
+  const [firebaseDraft, setFirebaseDraft] = useState<FirebaseSyncSettings>(() => settings.firebaseSync);
   const [aiDraft, setAiDraft] = useState<AiProviderSettings>(() => settings.aiProviders[0] ?? defaultCustomAiProviderSettings);
-  const [passphrase, setPassphrase] = useState("");
   const [githubToken, setGithubToken] = useState("");
   const [aiProviderKey, setAiProviderKey] = useState("");
   const [notice, setNotice] = useState("No settings action has run yet.");
@@ -2902,18 +3615,67 @@ function Settings({
   const githubSecret = githubDraft.tokenSecretId ? secretVault.readEncrypted(githubDraft.tokenSecretId) : undefined;
   const aiSecret = aiDraft.apiKeySecretId ? secretVault.readEncrypted(aiDraft.apiKeySecretId) : undefined;
   const gitHubReady = Boolean(githubDraft.owner.trim() && githubDraft.repo.trim() && githubDraft.tokenSecretId);
+  const firebaseReady = firebaseSettingsReady(firebaseDraft);
   const evidenceProject = workspace.projects.find((project) => project.id === evidenceProjectId) ?? workspace.projects[0];
   const evidenceWorkItems = workspace.workItems.filter((item) => item.projectId === evidenceProject?.id && item.kind !== "phase");
   const auditProject = workspace.projects.find((project) => project.id === auditProjectId) ?? workspace.projects[0];
-  const auditSchedule = schedules.find((schedule) => schedule.projectId === auditProject?.id) ?? (auditProject ? scheduleProject(auditProject, workspace.workItems, workspace.dependencies) : undefined);
+  const auditSchedule = schedules.find((schedule) => schedule.projectId === auditProject?.id) ?? (auditProject ? scheduleShapeUpAwareProject(auditProject, workspace.workItems, workspace.dependencies) : undefined);
+  const rememberedPassphraseStatus = rememberedPassphraseSavedAt
+    ? `saved ${rememberedPassphraseSavedAt.slice(0, 19).replace("T", " ")}`
+    : rememberedPassphraseLoaded
+      ? "not stored"
+      : "checking IndexedDB";
 
   const updateGithubDraft = (patch: Partial<GitHubSyncSettings>) => {
     setGithubDraft((current) => ({ ...current, ...patch }));
   };
 
+  const updateFirebaseDraft = (patch: Partial<FirebaseSyncSettings>) => {
+    setFirebaseDraft((current) => ({ ...current, ...patch }));
+  };
+
   const updateAiDraft = (patch: Partial<AiProviderSettings>) => {
     setAiDraft((current) => ({ ...current, ...patch }));
   };
+
+  const rememberPassphrase = async () => {
+    try {
+      const record = await onRememberPassphrase();
+      setNotice(`Workspace passphrase remembered in this browser IndexedDB on ${record.savedAt.slice(0, 19).replace("T", " ")}.`);
+    } catch (error) {
+      setNotice(`Remember passphrase failed: ${error instanceof Error ? error.message : "unknown error"}`);
+    }
+  };
+
+  const forgetPassphrase = async () => {
+    try {
+      await onForgetRememberedPassphrase();
+      setNotice("Remembered workspace passphrase deleted from this browser IndexedDB.");
+    } catch (error) {
+      setNotice(`Forget passphrase failed: ${error instanceof Error ? error.message : "unknown error"}`);
+    }
+  };
+
+  useEffect(() => {
+    setFirebaseDraft((current) => ({
+      ...current,
+      autoSyncEnabled: settings.firebaseSync.autoSyncEnabled,
+      autoSyncIntervalSeconds: settings.firebaseSync.autoSyncIntervalSeconds,
+      autoPushDebounceSeconds: settings.firebaseSync.autoPushDebounceSeconds,
+      lastSyncedRevision: settings.firebaseSync.lastSyncedRevision,
+      lastSyncedChecksum: settings.firebaseSync.lastSyncedChecksum,
+      lastPulledAt: settings.firebaseSync.lastPulledAt,
+      lastPushedAt: settings.firebaseSync.lastPushedAt
+    }));
+  }, [
+    settings.firebaseSync.autoSyncEnabled,
+    settings.firebaseSync.autoSyncIntervalSeconds,
+    settings.firebaseSync.autoPushDebounceSeconds,
+    settings.firebaseSync.lastSyncedRevision,
+    settings.firebaseSync.lastSyncedChecksum,
+    settings.firebaseSync.lastPulledAt,
+    settings.firebaseSync.lastPushedAt
+  ]);
 
   useEffect(() => {
     if (!workspace.projects.some((project) => project.id === evidenceProjectId)) {
@@ -2935,11 +3697,11 @@ function Settings({
     }
 
     if (githubToken.trim()) {
-      if (!passphrase.trim()) {
+      if (!sessionPassphrase.trim()) {
         setNotice("Enter the workspace passphrase before saving a GitHub PAT.");
         return;
       }
-      const secret = await encryptProviderSecret("github", "Private Repo Sync PAT", githubToken.trim(), passphrase, timestamp);
+      const secret = await encryptProviderSecret("github", "Private Repo Sync PAT", githubToken.trim(), sessionPassphrase, timestamp);
       secretVault.saveEncrypted(secret);
       tokenSecretId = secret.id;
       setGithubToken("");
@@ -2947,11 +3709,31 @@ function Settings({
 
     const nextGithub = { ...githubDraft, tokenSecretId, updatedAt: timestamp };
     const nextSettings = { ...settings, githubSync: nextGithub };
-    settingsRepository.save(nextSettings);
-    setSettings(nextSettings);
+    onSettingsSave(nextSettings);
     setGithubDraft(nextGithub);
     setSavedSecretCount(secretVault.listEncrypted().length);
     setNotice(tokenSecretId ? "GitHub sync settings saved. PAT is encrypted locally." : "GitHub repo settings saved. Add a PAT before first sync.");
+  };
+
+  const saveFirebaseSync = (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!firebaseDraft.projectId.trim() || !firebaseDraft.apiKey.trim()) {
+      setNotice("Set Firebase Project ID and Web API key before saving sync.");
+      return;
+    }
+    const timestamp = new Date().toISOString();
+    const nextFirebase = {
+      ...firebaseDraft,
+      databaseId: firebaseDraft.databaseId.trim() || "(default)",
+      collectionPath: firebaseDraft.collectionPath.trim() || "omniPlanSync",
+      workspaceId: firebaseDraft.workspaceId.trim() || "personal",
+      deviceId: firebaseDraft.deviceId.trim() || "current-device",
+      updatedAt: timestamp
+    };
+    const nextSettings = { ...settings, firebaseSync: nextFirebase };
+    onSettingsSave(nextSettings);
+    setFirebaseDraft(nextFirebase);
+    setNotice("Firebase E2EE sync settings saved. The API key is transport config; workspace content still requires the passphrase.");
   };
 
   const saveAiProvider = async (event: React.FormEvent<HTMLFormElement>) => {
@@ -2965,11 +3747,11 @@ function Settings({
     }
 
     if (aiProviderKey.trim()) {
-      if (!passphrase.trim()) {
+      if (!sessionPassphrase.trim()) {
         setNotice("Enter the workspace passphrase before saving an AI provider key.");
         return;
       }
-      const secret = await encryptProviderSecret("custom", `${aiDraft.label} API key`, aiProviderKey.trim(), passphrase, timestamp);
+      const secret = await encryptProviderSecret("custom", `${aiDraft.label} API key`, aiProviderKey.trim(), sessionPassphrase, timestamp);
       secretVault.saveEncrypted(secret);
       apiKeySecretId = secret.id;
       setAiProviderKey("");
@@ -2985,8 +3767,7 @@ function Settings({
       ...settings,
       aiProviders: [nextProvider, ...settings.aiProviders.filter((provider) => provider.id !== nextProvider.id)]
     };
-    settingsRepository.save(nextSettings);
-    setSettings(nextSettings);
+    onSettingsSave(nextSettings);
     setAiDraft(nextProvider);
     setSavedSecretCount(secretVault.listEncrypted().length);
     setNotice("AI provider saved. API key is encrypted locally.");
@@ -3001,16 +3782,25 @@ function Settings({
     deviceId: githubDraft.deviceId.trim() || "current-device"
   });
 
+  const firebaseConfig = (): FirebaseE2eeSyncConfig => firebaseConfigFromSettings(firebaseDraft);
+
+  const persistFirebaseSyncState = (patch: Partial<FirebaseSyncSettings>) => {
+    const nextFirebase = { ...firebaseDraft, ...patch, updatedAt: new Date().toISOString() };
+    const nextSettings = { ...settings, firebaseSync: nextFirebase };
+    onSettingsSave(nextSettings);
+    setFirebaseDraft(nextFirebase);
+  };
+
   const unlockGitHubToken = async (): Promise<string | undefined> => {
     if (!githubDraft.tokenSecretId) {
       setNotice("Save a GitHub PAT before using GitHub sync.");
       return undefined;
     }
-    if (!passphrase.trim()) {
+    if (!sessionPassphrase.trim()) {
       setNotice("Enter the workspace passphrase to unlock the saved GitHub PAT.");
       return undefined;
     }
-    const token = await secretVault.unlock(githubDraft.tokenSecretId, passphrase);
+    const token = await secretVault.unlock(githubDraft.tokenSecretId, sessionPassphrase);
     if (!token) setNotice("Could not unlock GitHub PAT.");
     return token;
   };
@@ -3020,11 +3810,11 @@ function Settings({
       setNotice("Save an AI provider key before running AI audit.");
       return undefined;
     }
-    if (!passphrase.trim()) {
+    if (!sessionPassphrase.trim()) {
       setNotice("Enter the workspace passphrase to unlock the saved AI provider key.");
       return undefined;
     }
-    const key = await secretVault.unlock(aiDraft.apiKeySecretId, passphrase);
+    const key = await secretVault.unlock(aiDraft.apiKeySecretId, sessionPassphrase);
     if (!key) setNotice("Could not unlock AI provider key.");
     return key;
   };
@@ -3044,6 +3834,92 @@ function Settings({
       setNotice(manifest ? `GitHub connected. Remote manifest found at ${manifest.path}.` : "GitHub connected. Remote manifest does not exist yet.");
     } catch (error) {
       setNotice(`GitHub test failed: ${error instanceof Error ? error.message : "unknown error"}`);
+    } finally {
+      setSyncBusy(false);
+    }
+  };
+
+  const testFirebaseSync = async () => {
+    if (!firebaseReady) {
+      setNotice("Set Firebase Project ID, Web API key, and Workspace ID before testing.");
+      return;
+    }
+    setSyncBusy(true);
+    try {
+      const client = new FirebaseE2eeSyncClient(firebaseConfig());
+      const session = await client.signInAnonymously();
+      const manifest = await client.readManifest(session);
+      setNotice(manifest
+        ? `Firebase connected. Remote revision ${manifest.latestRevision.slice(0, 12)} updated ${manifest.updatedAt.slice(0, 19).replace("T", " ")}.`
+        : "Firebase connected. No remote encrypted workspace exists yet.");
+    } catch (error) {
+      setNotice(`Firebase test failed: ${error instanceof Error ? error.message : "unknown error"}`);
+    } finally {
+      setSyncBusy(false);
+    }
+  };
+
+  const pushFirebaseWorkspace = async () => {
+    if (!firebaseReady) {
+      setNotice("Save Firebase sync settings before pushing.");
+      return;
+    }
+    if (!sessionPassphrase.trim()) {
+      setNotice("Enter the workspace passphrase before encrypting the Firebase workspace snapshot.");
+      return;
+    }
+    setSyncBusy(true);
+    try {
+      const client = new FirebaseE2eeSyncClient(firebaseConfig());
+      const session = await client.signInAnonymously();
+      const manifest = await client.readManifest(session);
+      if (manifest?.latestRevision && firebaseDraft.lastSyncedRevision && manifest.latestRevision !== firebaseDraft.lastSyncedRevision) {
+        setNotice(`Remote Firebase workspace is newer (${manifest.latestRevision.slice(0, 12)}). Pull before pushing from this device.`);
+        return;
+      }
+      if (manifest?.latestRevision && !firebaseDraft.lastSyncedRevision) {
+        setNotice("Remote Firebase workspace already exists. Pull it before this device's first push to avoid overwriting another device.");
+        return;
+      }
+      const result = await client.pushWorkspaceSnapshot(workspace, sessionPassphrase, session, manifest);
+      const pushedChecksum = await workspacePlaintextChecksum(workspace);
+      persistFirebaseSyncState({
+        lastSyncedRevision: result.manifest.latestRevision,
+        lastSyncedChecksum: pushedChecksum,
+        lastPushedAt: result.manifest.updatedAt
+      });
+      setNotice(`Pushed encrypted workspace to Firebase revision ${result.manifest.latestRevision.slice(0, 12)}.`);
+    } catch (error) {
+      setNotice(`Firebase push failed: ${error instanceof Error ? error.message : "unknown error"}`);
+    } finally {
+      setSyncBusy(false);
+    }
+  };
+
+  const pullFirebaseWorkspace = async () => {
+    if (!firebaseReady) {
+      setNotice("Save Firebase sync settings before pulling.");
+      return;
+    }
+    if (!sessionPassphrase.trim()) {
+      setNotice("Enter the workspace passphrase before decrypting the Firebase workspace snapshot.");
+      return;
+    }
+    setSyncBusy(true);
+    try {
+      const client = new FirebaseE2eeSyncClient(firebaseConfig());
+      const session = await client.signInAnonymously();
+      const result = await client.pullWorkspaceSnapshot(sessionPassphrase, session);
+      onWorkspaceImport(result.workspace);
+      const pulledChecksum = await workspacePlaintextChecksum(result.workspace);
+      persistFirebaseSyncState({
+        lastSyncedRevision: result.manifest.latestRevision,
+        lastSyncedChecksum: pulledChecksum,
+        lastPulledAt: new Date().toISOString()
+      });
+      setNotice(`Pulled Firebase workspace revision ${result.manifest.latestRevision.slice(0, 12)} and saved it locally.`);
+    } catch (error) {
+      setNotice(`Firebase pull failed: ${error instanceof Error ? error.message : "unknown error"}`);
     } finally {
       setSyncBusy(false);
     }
@@ -3142,7 +4018,7 @@ function Settings({
           { workspaceId: config.workspaceId, deviceId: config.deviceId },
           sequence,
           baseRevision,
-          passphrase,
+          sessionPassphrase,
           new Date().toISOString()
         );
         const path = buildChangeEnvelopePath(config, envelope);
@@ -3198,6 +4074,64 @@ function Settings({
         <CardHeader>
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
+              <CardTitle className="flex items-center gap-2"><Lock className="h-4 w-4" /> Firebase E2EE Sync</CardTitle>
+              <CardDescription>Primary multi-device sync. Firebase stores encrypted workspace snapshots and operation records only.</CardDescription>
+            </div>
+            <Badge variant={firebaseReady ? "success" : "warning"}>{firebaseReady ? "Ready" : "Needs Firebase config"}</Badge>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="grid gap-3 md:grid-cols-2">
+            <SettingsRow label="Provider" value={firebaseE2eeSyncStatus.provider} />
+            <SettingsRow label="Remote truth" value={firebaseE2eeSyncStatus.remoteTruth} />
+            <SettingsRow label="Encryption" value={firebaseE2eeSyncStatus.encryption} />
+            <SettingsRow label="Secret boundary" value={firebaseE2eeSyncStatus.secretBoundary} />
+            <SettingsRow label="Workspace" value={firebaseDraft.workspaceId || "personal"} />
+            <SettingsRow label="Device" value={firebaseDraft.deviceId || "current-device"} />
+            <SettingsRow label="Auto sync" value={firebaseDraft.autoSyncEnabled ? (sessionPassphrase ? "enabled and unlocked" : "enabled, locked") : "off"} />
+            <SettingsRow label="Auto status" value={autoSyncStatus.message} />
+            <SettingsRow label="Last synced revision" value={firebaseDraft.lastSyncedRevision ? firebaseDraft.lastSyncedRevision.slice(0, 12) : "none"} />
+            <SettingsRow label="Last push / pull" value={`${firebaseDraft.lastPushedAt ? firebaseDraft.lastPushedAt.slice(0, 19).replace("T", " ") : "never"} / ${firebaseDraft.lastPulledAt ? firebaseDraft.lastPulledAt.slice(0, 19).replace("T", " ") : "never"}`} />
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Button type="button" variant="outline" onClick={() => void testFirebaseSync()} disabled={syncBusy || !firebaseReady}>Test Firebase</Button>
+            <Button type="button" variant="outline" onClick={() => void pullFirebaseWorkspace()} disabled={syncBusy || !firebaseReady}>Pull latest workspace</Button>
+            <Button type="button" onClick={() => void pushFirebaseWorkspace()} disabled={syncBusy || !firebaseReady}>Push encrypted workspace</Button>
+            <Badge variant="outline">{firebaseE2eeSyncStatus.conflictPolicy}</Badge>
+          </div>
+          <form className="space-y-4 rounded-lg border bg-muted/20 p-3" onSubmit={saveFirebaseSync}>
+            <div className="grid gap-3 md:grid-cols-3">
+              <SettingsInput label="Firebase Project ID" name="firebase-project-id" value={firebaseDraft.projectId} onChange={(value) => updateFirebaseDraft({ projectId: value })} placeholder="my-firebase-project" autoComplete="off" />
+              <SettingsInput label="Web API key" name="firebase-api-key" value={firebaseDraft.apiKey} onChange={(value) => updateFirebaseDraft({ apiKey: value })} placeholder="AIza..." autoComplete="off" />
+              <SettingsInput label="Database ID" name="firebase-database-id" value={firebaseDraft.databaseId} onChange={(value) => updateFirebaseDraft({ databaseId: value })} placeholder="(default)" autoComplete="off" />
+              <SettingsInput label="Collection path" name="firebase-collection-path" value={firebaseDraft.collectionPath} onChange={(value) => updateFirebaseDraft({ collectionPath: value })} placeholder="omniPlanSync" autoComplete="off" />
+              <SettingsInput label="Workspace ID" name="firebase-workspace-id" value={firebaseDraft.workspaceId} onChange={(value) => updateFirebaseDraft({ workspaceId: value })} placeholder="personal" autoComplete="off" />
+              <SettingsInput label="Device ID" name="firebase-device-id" value={firebaseDraft.deviceId} onChange={(value) => updateFirebaseDraft({ deviceId: value })} placeholder="macbook-pro" autoComplete="off" />
+              <SettingsInput label="Poll interval seconds" name="firebase-auto-interval" value={String(firebaseDraft.autoSyncIntervalSeconds || 45)} onChange={(value) => updateFirebaseDraft({ autoSyncIntervalSeconds: Math.max(15, Math.round(Number(value) || 45)) })} placeholder="45" autoComplete="off" />
+              <SettingsInput label="Push debounce seconds" name="firebase-auto-debounce" value={String(firebaseDraft.autoPushDebounceSeconds || 8)} onChange={(value) => updateFirebaseDraft({ autoPushDebounceSeconds: Math.max(3, Math.round(Number(value) || 8)) })} placeholder="8" autoComplete="off" />
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <label className="inline-flex min-h-9 items-center gap-2 rounded-md border px-3 text-sm font-medium">
+                <input
+                  type="checkbox"
+                  checked={firebaseDraft.autoSyncEnabled}
+                  onChange={(event) => updateFirebaseDraft({ autoSyncEnabled: event.target.checked })}
+                  aria-label="Enable Firebase auto sync"
+                />
+                Auto sync
+              </label>
+              <Button type="submit">Save Firebase sync</Button>
+              <Badge variant="outline">Anonymous Auth</Badge>
+              <Badge variant="outline">Firestore REST</Badge>
+              <Badge variant="outline">Passphrase decrypts locally</Badge>
+            </div>
+          </form>
+        </CardContent>
+      </Card>
+      <Card className="lg:col-span-2">
+        <CardHeader>
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
               <CardTitle className="flex items-center gap-2"><GitPullRequest className="h-4 w-4" /> GitHub Sync Runtime</CardTitle>
               <CardDescription>Real repo connection and encrypted ChangeSet push controls.</CardDescription>
             </div>
@@ -3223,13 +4157,14 @@ function Settings({
       <Card className="lg:col-span-2">
         <CardHeader>
           <CardTitle className="flex items-center gap-2"><KeyRound className="h-4 w-4" /> Secret Unlock</CardTitle>
-          <CardDescription>Apple Passwords can autofill this passphrase; the app does not persist it.</CardDescription>
+          <CardDescription>Apple Passwords can autofill this passphrase; you can also remember it in this browser only.</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="grid gap-3 md:grid-cols-2">
             <SettingsRow label="Input source" value={browserSecretVaultStatus.inputSource} />
             <SettingsRow label="Local protection" value={browserSecretVaultStatus.localProtection} />
             <SettingsRow label="Passphrase" value={browserSecretVaultStatus.passphrasePolicy} />
+            <SettingsRow label="Remembered passphrase" value={rememberedPassphraseStatus} />
             <SettingsRow label="Secret sync" value={browserSecretVaultStatus.syncPolicy} />
           </div>
           <div className="grid gap-3 md:grid-cols-[1fr_auto]">
@@ -3240,8 +4175,8 @@ function Settings({
                 type="password"
                 name="workspace-passphrase"
                 autoComplete="current-password"
-                value={passphrase}
-                onChange={(event) => setPassphrase(event.target.value)}
+                value={sessionPassphrase}
+                onChange={(event) => onSessionPassphraseChange(event.target.value)}
                 placeholder="Autofill or enter passphrase"
                 aria-label="Workspace passphrase"
               />
@@ -3251,8 +4186,19 @@ function Settings({
               <div className="text-muted-foreground">stored only in this browser</div>
             </div>
           </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button type="button" variant="outline" onClick={() => void rememberPassphrase()} disabled={!sessionPassphrase.trim()}>
+              <KeyRound size={15} />
+              Remember in IndexedDB
+            </Button>
+            <Button type="button" variant="outline" onClick={() => void forgetPassphrase()} disabled={!rememberedPassphraseSavedAt}>
+              <Lock size={15} />
+              Forget remembered passphrase
+            </Button>
+            <Badge variant="outline">This browser only</Badge>
+          </div>
           <p className="rounded-lg border bg-muted/40 p-3 text-sm text-muted-foreground">
-            Secret values are not included in workspace export files, GitHub sync objects, evidence reports, or PDF/Markdown/CSV exports.
+            Remembered passphrase stays in local IndexedDB. It is not included in workspace export files, GitHub sync objects, Firebase sync snapshots, evidence reports, or PDF/Markdown/CSV exports.
           </p>
           <p className="rounded-lg border bg-background p-3 text-sm font-medium">{notice}</p>
         </CardContent>

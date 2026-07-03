@@ -3,6 +3,9 @@ import type { ProviderSecret } from "./types";
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 const BROWSER_SECRET_STORAGE_KEY = "omni-plan-personal.provider-secrets.v1";
+const PASSPHRASE_DB_NAME = "omni-plan-personal.passphrase.v1";
+const PASSPHRASE_STORE_NAME = "remembered-passphrases";
+const WORKSPACE_PASSPHRASE_KEY = "workspace";
 
 export interface SecretVaultStorage {
   getItem(key: string): string | null;
@@ -13,6 +16,13 @@ export interface SecretVaultStorage {
 interface StoredSecretVault {
   schemaVersion: 1;
   secrets: Record<string, ProviderSecret>;
+}
+
+export interface RememberedPassphraseRecord {
+  schemaVersion: 1;
+  id: "workspace";
+  passphrase: string;
+  savedAt: string;
 }
 
 function bytesToBase64(bytes: Uint8Array): string {
@@ -122,10 +132,85 @@ export class BrowserEncryptedSecretVault {
   }
 }
 
+export class BrowserRememberedPassphraseVault {
+  async read(): Promise<RememberedPassphraseRecord | undefined> {
+    const database = await this.openDatabase();
+    return this.transaction<RememberedPassphraseRecord | undefined>(database, "readonly", (store, resolve, reject) => {
+      const request = store.get(WORKSPACE_PASSPHRASE_KEY);
+      request.onsuccess = () => resolve(request.result as RememberedPassphraseRecord | undefined);
+      request.onerror = () => reject(request.error ?? new Error("Could not read remembered workspace passphrase."));
+    });
+  }
+
+  async save(passphrase: string, savedAt: string): Promise<RememberedPassphraseRecord> {
+    const record: RememberedPassphraseRecord = {
+      schemaVersion: 1,
+      id: WORKSPACE_PASSPHRASE_KEY,
+      passphrase,
+      savedAt
+    };
+    const database = await this.openDatabase();
+    await this.transaction<void>(database, "readwrite", (store, resolve, reject) => {
+      const request = store.put(record);
+      request.onsuccess = () => resolve();
+      request.onerror = () => reject(request.error ?? new Error("Could not remember workspace passphrase."));
+    });
+    return record;
+  }
+
+  async clear(): Promise<void> {
+    const database = await this.openDatabase();
+    await this.transaction<void>(database, "readwrite", (store, resolve, reject) => {
+      const request = store.delete(WORKSPACE_PASSPHRASE_KEY);
+      request.onsuccess = () => resolve();
+      request.onerror = () => reject(request.error ?? new Error("Could not forget remembered workspace passphrase."));
+    });
+  }
+
+  private openDatabase(): Promise<IDBDatabase> {
+    if (typeof indexedDB === "undefined") {
+      return Promise.reject(new Error("IndexedDB is not available in this browser."));
+    }
+
+    return new Promise((resolve, reject) => {
+      const request = indexedDB.open(PASSPHRASE_DB_NAME, 1);
+      request.onupgradeneeded = () => {
+        const database = request.result;
+        if (!database.objectStoreNames.contains(PASSPHRASE_STORE_NAME)) {
+          database.createObjectStore(PASSPHRASE_STORE_NAME, { keyPath: "id" });
+        }
+      };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error ?? new Error("Could not open remembered passphrase store."));
+    });
+  }
+
+  private transaction<T>(
+    database: IDBDatabase,
+    mode: IDBTransactionMode,
+    callback: (store: IDBObjectStore, resolve: (value: T) => void, reject: (reason?: unknown) => void) => void
+  ): Promise<T> {
+    return new Promise((resolve, reject) => {
+      const transaction = database.transaction(PASSPHRASE_STORE_NAME, mode);
+      transaction.oncomplete = () => database.close();
+      transaction.onerror = () => {
+        database.close();
+        reject(transaction.error ?? new Error("Remembered passphrase transaction failed."));
+      };
+      transaction.onabort = () => {
+        database.close();
+        reject(transaction.error ?? new Error("Remembered passphrase transaction was aborted."));
+      };
+      const store = transaction.objectStore(PASSPHRASE_STORE_NAME);
+      callback(store, resolve, reject);
+    });
+  }
+}
+
 export const browserSecretVaultStatus = {
-  inputSource: "Apple Passwords or browser password manager autofill",
+  inputSource: "Apple Passwords, browser password manager autofill, or remembered browser passphrase",
   localProtection: "Provider secrets are encrypted locally with the workspace passphrase",
-  passphrasePolicy: "Workspace passphrase may be autofilled but is not persisted by the app",
-  syncPolicy: "Secrets are excluded from workspace files, GitHub ChangeSet sync, and evidence exports",
+  passphrasePolicy: "Workspace passphrase can be remembered in this browser IndexedDB when explicitly enabled",
+  syncPolicy: "Secrets are excluded from workspace files, GitHub ChangeSet sync, Firebase snapshots, and evidence exports",
   nativeUpgrade: "Native builds can replace this adapter with Keychain storage later"
 };

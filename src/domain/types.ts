@@ -10,6 +10,7 @@ export type AttentionKind = "deep" | "medium" | "shallow";
 export type AuditAction = "Accelerate" | "Continue" | "Narrow" | "Pivot" | "Stop";
 export type EvidenceKind = "note" | "commit" | "pr" | "ci" | "doc" | "screenshot" | "release" | "feedback" | "metric" | "email" | "calendar" | "minutes" | "booking";
 export type ChangeSetStatus = "draft" | "queued-audit" | "approved" | "blocked";
+export type ShapeUpAppetiteKind = "small-batch" | "big-batch";
 
 export interface DirectionCard {
   targetUser: string;
@@ -34,7 +35,40 @@ export interface Project {
   horizon: ISODate;
   start: ISODate;
   directionCard?: DirectionCard;
+  shapeUpPitch?: ShapeUpPitch;
   reviewCadenceDays: number;
+}
+
+export interface ShapeUpScope {
+  id: Id;
+  title: string;
+  description: string;
+  confirmed: boolean;
+  hillPosition: number;
+  niceToHave?: boolean;
+}
+
+export interface ShapeUpBet {
+  approvedAt: ISODate;
+  auditDecisionId: Id;
+  cycleStart: ISODate;
+  cycleEnd: ISODate;
+  circuitBreakerAt: ISODate;
+  summary: string;
+}
+
+export interface ShapeUpPitch {
+  problem: string;
+  appetiteKind: ShapeUpAppetiteKind;
+  appetiteDays: number;
+  solutionSketch: string;
+  rabbitHoles: string;
+  noGos: string;
+  successBaseline: string;
+  scopes: ShapeUpScope[];
+  bet?: ShapeUpBet;
+  createdAt: ISODate;
+  updatedAt: ISODate;
 }
 
 export interface Constraint {
@@ -86,6 +120,8 @@ export interface WorkItem {
   hammockStartId?: Id;
   hammockFinishId?: Id;
   evidenceRequired?: boolean;
+  shapeUpScopeId?: Id;
+  isShapeUpCycleMarker?: boolean;
 }
 
 export interface Dependency {

@@ -1,6 +1,6 @@
 import { evaluateAuditGates } from "./audit";
 import { calculateProjectHealth } from "./portfolio";
-import { schedulePortfolio, scheduleProject } from "./scheduler";
+import { createShapeUpPitch, isShapeUpBet, isShapeUpPitchComplete, scheduleShapeUpAwarePortfolio, scheduleShapeUpAwareProject, shapeUpAppetiteDays, shapeUpMissingBetRequirements, shapeUpScopeStatus } from "./shapeUp";
 import type {
   Actual,
   AuditGate,
@@ -10,12 +10,16 @@ import type {
   Evidence,
   EvidenceKind,
   Project,
+  ScheduleResult,
+  ShapeUpAppetiteKind,
+  ShapeUpPitch,
+  ShapeUpScope,
   WorkItem,
   WorkItemKind,
   WorkspaceSnapshot
 } from "./types";
 
-export const AGENT_PROTOCOL_VERSION = "2026-07-02.v1";
+export const AGENT_PROTOCOL_VERSION = "2026-07-04.v1";
 
 const daySeconds = 24 * 60 * 60;
 const hourSeconds = 60 * 60;
@@ -26,6 +30,9 @@ export type AgentCommandType =
   | "record_actual"
   | "add_evidence"
   | "add_note"
+  | "update_shape_up_pitch"
+  | "add_shape_up_scope"
+  | "update_shape_up_scope"
   | "request_complete_project"
   | "request_archive_project"
   | "request_dependency_change"
@@ -56,6 +63,16 @@ export interface AgentCommand {
   url?: string;
   tags?: string[] | string;
   rationale?: string;
+  problem?: string;
+  appetite_kind?: ShapeUpAppetiteKind;
+  solution_sketch?: string;
+  rabbit_holes?: string;
+  no_gos?: string;
+  success_baseline?: string;
+  scope_id?: string;
+  description?: string;
+  confirmed?: boolean;
+  hill_position?: number;
   dependency_from?: string;
   dependency_to?: string;
   dependency_type?: "FS" | "SS" | "FF" | "SF";
@@ -142,13 +159,14 @@ export function buildAgentManualText(generatedAt = new Date().toISOString()) {
     "- The app returns a Command Receipt with parsed command, dry-run diff, risk, result, and any ChangeSet/Gate id.",
     "",
     "Risk Model",
-    "- low-risk: create ordinary task, update ordinary task percent, record actual work, add evidence, add note.",
+    "- low-risk: create ordinary task, update ordinary task percent, record actual work, add evidence, add note, update Shape Up pitch, add or adjust Shape Up scope.",
     "- guarded: dependency changes, baseline changes, scope expansion, milestone completion without evidence, project completion, archive.",
+    "- forbidden: AI Agent cannot approve a Shape Up bet. Betting Gate approval must be human-confirmed in the UI.",
     "- invalid: missing project, missing task, unsupported command, ambiguous natural language.",
     "",
     "JSON Command Schema",
     "{",
-    "  \"command_type\": \"create_task | update_task_progress | record_actual | add_evidence | add_note | request_complete_project | request_archive_project | request_dependency_change | request_baseline_change | request_scope_expansion\",",
+    "  \"command_type\": \"create_task | update_task_progress | record_actual | add_evidence | add_note | update_shape_up_pitch | add_shape_up_scope | update_shape_up_scope | request_complete_project | request_archive_project | request_dependency_change | request_baseline_change | request_scope_expansion\",",
     "  \"project_id\": \"p-omni\",",
     "  \"work_item_id\": \"w-domain\",",
     "  \"title\": \"Task title for create_task\",",
@@ -177,7 +195,7 @@ export function buildAgentManualText(generatedAt = new Date().toISOString()) {
 }
 
 export function buildAgentWorkspaceJson(snapshot: WorkspaceSnapshot, generatedAt = new Date().toISOString()) {
-  const schedules = schedulePortfolio(snapshot.projects, snapshot.workItems, snapshot.dependencies);
+  const schedules = scheduleShapeUpAwarePortfolio(snapshot.projects, snapshot.workItems, snapshot.dependencies);
   const gates = buildWorkspaceGates(snapshot, generatedAt);
   return {
     agent_protocol_version: AGENT_PROTOCOL_VERSION,
@@ -198,6 +216,7 @@ export function buildAgentWorkspaceJson(snapshot: WorkspaceSnapshot, generatedAt
     allowed_command_entry: {
       dry_run_required: true,
       low_risk_auto_apply: ["create_task", "update_task_progress", "record_actual", "add_evidence", "add_note"],
+      shaping_auto_apply: ["update_shape_up_pitch", "add_shape_up_scope", "update_shape_up_scope"],
       guarded_requests: ["request_complete_project", "request_archive_project", "request_dependency_change", "request_baseline_change", "request_scope_expansion"]
     }
   };
@@ -214,7 +233,7 @@ export function buildAgentProjectJson(snapshot: WorkspaceSnapshot, projectId: st
       error: `Project ${projectId} was not found.`
     };
   }
-  const schedule = scheduleProject(project, snapshot.workItems, snapshot.dependencies);
+  const schedule = scheduleShapeUpAwareProject(project, snapshot.workItems, snapshot.dependencies);
   const gates = buildWorkspaceGates(snapshot, generatedAt);
   return {
     agent_protocol_version: AGENT_PROTOCOL_VERSION,
@@ -243,6 +262,7 @@ export function buildAgentWorkspaceText(snapshot: WorkspaceSnapshot, generatedAt
       `  status: ${project.status} / ${project.mode}`,
       `  north_star: ${project.north_star}`,
       `  current_outcome: ${project.current_outcome}`,
+      `  shape_up: ${project.shape_up.enabled ? `${project.shape_up.stage} / ${project.shape_up.bet_status}` : "off"}`,
       `  open_work: ${project.summary.open_work}`,
       `  next_action: ${project.summary.next_action ?? "none"}`,
       `  hard_gates: ${project.summary.open_hard_gates}`,
@@ -273,7 +293,7 @@ export function buildAgentProjectText(snapshot: WorkspaceSnapshot, projectId: st
   const project = projectJson(
     snapshot,
     sourceProject,
-    scheduleProject(sourceProject, snapshot.workItems, snapshot.dependencies),
+    scheduleShapeUpAwareProject(sourceProject, snapshot.workItems, snapshot.dependencies),
     buildWorkspaceGates(snapshot, generatedAt),
     generatedAt,
     "detail"
@@ -285,6 +305,15 @@ export function buildAgentProjectText(snapshot: WorkspaceSnapshot, projectId: st
     north_star: string;
     current_outcome: string;
     direction_card?: DirectionCard;
+    shape_up: {
+      enabled: boolean;
+      stage: string;
+      bet_status: string;
+      appetite_days?: number;
+      missing_bet_requirements: string[];
+      circuit_breaker_at?: string;
+      scopes: Array<{ id: string; title: string; confirmed: boolean; hill_position: number; hill_status: string; can_enter_gantt: boolean }>;
+    };
     summary: {
       open_work: number;
       next_action?: string;
@@ -309,6 +338,17 @@ export function buildAgentProjectText(snapshot: WorkspaceSnapshot, projectId: st
     `mode: ${project.mode}`,
     `north_star: ${project.north_star}`,
     `current_outcome: ${project.current_outcome}`,
+    "",
+    "Shape Up",
+    `enabled: ${project.shape_up.enabled}`,
+    `stage: ${project.shape_up.stage}`,
+    `bet_status: ${project.shape_up.bet_status}`,
+    `appetite_days: ${project.shape_up.appetite_days ?? "n/a"}`,
+    `circuit_breaker_at: ${project.shape_up.circuit_breaker_at ?? "n/a"}`,
+    `missing_bet_requirements: ${project.shape_up.missing_bet_requirements.join(", ") || "none"}`,
+    ...(project.shape_up.scopes.length
+      ? project.shape_up.scopes.map((scope) => `- scope ${scope.id}: ${scope.title} | ${scope.hill_status} ${scope.hill_position}% | confirmed=${scope.confirmed} | can_enter_gantt=${scope.can_enter_gantt}`)
+      : ["- scopes: none"]),
     "",
     "Direction Card",
     ...directionCardLines(project.direction_card),
@@ -336,6 +376,9 @@ export function buildAgentProjectText(snapshot: WorkspaceSnapshot, projectId: st
     "- record_actual",
     "- add_evidence",
     "- add_note",
+    "- update_shape_up_pitch",
+    "- add_shape_up_scope",
+    "- update_shape_up_scope",
     "- guarded request: request_complete_project, request_archive_project, request_dependency_change, request_baseline_change, request_scope_expansion",
     "",
     "Command Inbox: /agent/commands"
@@ -688,6 +731,20 @@ function applyLowRiskCommand(snapshot: WorkspaceSnapshot, preview: AgentCommandR
     diffs = [{ entity: "Evidence", entityId: evidence.id, field: "created", before: null, after: evidence }];
   }
 
+  if (
+    command.command_type === "update_shape_up_pitch" ||
+    command.command_type === "add_shape_up_scope" ||
+    command.command_type === "update_shape_up_scope"
+  ) {
+    const nextPitch = nextShapeUpPitch(project, command, generatedAt);
+    next = {
+      ...next,
+      projects: next.projects.map((item) => item.id === project.id ? { ...item, shapeUpPitch: nextPitch, status: item.shapeUpPitch ? item.status : "waiting" } : item)
+    };
+    title = `Agent shape ${project.name}`;
+    diffs = [{ entity: "Project", entityId: project.id, field: "shapeUpPitch", before: project.shapeUpPitch ?? null, after: nextPitch }];
+  }
+
   const changeSet = createAgentChangeSet(next, project.id, title, "Applied from Agent Command Inbox after dry-run review.", diffs, "approved", generatedAt);
   return {
     workspace: {
@@ -749,6 +806,28 @@ function validateCommand(snapshot: WorkspaceSnapshot, project: Project, workItem
   if ((command.command_type === "add_evidence" || command.command_type === "add_note") && !command.summary?.trim()) {
     errors.push(`${command.command_type} requires summary.`);
   }
+  if (command.command_type === "update_shape_up_pitch" && ![
+    command.problem,
+    command.solution_sketch,
+    command.rabbit_holes,
+    command.no_gos,
+    command.success_baseline,
+    command.appetite_kind
+  ].some((value) => typeof value === "string" ? value.trim() : Boolean(value))) {
+    errors.push("update_shape_up_pitch requires at least one Shape Up pitch field.");
+  }
+  if (command.appetite_kind && !["small-batch", "big-batch"].includes(command.appetite_kind)) {
+    errors.push("appetite_kind must be small-batch or big-batch.");
+  }
+  if (command.command_type === "add_shape_up_scope" && !command.title?.trim()) {
+    errors.push("add_shape_up_scope requires title.");
+  }
+  if (command.command_type === "update_shape_up_scope" && !command.scope_id?.trim()) {
+    errors.push("update_shape_up_scope requires scope_id.");
+  }
+  if (command.command_type === "update_shape_up_scope" && command.scope_id && !project.shapeUpPitch?.scopes.some((scope) => scope.id === command.scope_id)) {
+    errors.push(`Shape Up scope ${command.scope_id} was not found.`);
+  }
   if (command.command_type === "update_task_progress" && command.percent_complete === undefined) {
     errors.push("update_task_progress requires percent_complete.");
   }
@@ -794,6 +873,13 @@ function previewDiffs(snapshot: WorkspaceSnapshot, project: Project, workItem: W
   if (command.command_type === "add_evidence" || command.command_type === "add_note") {
     const evidence = buildEvidence(snapshot, project.id, command, generatedAt);
     return [{ entity: "Evidence", entityId: evidence.id, field: "created", before: null, after: evidence }];
+  }
+  if (
+    command.command_type === "update_shape_up_pitch" ||
+    command.command_type === "add_shape_up_scope" ||
+    command.command_type === "update_shape_up_scope"
+  ) {
+    return [{ entity: "Project", entityId: project.id, field: "shapeUpPitch", before: project.shapeUpPitch ?? null, after: nextShapeUpPitch(project, command, generatedAt) }];
   }
   if (command.command_type === "request_complete_project") {
     return [{ entity: "Project", entityId: project.id, field: "status", before: project.status, after: "done" }];
@@ -845,15 +931,61 @@ function buildEvidence(snapshot: WorkspaceSnapshot, projectId: string, command: 
   };
 }
 
+function nextShapeUpPitch(project: Project, command: AgentCommand, generatedAt: string): ShapeUpPitch {
+  const current = project.shapeUpPitch ?? createShapeUpPitch({
+    problem: project.directionCard?.userProblem || project.currentOutcome,
+    appetiteKind: "small-batch",
+    now: generatedAt
+  });
+  let next: ShapeUpPitch = {
+    ...current,
+    problem: command.problem?.trim() ?? current.problem,
+    appetiteKind: command.appetite_kind ?? current.appetiteKind,
+    appetiteDays: command.appetite_kind ? shapeUpAppetiteDays[command.appetite_kind] : current.appetiteDays,
+    solutionSketch: command.solution_sketch?.trim() ?? current.solutionSketch,
+    rabbitHoles: command.rabbit_holes?.trim() ?? current.rabbitHoles,
+    noGos: command.no_gos?.trim() ?? current.noGos,
+    successBaseline: command.success_baseline?.trim() ?? current.successBaseline,
+    updatedAt: generatedAt
+  };
+
+  if (command.command_type === "add_shape_up_scope") {
+    const title = command.title?.trim() ?? "Untitled scope";
+    const scope: ShapeUpScope = {
+      id: uniqueId("scope", title, current.scopes.map((item) => item.id)),
+      title,
+      description: command.description?.trim() ?? "",
+      confirmed: command.confirmed ?? true,
+      hillPosition: clamp(command.hill_position ?? 20, 0, 100)
+    };
+    next = { ...next, scopes: [...next.scopes, scope] };
+  }
+
+  if (command.command_type === "update_shape_up_scope" && command.scope_id) {
+    next = {
+      ...next,
+      scopes: next.scopes.map((scope) => scope.id === command.scope_id ? {
+        ...scope,
+        title: command.title?.trim() ?? scope.title,
+        description: command.description?.trim() ?? scope.description,
+        confirmed: command.confirmed ?? scope.confirmed,
+        hillPosition: clamp(command.hill_position ?? scope.hillPosition, 0, 100)
+      } : scope)
+    };
+  }
+
+  return next;
+}
+
 function projectJson(
   snapshot: WorkspaceSnapshot,
   project: Project,
-  schedule: ReturnType<typeof scheduleProject> | undefined,
+  schedule: ScheduleResult | undefined,
   gates: AuditGate[],
   generatedAt: string,
   depth: "summary" | "detail"
 ) {
-  const scheduled = schedule ?? scheduleProject(project, snapshot.workItems, snapshot.dependencies);
+  const scheduled = schedule ?? scheduleShapeUpAwareProject(project, snapshot.workItems, snapshot.dependencies);
   const projectItems = snapshot.workItems.filter((item) => item.projectId === project.id);
   const projectEvidence = snapshot.evidence.filter((item) => item.projectId === project.id);
   const projectGates = gates.filter((gate) => gate.projectId === project.id);
@@ -864,6 +996,20 @@ function projectJson(
   const nextAction = scheduled.items
     .filter((item) => item.workItem.kind !== "phase" && item.workItem.percentComplete < 100)
     .sort((a, b) => Number(b.isCritical) - Number(a.isCritical) || a.start.localeCompare(b.start))[0];
+  const shapeUpPitch = project.shapeUpPitch;
+  const shapeUpStage = !shapeUpPitch
+    ? "off"
+    : project.status === "waiting" && !isShapeUpPitchComplete(shapeUpPitch)
+      ? "shaping"
+      : project.status === "waiting"
+        ? "betting"
+        : project.status === "active"
+          ? "building"
+          : project.status === "paused"
+            ? "circuit_breaker"
+            : project.status === "done"
+              ? "shipped"
+              : "killed";
   const base = {
     id: project.id,
     name: project.name,
@@ -875,6 +1021,22 @@ function projectJson(
     start: project.start,
     horizon: project.horizon,
     direction_card: project.directionCard,
+    shape_up: {
+      enabled: Boolean(shapeUpPitch),
+      stage: shapeUpStage,
+      bet_status: shapeUpPitch ? isShapeUpBet(project) ? "accepted" : "not_accepted" : "off",
+      appetite_days: shapeUpPitch?.appetiteDays,
+      missing_bet_requirements: shapeUpPitch ? shapeUpMissingBetRequirements(project) : [],
+      circuit_breaker_at: shapeUpPitch?.bet?.circuitBreakerAt,
+      scopes: shapeUpPitch?.scopes.map((scope) => ({
+        id: scope.id,
+        title: scope.title,
+        confirmed: scope.confirmed,
+        hill_position: scope.hillPosition,
+        hill_status: shapeUpScopeStatus(scope),
+        can_enter_gantt: scope.confirmed && scope.hillPosition > 50
+      })) ?? []
+    },
     summary: {
       open_work: projectItems.filter((item) => item.kind !== "phase" && item.percentComplete < 100).length,
       next_action: nextAction ? `${nextAction.workItem.outline} ${nextAction.workItem.title}` : undefined,
@@ -944,7 +1106,7 @@ function projectJson(
 }
 
 function buildWorkspaceGates(snapshot: WorkspaceSnapshot, generatedAt: string) {
-  const schedules = schedulePortfolio(snapshot.projects, snapshot.workItems, snapshot.dependencies);
+  const schedules = scheduleShapeUpAwarePortfolio(snapshot.projects, snapshot.workItems, snapshot.dependencies);
   const calculated = snapshot.projects.flatMap((project) => {
     const schedule = schedules.find((candidate) => candidate.projectId === project.id);
     return evaluateAuditGates(project, snapshot.workItems, schedule?.items ?? [], snapshot.evidence, snapshot.changeSets, generatedAt);
@@ -1045,6 +1207,9 @@ function commandSummary(command: AgentCommand, project: Project, workItem?: Work
   if (command.command_type === "record_actual") return `Record actuals for ${workItem?.title ?? command.work_item} in ${project.name}`;
   if (command.command_type === "add_evidence") return `Add evidence to ${project.name}`;
   if (command.command_type === "add_note") return `Add note to ${project.name}`;
+  if (command.command_type === "update_shape_up_pitch") return `Update Shape Up pitch for ${project.name}`;
+  if (command.command_type === "add_shape_up_scope") return `Add Shape Up scope ${command.title ?? ""} to ${project.name}`;
+  if (command.command_type === "update_shape_up_scope") return `Update Shape Up scope ${command.scope_id ?? ""} in ${project.name}`;
   return `Request ${command.command_type} for ${project.name}`;
 }
 
@@ -1119,6 +1284,9 @@ function isAgentCommandType(value: unknown): value is AgentCommandType {
     "record_actual",
     "add_evidence",
     "add_note",
+    "update_shape_up_pitch",
+    "add_shape_up_scope",
+    "update_shape_up_scope",
     "request_complete_project",
     "request_archive_project",
     "request_dependency_change",

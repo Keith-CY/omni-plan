@@ -7,7 +7,10 @@ import { BrowserEncryptedSecretVault, browserSecretVaultStatus, decryptProviderS
 import {
   buildChangeEnvelopePath,
   createSyncChangeEnvelope,
+  createFirebaseE2eeManifest,
+  createFirebaseWorkspaceSnapshotEnvelope,
   decryptSyncPayload,
+  FirebaseE2eeSyncClient,
   githubSyncCommitMessage,
   GitHubPrivateRepoSyncClient,
   GitHubSyncConflictError
@@ -149,6 +152,8 @@ describe("workspace, GitHub, and secrets", () => {
     const loaded = repository.load();
 
     expect(loaded.githubSync.repo).toBe("private-plan");
+    expect(loaded.firebaseSync.databaseId).toBe("(default)");
+    expect(loaded.firebaseSync.autoSyncEnabled).toBe(false);
     expect(loaded.aiProviders[0].baseUrl).toBe("https://api.example.com/v1");
     expect(rawStorage).not.toContain("github_pat_secret");
     expect(rawStorage).not.toContain("sk-secret");
@@ -208,5 +213,82 @@ describe("workspace, GitHub, and secrets", () => {
       (async () => ({ ok: false, status: 409, json: async () => ({}) }) as Response) as unknown as typeof fetch
     );
     await expect(conflictClient.writeText(".omni-plan/workspaces/ws/manifest.json", "{}", "conflict")).rejects.toBeInstanceOf(GitHubSyncConflictError);
+  });
+
+  it("creates encrypted Firebase workspace snapshots without leaking project content", async () => {
+    const envelope = await createFirebaseWorkspaceSnapshotEnvelope(
+      sampleWorkspace,
+      { workspaceId: "personal", deviceId: "macbook" },
+      undefined,
+      "correct horse",
+      "2026-07-08T00:00:00.000Z"
+    );
+    const decrypted = await decryptSyncPayload<typeof sampleWorkspace>(envelope.payload, "correct horse");
+
+    expect(envelope.revision).toHaveLength(64);
+    expect(JSON.stringify(envelope)).not.toContain(sampleWorkspace.projects[0].name);
+    expect(decrypted.projects[0].name).toBe(sampleWorkspace.projects[0].name);
+    await expect(decryptSyncPayload(envelope.payload, "wrong horse")).rejects.toThrow();
+  });
+
+  it("pushes and pulls Firebase E2EE workspace snapshots through REST documents", async () => {
+    const config = {
+      projectId: "firebase-project",
+      apiKey: "firebase-web-api-key",
+      databaseId: "(default)",
+      collectionPath: "omniPlanSync",
+      workspaceId: "personal",
+      deviceId: "macbook"
+    };
+    const envelope = await createFirebaseWorkspaceSnapshotEnvelope(
+      sampleWorkspace,
+      { workspaceId: config.workspaceId, deviceId: config.deviceId },
+      undefined,
+      "correct horse",
+      "2026-07-08T00:00:00.000Z"
+    );
+    const manifest = createFirebaseE2eeManifest(config, envelope);
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    const fetcher = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      calls.push({ url, init: init ?? {} });
+      if (url.startsWith("https://identitytoolkit.googleapis.com")) {
+        return {
+          ok: true,
+          json: async () => ({ idToken: "firebase-id-token", refreshToken: "refresh-token", localId: "anonymous-user", expiresIn: "3600" })
+        } as Response;
+      }
+      if (url.endsWith(":commit")) {
+        return {
+          ok: true,
+          json: async () => ({ commitTime: "2026-07-08T00:01:00.000Z" })
+        } as Response;
+      }
+      if (url.endsWith("/omniPlanSync/personal/manifest/current")) {
+        return {
+          ok: true,
+          json: async () => ({ fields: { manifestJson: { stringValue: JSON.stringify(manifest) } } })
+        } as Response;
+      }
+      if (url.endsWith("/omniPlanSync/personal/snapshots/latest")) {
+        return {
+          ok: true,
+          json: async () => ({ fields: { envelopeJson: { stringValue: JSON.stringify(envelope) } } })
+        } as Response;
+      }
+      return { ok: false, status: 404, json: async () => ({}) } as Response;
+    };
+    const client = new FirebaseE2eeSyncClient(config, fetcher as typeof fetch);
+    const session = await client.signInAnonymously();
+    const push = await client.pushWorkspaceSnapshot(sampleWorkspace, "correct horse", session, manifest);
+    const pull = await client.pullWorkspaceSnapshot("correct horse", session);
+    const commitBody = JSON.stringify(JSON.parse(calls.find((call) => call.url.endsWith(":commit"))?.init.body as string));
+
+    expect(session.idToken).toBe("firebase-id-token");
+    expect(push.envelope.revision).toHaveLength(64);
+    expect(pull.workspace.projects).toHaveLength(sampleWorkspace.projects.length);
+    expect(calls.some((call) => call.url.includes("/documents:commit"))).toBe(true);
+    expect(commitBody).not.toContain(sampleWorkspace.projects[0].name);
+    expect(commitBody).toContain("envelopeJson");
   });
 });

@@ -8,6 +8,7 @@ import type {
   ScheduledItem,
   WorkItem
 } from "./types";
+import { isShapeUpBet, isShapeUpCycleExpired, isShapeUpPitchComplete, shapeUpMissingBetRequirements } from "./shapeUp";
 
 function hasCompleteDirectionCard(card?: DirectionCard): boolean {
   if (!card) return false;
@@ -33,6 +34,62 @@ export function evaluateAuditGates(
   now: string
 ): AuditGate[] {
   const gates: AuditGate[] = [];
+  const shapeUpPitch = project.shapeUpPitch;
+
+  if (shapeUpPitch) {
+    const missing = shapeUpMissingBetRequirements(project);
+    if (project.status === "waiting" && missing.length > 0) {
+      gates.push({
+        id: `gate-shapeup-pitch-${project.id}`,
+        projectId: project.id,
+        targetType: "project",
+        targetId: project.id,
+        severity: "hard",
+        reason: `Shape Up pitch is incomplete: ${missing.join(", ")}.`,
+        requiredAction: "Complete Problem, Appetite, Solution Sketch, Rabbit Holes, No-gos, Success Baseline, and at least one confirmed scope before betting.",
+        status: "open"
+      });
+    }
+
+    if (project.status === "waiting" && isShapeUpPitchComplete(shapeUpPitch) && !shapeUpPitch.bet) {
+      gates.push({
+        id: `gate-shapeup-bet-${project.id}`,
+        projectId: project.id,
+        targetType: "project",
+        targetId: project.id,
+        severity: "hard",
+        reason: "Shape Up pitch is ready but has not been approved at the Betting Gate.",
+        requiredAction: "Human owner must approve the bet before this project can enter Today or the Gantt execution plan.",
+        status: "open"
+      });
+    }
+
+    if (project.status === "active" && !isShapeUpBet(project)) {
+      gates.push({
+        id: `gate-shapeup-unrecorded-bet-${project.id}`,
+        projectId: project.id,
+        targetType: "project",
+        targetId: project.id,
+        severity: "hard",
+        reason: "Project is active without a recorded Shape Up bet.",
+        requiredAction: "Record a human-approved Betting Gate decision or move the project back to waiting.",
+        status: "open"
+      });
+    }
+
+    if (isShapeUpCycleExpired(project, now)) {
+      gates.push({
+        id: `gate-shapeup-circuit-${project.id}`,
+        projectId: project.id,
+        targetType: "project",
+        targetId: project.id,
+        severity: "hard",
+        reason: "Shape Up circuit breaker expired before the project shipped.",
+        requiredAction: "Choose Ship as-is, Cut scope, Kill, or Re-bet. Do not silently extend the cycle.",
+        status: "open"
+      });
+    }
+  }
 
   if (!hasCompleteDirectionCard(project.directionCard)) {
     gates.push({

@@ -1,4 +1,4 @@
-import type { ChangeSet, Id } from "./types";
+import type { ChangeSet, Id, WorkspaceSnapshot } from "./types";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -68,6 +68,15 @@ export interface GitHubSyncConfig {
   deviceId: Id;
 }
 
+export interface FirebaseE2eeSyncConfig {
+  projectId: string;
+  apiKey: string;
+  databaseId: string;
+  collectionPath: string;
+  workspaceId: Id;
+  deviceId: Id;
+}
+
 export interface GitHubSyncPaths {
   manifest: string;
   changeSetDirectory: string;
@@ -95,6 +104,17 @@ export interface SyncChangeEnvelope {
   payload: EncryptedSyncPayload;
 }
 
+export interface FirebaseWorkspaceSnapshotEnvelope {
+  schemaVersion: 1;
+  workspaceId: Id;
+  deviceId: Id;
+  revision: string;
+  previousRevision?: string;
+  createdAt: string;
+  plaintextChecksum: string;
+  payload: EncryptedSyncPayload;
+}
+
 export interface SyncManifest {
   schemaVersion: 1;
   workspaceId: Id;
@@ -104,6 +124,17 @@ export interface SyncManifest {
   latestRevision: string;
   heads: Record<Id, { sequence: number; revision: string; updatedAt: string }>;
   updatedAt: string;
+}
+
+export interface FirebaseE2eeManifest {
+  schemaVersion: 1;
+  provider: "firebase-firestore-e2ee";
+  workspaceId: Id;
+  latestRevision: string;
+  updatedAt: string;
+  updatedByDeviceId: Id;
+  snapshotDocumentPath: string;
+  heads: Record<Id, { revision: string; updatedAt: string }>;
 }
 
 export interface GitHubRepoTextFile {
@@ -125,12 +156,28 @@ export class GitHubSyncConflictError extends Error {
   }
 }
 
+export class FirebaseSyncConflictError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "FirebaseSyncConflictError";
+  }
+}
+
 export function buildGitHubSyncPaths(config: Pick<GitHubSyncConfig, "rootPath" | "workspaceId" | "deviceId">): GitHubSyncPaths {
   const workspaceRoot = joinRepoPath(config.rootPath, "workspaces", config.workspaceId);
   return {
     manifest: joinRepoPath(workspaceRoot, "manifest.json"),
     changeSetDirectory: joinRepoPath(workspaceRoot, "changes", config.deviceId),
     snapshotDirectory: joinRepoPath(workspaceRoot, "snapshots")
+  };
+}
+
+export function buildFirebaseSyncPaths(config: Pick<FirebaseE2eeSyncConfig, "collectionPath" | "workspaceId">) {
+  const root = joinRepoPath(config.collectionPath || "omniPlanSync", config.workspaceId);
+  return {
+    manifest: joinRepoPath(root, "manifest", "current"),
+    snapshot: joinRepoPath(root, "snapshots", "latest"),
+    opDirectory: joinRepoPath(root, "ops")
   };
 }
 
@@ -187,6 +234,10 @@ export async function decryptSyncPayload<T>(payload: EncryptedSyncPayload, passp
   return JSON.parse(decoder.decode(decrypted)) as T;
 }
 
+export async function workspacePlaintextChecksum(snapshot: WorkspaceSnapshot): Promise<string> {
+  return sha256Hex(stableJson(snapshot));
+}
+
 export async function createSyncChangeEnvelope(
   changeSet: ChangeSet,
   config: Pick<GitHubSyncConfig, "workspaceId" | "deviceId">,
@@ -207,6 +258,62 @@ export async function createSyncChangeEnvelope(
     createdAt,
     plaintextChecksum,
     payload: await encryptSyncPayload(changeSet, passphrase)
+  };
+}
+
+export async function createFirebaseWorkspaceSnapshotEnvelope(
+  snapshot: WorkspaceSnapshot,
+  config: Pick<FirebaseE2eeSyncConfig, "workspaceId" | "deviceId">,
+  previousRevision: string | undefined,
+  passphrase: string,
+  createdAt: string
+): Promise<FirebaseWorkspaceSnapshotEnvelope> {
+  const plaintextChecksum = await workspacePlaintextChecksum(snapshot);
+  const revision = await sha256Hex(`${previousRevision ?? "root"}\n${config.deviceId}\n${createdAt}\n${plaintextChecksum}`);
+  return {
+    schemaVersion: 1,
+    workspaceId: config.workspaceId,
+    deviceId: config.deviceId,
+    revision,
+    ...(previousRevision ? { previousRevision } : {}),
+    createdAt,
+    plaintextChecksum,
+    payload: await encryptSyncPayload(snapshot, passphrase)
+  };
+}
+
+export async function decryptFirebaseWorkspaceSnapshotEnvelope(
+  envelope: FirebaseWorkspaceSnapshotEnvelope,
+  passphrase: string
+): Promise<WorkspaceSnapshot> {
+  const snapshot = await decryptSyncPayload<WorkspaceSnapshot>(envelope.payload, passphrase);
+  const checksum = await workspacePlaintextChecksum(snapshot);
+  if (checksum !== envelope.plaintextChecksum) {
+    throw new Error("Firebase workspace checksum mismatch after decrypt.");
+  }
+  return snapshot;
+}
+
+export function createFirebaseE2eeManifest(
+  config: FirebaseE2eeSyncConfig,
+  envelope: FirebaseWorkspaceSnapshotEnvelope,
+  previous?: FirebaseE2eeManifest
+): FirebaseE2eeManifest {
+  return {
+    schemaVersion: 1,
+    provider: "firebase-firestore-e2ee",
+    workspaceId: config.workspaceId,
+    latestRevision: envelope.revision,
+    updatedAt: envelope.createdAt,
+    updatedByDeviceId: config.deviceId,
+    snapshotDocumentPath: buildFirebaseSyncPaths(config).snapshot,
+    heads: {
+      ...(previous?.heads ?? {}),
+      [config.deviceId]: {
+        revision: envelope.revision,
+        updatedAt: envelope.createdAt
+      }
+    }
   };
 }
 
@@ -275,14 +382,214 @@ export class GitHubPrivateRepoSyncClient {
   }
 }
 
+type FirestoreValue = { stringValue: string } | { integerValue: string } | { booleanValue: boolean };
+type FirestoreDocument = {
+  name?: string;
+  fields?: Record<string, FirestoreValue>;
+  createTime?: string;
+  updateTime?: string;
+};
+
+export interface FirebaseAnonymousSession {
+  idToken: string;
+  refreshToken?: string;
+  localId: string;
+  expiresIn?: number;
+}
+
+export interface FirebaseWorkspacePushResult {
+  manifest: FirebaseE2eeManifest;
+  envelope: FirebaseWorkspaceSnapshotEnvelope;
+  commitTime?: string;
+}
+
+export interface FirebaseWorkspacePullResult {
+  manifest: FirebaseE2eeManifest;
+  envelope: FirebaseWorkspaceSnapshotEnvelope;
+  workspace: WorkspaceSnapshot;
+}
+
+export class FirebaseE2eeSyncClient {
+  constructor(
+    private readonly config: FirebaseE2eeSyncConfig,
+    private readonly fetcher: typeof fetch = fetch
+  ) {}
+
+  async signInAnonymously(): Promise<FirebaseAnonymousSession> {
+    const response = await this.fetcher(`https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=${encodeURIComponent(this.config.apiKey)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ returnSecureToken: true })
+    });
+    if (!response.ok) throw new Error(`Firebase anonymous sign-in failed: ${response.status}`);
+    const payload = await response.json() as { idToken: string; refreshToken?: string; localId: string; expiresIn?: string };
+    return {
+      idToken: payload.idToken,
+      refreshToken: payload.refreshToken,
+      localId: payload.localId,
+      expiresIn: payload.expiresIn ? Number(payload.expiresIn) : undefined
+    };
+  }
+
+  async readManifest(session: FirebaseAnonymousSession): Promise<FirebaseE2eeManifest | undefined> {
+    const document = await this.readDocument(buildFirebaseSyncPaths(this.config).manifest, session);
+    return document ? this.parseJsonField<FirebaseE2eeManifest>(document, "manifestJson") : undefined;
+  }
+
+  async readLatestSnapshotEnvelope(session: FirebaseAnonymousSession): Promise<FirebaseWorkspaceSnapshotEnvelope | undefined> {
+    const document = await this.readDocument(buildFirebaseSyncPaths(this.config).snapshot, session);
+    return document ? this.parseJsonField<FirebaseWorkspaceSnapshotEnvelope>(document, "envelopeJson") : undefined;
+  }
+
+  async pushWorkspaceSnapshot(
+    snapshot: WorkspaceSnapshot,
+    passphrase: string,
+    session: FirebaseAnonymousSession,
+    previousManifest?: FirebaseE2eeManifest
+  ): Promise<FirebaseWorkspacePushResult> {
+    const createdAt = new Date().toISOString();
+    const envelope = await createFirebaseWorkspaceSnapshotEnvelope(
+      snapshot,
+      { workspaceId: this.config.workspaceId, deviceId: this.config.deviceId },
+      previousManifest?.latestRevision,
+      passphrase,
+      createdAt
+    );
+    const manifest = createFirebaseE2eeManifest(this.config, envelope, previousManifest);
+    const paths = buildFirebaseSyncPaths(this.config);
+    const commit = await this.commitDocuments([
+      {
+        path: paths.snapshot,
+        fields: {
+          schemaVersion: { integerValue: "1" },
+          workspaceId: { stringValue: this.config.workspaceId },
+          revision: { stringValue: envelope.revision },
+          updatedAt: { stringValue: envelope.createdAt },
+          envelopeJson: { stringValue: JSON.stringify(envelope) }
+        }
+      },
+      {
+        path: joinRepoPath(paths.opDirectory, envelope.revision),
+        fields: {
+          schemaVersion: { integerValue: "1" },
+          workspaceId: { stringValue: this.config.workspaceId },
+          deviceId: { stringValue: this.config.deviceId },
+          revision: { stringValue: envelope.revision },
+          previousRevision: { stringValue: envelope.previousRevision ?? "" },
+          createdAt: { stringValue: envelope.createdAt },
+          envelopeJson: { stringValue: JSON.stringify(envelope) }
+        }
+      },
+      {
+        path: paths.manifest,
+        fields: {
+          schemaVersion: { integerValue: "1" },
+          workspaceId: { stringValue: this.config.workspaceId },
+          latestRevision: { stringValue: manifest.latestRevision },
+          updatedAt: { stringValue: manifest.updatedAt },
+          manifestJson: { stringValue: JSON.stringify(manifest) }
+        }
+      }
+    ], session);
+    return { manifest, envelope, commitTime: commit.commitTime };
+  }
+
+  async pullWorkspaceSnapshot(passphrase: string, session: FirebaseAnonymousSession): Promise<FirebaseWorkspacePullResult> {
+    const manifest = await this.readManifest(session);
+    if (!manifest) throw new Error("Firebase workspace manifest does not exist yet.");
+    const envelope = await this.readLatestSnapshotEnvelope(session);
+    if (!envelope) throw new Error("Firebase latest workspace snapshot does not exist yet.");
+    if (envelope.revision !== manifest.latestRevision) {
+      throw new FirebaseSyncConflictError("Firebase manifest and latest snapshot revision differ. Push or pull again after the writer finishes.");
+    }
+    const workspace = await decryptFirebaseWorkspaceSnapshotEnvelope(envelope, passphrase);
+    return { manifest, envelope, workspace };
+  }
+
+  private async readDocument(path: string, session: FirebaseAnonymousSession): Promise<FirestoreDocument | undefined> {
+    const response = await this.fetcher(this.documentUrl(path), {
+      headers: this.headers(session)
+    });
+    if (response.status === 404) return undefined;
+    if (!response.ok) throw new Error(`Firebase read failed for ${path}: ${response.status}`);
+    return await response.json() as FirestoreDocument;
+  }
+
+  private async commitDocuments(
+    documents: Array<{ path: string; fields: Record<string, FirestoreValue> }>,
+    session: FirebaseAnonymousSession
+  ): Promise<{ commitTime?: string }> {
+    const response = await this.fetcher(this.commitUrl(), {
+      method: "POST",
+      headers: {
+        ...this.headers(session),
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        writes: documents.map((document) => ({
+          update: {
+            name: this.documentName(document.path),
+            fields: document.fields
+          }
+        }))
+      })
+    });
+    if (!response.ok) throw new Error(`Firebase commit failed: ${response.status}`);
+    return await response.json() as { commitTime?: string };
+  }
+
+  private parseJsonField<T>(document: FirestoreDocument, fieldName: string): T {
+    const value = document.fields?.[fieldName];
+    if (!value || !("stringValue" in value)) throw new Error(`Firebase document is missing ${fieldName}.`);
+    return JSON.parse(value.stringValue) as T;
+  }
+
+  private documentUrl(path: string): string {
+    return `${this.documentsBaseUrl()}/${this.encodeFirestorePath(path)}`;
+  }
+
+  private commitUrl(): string {
+    return `${this.documentsBaseUrl()}:commit`;
+  }
+
+  private documentName(path: string): string {
+    return `projects/${encodeURIComponent(this.config.projectId)}/databases/${encodeURIComponent(this.config.databaseId || "(default)")}/documents/${this.encodeFirestorePath(path)}`;
+  }
+
+  private documentsBaseUrl(): string {
+    return `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(this.config.projectId)}/databases/${encodeURIComponent(this.config.databaseId || "(default)")}/documents`;
+  }
+
+  private encodeFirestorePath(path: string): string {
+    return joinRepoPath(path).split("/").map(encodeURIComponent).join("/");
+  }
+
+  private headers(session: FirebaseAnonymousSession): HeadersInit {
+    return {
+      Authorization: `Bearer ${session.idToken}`
+    };
+  }
+}
+
 export const githubPrivateRepoSyncStatus = {
   selected: true,
   provider: "GitHub Private Repo",
   sourceOfTruth: "Browser local DB",
   remoteTruth: "Encrypted ChangeSet log",
   secretBoundary: "Provider keys are never written to workspace files or GitHub sync objects",
-  secretSync: "Apple Passwords autofill handles cross-device key entry",
+  secretSync: "Apple Passwords or remembered browser passphrase handles local key entry",
   tokenPermission: "Fine-grained PAT with Contents read/write on one private repo",
   rootPath: ".omni-plan",
   conflictPolicy: "GitHub 409 or divergent device heads become Sync Conflict audit gates"
+};
+
+export const firebaseE2eeSyncStatus = {
+  selected: true,
+  provider: "Firebase Firestore",
+  sourceOfTruth: "Browser local DB plus encrypted remote workspace snapshot",
+  remoteTruth: "End-to-end encrypted latest snapshot and operation log",
+  encryption: "AES-GCM with PBKDF2-SHA256 passphrase-derived key",
+  secretBoundary: "Firebase stores ciphertext only; passphrase and provider keys never leave the device",
+  authModel: "Firebase anonymous auth for transport access; workspace passphrase controls decryption",
+  conflictPolicy: "If remote has advanced beyond this device's last sync, pull before pushing"
 };
