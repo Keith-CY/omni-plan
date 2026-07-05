@@ -2,6 +2,16 @@ import type { Dependency, MonteCarloResult, Project, WorkItem } from "./types";
 import { addSeconds } from "./time";
 import { scheduleProject } from "./scheduler";
 
+function isValidIso(value: unknown): value is string {
+  return typeof value === "string" && Number.isFinite(new Date(value).getTime());
+}
+
+function projectFallbackFinish(project: Project): string {
+  if (isValidIso(project.start)) return project.start;
+  if (isValidIso(project.horizon)) return project.horizon;
+  return new Date().toISOString();
+}
+
 function mulberry32(seed: number): () => number {
   return () => {
     let t = (seed += 0x6d2b79f5);
@@ -35,6 +45,7 @@ export function runMonteCarlo(
 ): MonteCarloResult {
   const random = mulberry32(seed);
   const finishes: string[] = [];
+  const fallbackFinish = projectFallbackFinish(project);
 
   for (let run = 0; run < simulations; run += 1) {
     const sampled = items.map((item) => {
@@ -61,7 +72,7 @@ export function runMonteCarlo(
       };
     });
     const result = scheduleProject(project, sampled, dependencies);
-    const finish = result.items.reduce((max, item) => (item.finish > max ? item.finish : max), project.start);
+    const finish = result.items.reduce((max, item) => (item.finish > max ? item.finish : max), fallbackFinish);
     finishes.push(finish);
   }
 

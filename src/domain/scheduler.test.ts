@@ -22,6 +22,27 @@ describe("scheduler", () => {
     expect(result.unsupported).toHaveLength(0);
   });
 
+  it("schedules legacy projects that are missing a start date", () => {
+    const project = {
+      ...projects[0],
+      id: "p-legacy-no-start",
+      name: "Legacy No Start",
+      start: undefined as unknown as string,
+      horizon: "2026-08-01T00:00:00.000Z"
+    };
+    const task = {
+      ...workItems.find((item) => item.id === "w-domain")!,
+      id: "w-legacy-no-start",
+      projectId: project.id,
+      parentId: undefined,
+      constraint: { noEarlierThan: undefined as unknown as string }
+    };
+    const result = scheduleProject(project, [task], []);
+
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0].start).toBe("2026-08-01T00:00:00.000Z");
+  });
+
   it("schedules dependency order and hammock windows", () => {
     const project = projects.find((item) => item.id === "p-omni")!;
     const result = scheduleProject(project, workItems, dependencies);

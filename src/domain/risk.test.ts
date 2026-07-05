@@ -28,6 +28,19 @@ describe("risk, EVM, and audit", () => {
     expect(first.p90Finish >= first.p50Finish).toBe(true);
   });
 
+  it("runs Monte Carlo for legacy empty projects without a start date", () => {
+    const project = {
+      ...projects[0],
+      id: "p-legacy-empty-risk",
+      start: undefined as unknown as string,
+      horizon: "2026-08-01T00:00:00.000Z"
+    };
+    const result = runMonteCarlo(project, [], [], 10, 11);
+
+    expect(result.p50Finish).toBe("2026-08-01T00:00:00.000Z");
+    expect(result.finishDistribution[0]).toEqual({ finish: "2026-08-01T00:00:00.000Z", count: 10 });
+  });
+
   it("samples split-task duration instead of pinning the original split window", () => {
     const project = { ...projects[0], id: "p-split-risk", start: "2026-07-01T00:00:00.000Z" };
     const day = 8 * 3600;

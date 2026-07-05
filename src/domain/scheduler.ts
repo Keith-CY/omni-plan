@@ -11,6 +11,16 @@ import {
 } from "./types";
 import { addSeconds, maxIso, minIso, secondsBetween } from "./time";
 
+function isValidIso(value: unknown): value is string {
+  return typeof value === "string" && Number.isFinite(new Date(value).getTime());
+}
+
+function projectScheduleStart(project: Project): string {
+  if (isValidIso(project.start)) return project.start;
+  if (isValidIso(project.horizon)) return project.horizon;
+  return new Date().toISOString();
+}
+
 function durationOf(item: WorkItem): Seconds {
   if (item.kind === "milestone") return 0;
   if (item.splitSegments?.length) {
@@ -47,15 +57,22 @@ function applySummaryRollups(
       .filter(Boolean) as ScheduledItem[] | undefined;
     const current = scheduled.get(item.id);
     if (!current || !children?.length) continue;
+    const starts = children.map((child) => child.start).filter(isValidIso);
+    const finishes = children.map((child) => child.finish).filter(isValidIso);
+    const earlyStarts = children.map((child) => child.earlyStart).filter(isValidIso);
+    const earlyFinishes = children.map((child) => child.earlyFinish).filter(isValidIso);
+    const lateStarts = children.map((child) => child.lateStart).filter(isValidIso);
+    const lateFinishes = children.map((child) => child.lateFinish).filter(isValidIso);
+    if (!starts.length || !finishes.length || !earlyStarts.length || !earlyFinishes.length || !lateStarts.length || !lateFinishes.length) continue;
 
     scheduled.set(item.id, {
       ...current,
-      start: minIso(...children.map((child) => child.start)),
-      finish: maxIso(...children.map((child) => child.finish)),
-      earlyStart: minIso(...children.map((child) => child.earlyStart)),
-      earlyFinish: maxIso(...children.map((child) => child.earlyFinish)),
-      lateStart: minIso(...children.map((child) => child.lateStart)),
-      lateFinish: maxIso(...children.map((child) => child.lateFinish)),
+      start: minIso(...starts),
+      finish: maxIso(...finishes),
+      earlyStart: minIso(...earlyStarts),
+      earlyFinish: maxIso(...earlyFinishes),
+      lateStart: minIso(...lateStarts),
+      lateFinish: maxIso(...lateFinishes),
       totalFloatSeconds: Math.min(...children.map((child) => child.totalFloatSeconds)),
       freeFloatSeconds: Math.min(...children.map((child) => child.freeFloatSeconds)),
       isCritical: children.some((child) => child.isCritical)
@@ -135,6 +152,7 @@ export function scheduleProject(project: Project, allItems: WorkItem[], allDepen
   const byId = itemMap(items);
   const diagnostics: ScheduleResult["diagnostics"] = [];
   const unsupported: string[] = [];
+  const projectStart = projectScheduleStart(project);
 
   if (!items.length) {
     return {
@@ -167,22 +185,22 @@ export function scheduleProject(project: Project, allItems: WorkItem[], allDepen
     const predecessors = dependencies.filter((dependency) => dependency.toId === id);
     const duration = durationOf(workItem);
     const warnings: string[] = [];
-    let start = project.start;
+    let start = projectStart;
     let finish = addSeconds(start, duration);
 
     for (const predecessorDependency of predecessors) {
       const predecessor = scheduled.get(predecessorDependency.fromId);
       if (!predecessor) continue;
       const bound = dependencyBound(predecessorDependency, predecessor, duration);
-      start = maxIso(start, bound.startBound);
-      if (bound.finishBound) finish = maxIso(finish, bound.finishBound);
+      if (bound?.startBound) start = maxIso(start, bound.startBound);
+      if (bound?.finishBound) finish = maxIso(finish, bound.finishBound);
     }
 
-    if (workItem.constraint?.noEarlierThan) {
+    if (isValidIso(workItem.constraint?.noEarlierThan)) {
       start = maxIso(start, workItem.constraint.noEarlierThan);
     }
 
-    if (workItem.constraint?.fixedStart) {
+    if (isValidIso(workItem.constraint?.fixedStart)) {
       if (secondsBetween(start, workItem.constraint.fixedStart) < 0) {
         warnings.push("Fixed start violates dependency or no-earlier-than constraints.");
         diagnostics.push({
@@ -196,12 +214,12 @@ export function scheduleProject(project: Project, allItems: WorkItem[], allDepen
 
     finish = addSeconds(start, duration);
 
-    if (workItem.constraint?.fixedFinish) {
+    if (isValidIso(workItem.constraint?.fixedFinish)) {
       finish = workItem.constraint.fixedFinish;
       start = addSeconds(finish, -duration);
     }
 
-    if (workItem.constraint?.noLaterThan && secondsBetween(finish, workItem.constraint.noLaterThan) < 0) {
+    if (isValidIso(workItem.constraint?.noLaterThan) && secondsBetween(finish, workItem.constraint.noLaterThan) < 0) {
       warnings.push("Finish violates no-later-than constraint.");
       diagnostics.push({
         severity: "warning",
@@ -242,7 +260,8 @@ export function scheduleProject(project: Project, allItems: WorkItem[], allDepen
     });
   }
 
-  const projectFinish = maxIso(...[...scheduled.values()].map((item) => item.finish));
+  const scheduledFinishes = [...scheduled.values()].map((item) => item.finish).filter(isValidIso);
+  const projectFinish = scheduledFinishes.length ? maxIso(...scheduledFinishes) : projectStart;
   const reverse = [...sorted.order].reverse();
 
   for (const id of reverse) {
@@ -250,7 +269,7 @@ export function scheduleProject(project: Project, allItems: WorkItem[], allDepen
     const successors = dependencies.filter((dependency) => dependency.fromId === id);
     const successorStarts = successors
       .map((dependency) => scheduled.get(dependency.toId)?.start)
-      .filter(Boolean) as string[];
+      .filter(isValidIso);
     const lateFinish = successorStarts.length ? minIso(...successorStarts) : projectFinish;
     const lateStart = addSeconds(lateFinish, -durationOf(current.workItem));
     const totalFloatSeconds = Math.max(0, secondsBetween(current.finish, lateFinish));
