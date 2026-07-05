@@ -2356,7 +2356,21 @@ function ProjectWorkspace({
                 items={schedule.items.map((item) => item.workItem)}
                 onCreate={onWorkItemCreate}
               />
-              <OutlineTable items={schedule.items} gates={gates} evidence={evidence} />
+              <OutlineTable
+                items={schedule.items}
+                gates={gates}
+                evidence={evidence}
+                onFinishItem={(item) => {
+                  const plannedHours = Math.max(1, formatAssignmentHours(item) || Math.round(item.workItem.durationSeconds / 3600));
+                  onActualRecord(project.id, item.workItem.id, {
+                    percentComplete: 100,
+                    actualWorkHours: plannedHours,
+                    remainingWorkHours: 0,
+                    actualCost: plannedHours,
+                    markFinished: true
+                  });
+                }}
+              />
             </CardContent>
           </Card>
           <div className="grid gap-4">
@@ -2757,7 +2771,18 @@ function ProjectCompletionPanel({
     !evidence.some((candidate) => candidate.workItemId === item.id)
   ));
   const readyToComplete = incompleteItems.length === 0 && openHardGates.length === 0 && keyItemsMissingEvidence.length === 0 && baselineApproved;
-  const canArchive = project.status === "done" || project.status === "archived";
+  const completionBlockers = [
+    incompleteItems.length ? `${incompleteItems.length} open work item${incompleteItems.length === 1 ? "" : "s"} still below 100%. First: ${incompleteItems[0]?.title}.` : undefined,
+    keyItemsMissingEvidence.length ? `${keyItemsMissingEvidence.length} key/evidence-required item${keyItemsMissingEvidence.length === 1 ? "" : "s"} need linked evidence. First: ${keyItemsMissingEvidence[0]?.title}.` : undefined,
+    openHardGates.length ? `${openHardGates.length} hard gate${openHardGates.length === 1 ? "" : "s"} still need review. First: ${openHardGates[0]?.reason}` : undefined,
+    baselineApproved ? undefined : "Baseline is still pending approval."
+  ].filter(Boolean);
+  const setDoneDisabled = !readyToComplete || project.status === "done" || project.status === "archived";
+  const doneDisabledReason = project.status === "done"
+    ? "Project is already done."
+    : project.status === "archived"
+      ? "Archived projects cannot be marked done."
+      : completionBlockers.join(" ");
   const badgeLabel = project.status === "archived" ? "archived" : project.status === "done" ? "done" : readyToComplete ? "ready for done" : "not ready";
   const badgeVariant = project.status === "archived" || project.status === "done" || readyToComplete ? "success" : "warning";
 
@@ -2767,7 +2792,7 @@ function ProjectCompletionPanel({
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <CardTitle className="flex items-center gap-2"><CheckCircle2 className="h-4 w-4" /> Completion Gate</CardTitle>
-            <CardDescription>Finish work, verify evidence and audit state, then move the project to done or archived.</CardDescription>
+            <CardDescription>Use Done for verified completion. Use Archive to close a project without pretending it passed final review.</CardDescription>
           </div>
           <Badge variant={badgeVariant}>{badgeLabel}</Badge>
         </div>
@@ -2779,17 +2804,25 @@ function ProjectCompletionPanel({
           <SummaryTile label="Hard gates" value={String(openHardGates.length)} detail={openHardGates[0]?.reason ?? "No hard gate is open."} tone={openHardGates.length ? "danger" : "default"} />
           <SummaryTile label="Baseline" value={baselineApproved ? "Approved" : "Pending"} detail={baselineApproved ? "Baseline can be used for final reporting." : "Capture and approve a baseline first."} tone={baselineApproved ? "default" : "warning"} />
         </div>
+        {completionBlockers.length > 0 && (
+          <div className="rounded-lg border bg-muted/25 p-3 text-sm">
+            <div className="font-medium">Set project done is blocked by:</div>
+            <ul className="mt-2 grid gap-1 text-muted-foreground">
+              {completionBlockers.map((blocker) => <li key={blocker}>- {blocker}</li>)}
+            </ul>
+          </div>
+        )}
         <div className="flex flex-wrap gap-2">
-          <Button type="button" variant="outline" onClick={onFinishWork} disabled={!incompleteItems.length} data-testid="lifecycle-finish-open-work">
+          <Button type="button" variant="outline" onClick={onFinishWork} disabled={!incompleteItems.length} title={incompleteItems.length ? `Mark ${incompleteItems.length} open work item${incompleteItems.length === 1 ? "" : "s"} complete.` : "No open work remains."} data-testid="lifecycle-finish-open-work">
             <CheckCircle2 />
             Finish all open work
           </Button>
-          <Button type="button" onClick={onComplete} disabled={!readyToComplete || project.status === "done" || project.status === "archived"} data-testid="lifecycle-set-done">
+          <Button type="button" onClick={onComplete} disabled={setDoneDisabled} title={setDoneDisabled ? doneDisabledReason : "Mark this project as verified done."} data-testid="lifecycle-set-done">
             Set project done
           </Button>
-          <Button type="button" variant="outline" onClick={onArchive} disabled={!canArchive || project.status === "archived"} data-testid="lifecycle-archive-project">
+          <Button type="button" variant="outline" onClick={onArchive} disabled={project.status === "archived"} title={project.status === "archived" ? "Project is already archived." : "Close this project and remove it from active planning."} data-testid="lifecycle-archive-project">
             <Archive />
-            Archive
+            Archive / close
           </Button>
         </div>
       </CardContent>
@@ -5138,7 +5171,17 @@ function compactProjectLabel(name: string) {
   return words.slice(0, 2).join(" ");
 }
 
-function OutlineTable({ items, gates, evidence }: { items: ScheduledItem[]; gates: AuditGate[]; evidence: Evidence[] }) {
+function OutlineTable({
+  items,
+  gates,
+  evidence,
+  onFinishItem
+}: {
+  items: ScheduledItem[];
+  gates: AuditGate[];
+  evidence: Evidence[];
+  onFinishItem: (item: ScheduledItem) => void;
+}) {
   return (
     <Table>
       <caption className="srOnly">Project outline with schedule, evidence, gate, and float status</caption>
@@ -5151,6 +5194,7 @@ function OutlineTable({ items, gates, evidence }: { items: ScheduledItem[]; gate
           <TableHead>%</TableHead>
           <TableHead>Status</TableHead>
           <TableHead>Float</TableHead>
+          <TableHead>Action</TableHead>
         </TableRow>
       </TableHeader>
       <TableBody>
@@ -5173,6 +5217,18 @@ function OutlineTable({ items, gates, evidence }: { items: ScheduledItem[]; gate
                 <TableCell>{item.workItem.percentComplete}</TableCell>
                 <TableCell><Badge variant={gate ? "destructive" : item.isCritical ? "warning" : "secondary"}>{status}</Badge></TableCell>
                 <TableCell>{Math.round(item.totalFloatSeconds / 3600)}h</TableCell>
+                <TableCell>
+                  {item.workItem.kind === "phase" ? (
+                    <span className="text-xs text-muted-foreground">-</span>
+                  ) : item.workItem.percentComplete >= 100 ? (
+                    <Badge variant="success">Done</Badge>
+                  ) : (
+                    <Button type="button" size="sm" variant="outline" onClick={() => onFinishItem(item)} aria-label={`Mark ${item.workItem.title} done`}>
+                      <CheckCircle2 />
+                      Done
+                    </Button>
+                  )}
+                </TableCell>
               </TableRow>
             );
           })}
