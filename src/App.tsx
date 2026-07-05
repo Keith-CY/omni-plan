@@ -826,9 +826,9 @@ function RoutedApp() {
   }, [view, selectedProjectId]);
 
   useEffect(() => {
-    if (!workspace.projects.length || route.selectedProjectId === selectedProjectId) return;
+    if (!workspacePersistence.loaded || !workspace.projects.length || route.selectedProjectId === selectedProjectId) return;
     routerNavigate(pathForRoute({ view, selectedProjectId, target: route.target }), { replace: true });
-  }, [route.selectedProjectId, route.target, routerNavigate, selectedProjectId, view, workspace.projects.length]);
+  }, [route.selectedProjectId, route.target, routerNavigate, selectedProjectId, view, workspace.projects.length, workspacePersistence.loaded]);
 
   useEffect(() => {
     if (!route.target) return;
