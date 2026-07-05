@@ -1,5 +1,6 @@
 import type { ChangeSet, Id, WorkspaceSnapshot } from "./types";
 import { browserFetch } from "./http";
+import { normalizeWorkspaceSnapshot } from "./projectLifecycle";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -236,7 +237,7 @@ export async function decryptSyncPayload<T>(payload: EncryptedSyncPayload, passp
 }
 
 export async function workspacePlaintextChecksum(snapshot: WorkspaceSnapshot): Promise<string> {
-  return sha256Hex(stableJson(snapshot));
+  return sha256Hex(stableJson(normalizeWorkspaceSnapshot(snapshot)));
 }
 
 export async function createSyncChangeEnvelope(
@@ -269,7 +270,8 @@ export async function createFirebaseWorkspaceSnapshotEnvelope(
   passphrase: string,
   createdAt: string
 ): Promise<FirebaseWorkspaceSnapshotEnvelope> {
-  const plaintextChecksum = await workspacePlaintextChecksum(snapshot);
+  const normalizedSnapshot = normalizeWorkspaceSnapshot(snapshot);
+  const plaintextChecksum = await workspacePlaintextChecksum(normalizedSnapshot);
   const revision = await sha256Hex(`${previousRevision ?? "root"}\n${config.deviceId}\n${createdAt}\n${plaintextChecksum}`);
   return {
     schemaVersion: 1,
@@ -279,7 +281,7 @@ export async function createFirebaseWorkspaceSnapshotEnvelope(
     ...(previousRevision ? { previousRevision } : {}),
     createdAt,
     plaintextChecksum,
-    payload: await encryptSyncPayload(snapshot, passphrase)
+    payload: await encryptSyncPayload(normalizedSnapshot, passphrase)
   };
 }
 
@@ -288,11 +290,11 @@ export async function decryptFirebaseWorkspaceSnapshotEnvelope(
   passphrase: string
 ): Promise<WorkspaceSnapshot> {
   const snapshot = await decryptSyncPayload<WorkspaceSnapshot>(envelope.payload, passphrase);
-  const checksum = await workspacePlaintextChecksum(snapshot);
+  const checksum = await sha256Hex(stableJson(snapshot));
   if (checksum !== envelope.plaintextChecksum) {
     throw new Error("Firebase workspace checksum mismatch after decrypt.");
   }
-  return snapshot;
+  return normalizeWorkspaceSnapshot(snapshot);
 }
 
 export function createFirebaseE2eeManifest(

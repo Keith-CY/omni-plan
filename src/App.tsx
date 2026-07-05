@@ -40,6 +40,14 @@ import { fetchPullRequestEvidence, githubPrToEvidence } from "./domain/github";
 import { runMonteCarlo } from "./domain/monteCarlo";
 import { calculateProjectHealth } from "./domain/portfolio";
 import {
+  isProjectArchived,
+  projectLifecycleLabel,
+  projectLifecycleStatus,
+  selectableProjectStatuses,
+  withProjectArchived,
+  withProjectLifecycleStatus
+} from "./domain/projectLifecycle";
+import {
   detectCrossProjectOverload,
   generateLevelingProposals
 } from "./domain/scheduler";
@@ -134,7 +142,7 @@ const daySeconds = 24 * 60 * 60;
 const dependencyTypes: DependencyType[] = ["FS", "SS", "FF", "SF"];
 const workItemKinds: WorkItemKind[] = ["phase", "task", "milestone", "hammock"];
 const projectModes: ProjectMode[] = ["explore", "build", "ship", "maintain"];
-const projectStatuses: ProjectStatus[] = ["active", "waiting", "paused", "done", "archived"];
+const projectStatuses = selectableProjectStatuses;
 const auditActions: AuditAction[] = ["Accelerate", "Continue", "Narrow", "Pivot", "Stop"];
 const evidenceKinds: EvidenceKind[] = ["note", "commit", "pr", "ci", "doc", "screenshot", "release", "feedback", "metric", "email", "calendar", "minutes", "booking"];
 
@@ -403,7 +411,7 @@ async function runContrarianAiAudit({
       name: project.name,
       northStar: project.northStar,
       currentOutcome: project.currentOutcome,
-      status: project.status,
+      status: projectLifecycleLabel(project),
       mode: project.mode,
       directionCard: project.directionCard
     },
@@ -735,7 +743,7 @@ function RoutedApp() {
     if (!workspacePersistence.loaded) return;
     setWorkspace((previous) => {
       const checkedAt = timestamp();
-      const expired = previous.projects.filter((project) => isShapeUpCycleExpired(project, checkedAt));
+      const expired = previous.projects.filter((project) => !isProjectArchived(project) && isShapeUpCycleExpired(project, checkedAt));
       if (!expired.length) return previous;
       return {
         ...previous,
@@ -745,7 +753,7 @@ function RoutedApp() {
             project.id,
             `Pause ${project.name} at Shape Up circuit breaker`,
             "Circuit breaker expired. Choose Ship as-is, Cut scope, Kill, or Re-bet before continuing.",
-            [{ entity: "Project", entityId: project.id, field: "status", before: project.status, after: "paused" }],
+            [{ entity: "Project", entityId: project.id, field: "status", before: projectLifecycleStatus(project), after: "paused" }],
             previous.changeSets.length + index
           )),
           ...previous.changeSets
@@ -1088,7 +1096,7 @@ function RoutedApp() {
             `Approve Shape Up bet for ${project.name}`,
             "Human-approved Betting Gate changed the project from waiting to active and generated Shape Up execution scaffolding.",
             [
-              { entity: "Project", entityId: projectId, field: "status", before: project.status, after: "active" },
+              { entity: "Project", entityId: projectId, field: "status", before: projectLifecycleStatus(project), after: "active" },
               { entity: "Project", entityId: projectId, field: "shapeUpPitch.bet", before: null, after: bet }
             ],
             previous.changeSets.length
@@ -1102,16 +1110,20 @@ function RoutedApp() {
   const updateProjectStatus = (projectId: string, status: ProjectStatus) => {
     const previous = workspaceRef.current;
     const project = previous.projects.find((candidate) => candidate.id === projectId);
-    if (!project || project.status === status) return;
+    if (!project || (projectLifecycleStatus(project) === status && !isProjectArchived(project))) return;
+    const nextProject = withProjectLifecycleStatus(project, status);
     const nextWorkspace = {
       ...previous,
-      projects: previous.projects.map((candidate) => candidate.id === projectId ? { ...candidate, status } : candidate),
+      projects: previous.projects.map((candidate) => candidate.id === projectId ? nextProject : candidate),
       changeSets: [
         createChangeSet(
           projectId,
           `Set ${project.name} status ${status}`,
           "Updated project lifecycle state.",
-          [{ entity: "Project", entityId: projectId, field: "status", before: project.status, after: status }],
+          [
+            { entity: "Project", entityId: projectId, field: "status", before: projectLifecycleStatus(project), after: status },
+            ...(isProjectArchived(project) ? [{ entity: "Project", entityId: projectId, field: "archived", before: true, after: false }] : [])
+          ],
           previous.changeSets.length
         ),
         ...previous.changeSets
@@ -1121,6 +1133,60 @@ function RoutedApp() {
     setWorkspace(nextWorkspace);
     saveWorkspaceImmediately(nextWorkspace);
     pushWorkspaceSoon(`Project status changed to ${status}; syncing workspace now.`);
+  };
+
+  const completeProject = (projectId: string) => {
+    const previous = workspaceRef.current;
+    const project = previous.projects.find((candidate) => candidate.id === projectId);
+    if (!project || projectLifecycleStatus(project) === "done") return;
+    const nextProject = { ...project, status: "done" as const };
+    const nextWorkspace = {
+      ...previous,
+      projects: previous.projects.map((candidate) => candidate.id === projectId ? nextProject : candidate),
+      changeSets: [
+        createChangeSet(
+          projectId,
+          `Set ${project.name} done`,
+          "Marked project as verified complete.",
+          [{ entity: "Project", entityId: projectId, field: "status", before: projectLifecycleStatus(project), after: "done" }],
+          previous.changeSets.length
+        ),
+        ...previous.changeSets
+      ]
+    };
+    workspaceRef.current = nextWorkspace;
+    setWorkspace(nextWorkspace);
+    saveWorkspaceImmediately(nextWorkspace);
+    pushWorkspaceSoon("Project marked done; syncing workspace now.");
+  };
+
+  const archiveProject = (projectId: string) => {
+    const previous = workspaceRef.current;
+    const project = previous.projects.find((candidate) => candidate.id === projectId);
+    if (!project || isProjectArchived(project)) return;
+    const archivedAt = timestamp();
+    const nextProject = withProjectArchived(project, archivedAt);
+    const nextWorkspace = {
+      ...previous,
+      projects: previous.projects.map((candidate) => candidate.id === projectId ? nextProject : candidate),
+      changeSets: [
+        createChangeSet(
+          projectId,
+          `Archive ${project.name}`,
+          "Removed project from active planning without changing its lifecycle status.",
+          [
+            { entity: "Project", entityId: projectId, field: "archived", before: false, after: true },
+            { entity: "Project", entityId: projectId, field: "archivedAt", before: null, after: archivedAt }
+          ],
+          previous.changeSets.length
+        ),
+        ...previous.changeSets
+      ]
+    };
+    workspaceRef.current = nextWorkspace;
+    setWorkspace(nextWorkspace);
+    saveWorkspaceImmediately(nextWorkspace);
+    pushWorkspaceSoon("Project archived; syncing workspace now.");
   };
 
   const createWorkItem = (projectId: string, values: WorkItemCreateValues) => {
@@ -1624,8 +1690,10 @@ function RoutedApp() {
         now
       )
     );
-    const overloads = detectCrossProjectOverload(schedules, workspace.resources);
-    const leveling = generateLevelingProposals(schedules, workspace.resources);
+    const activeProjectIds = new Set(workspace.projects.filter((project) => !isProjectArchived(project)).map((project) => project.id));
+    const activeSchedules = schedules.filter((schedule) => activeProjectIds.has(schedule.projectId));
+    const overloads = detectCrossProjectOverload(activeSchedules, workspace.resources);
+    const leveling = generateLevelingProposals(activeSchedules, workspace.resources);
     return { schedules, gates, decisions, health, overloads, leveling };
   }, [workspace]);
 
@@ -1657,7 +1725,8 @@ function RoutedApp() {
     300,
     7
   );
-  const openHardGateCount = model.gates.filter((gate) => gate.severity === "hard" && gate.status !== "cleared").length;
+  const activePlanningProjectIds = new Set(workspace.projects.filter((project) => !isProjectArchived(project)).map((project) => project.id));
+  const openHardGateCount = model.gates.filter((gate) => activePlanningProjectIds.has(gate.projectId) && gate.severity === "hard" && gate.status !== "cleared").length;
 
   return (
     <div className="min-h-screen bg-background text-foreground">
@@ -1801,8 +1870,8 @@ function RoutedApp() {
             onEvidenceCreate={createEvidence}
             onActualRecord={recordActual}
             onProjectWorkFinish={finishProjectWork}
-            onProjectComplete={(projectId) => updateProjectStatus(projectId, "done")}
-            onProjectArchive={(projectId) => updateProjectStatus(projectId, "archived")}
+            onProjectComplete={completeProject}
+            onProjectArchive={archiveProject}
             onBaselineCapture={() => captureBaseline(selectedProject.id, selectedSchedule)}
             onChangeSetStatus={setChangeSetStatus}
             onGateClear={clearGate}
@@ -1962,10 +2031,14 @@ function PortfolioDashboard({
     const right = health.find((item) => item.projectId === b.id)?.recommendedFocus ?? 0;
     return right - left;
   });
-  const openHardGates = gates.filter((gate) => gate.severity === "hard" && gate.status !== "cleared").length;
-  const criticalCount = schedules.reduce((sum, schedule) => sum + schedule.items.filter((item) => item.isCritical).length, 0);
-  const activeDeliveryProjects = projects.filter((project) => project.status === "active" && (!isShapeUpProject(project) || isShapeUpBet(project)));
-  const shapeUpProjects = projects.filter(isShapeUpProject);
+  const planningProjects = sorted.filter((project) => !isProjectArchived(project));
+  const visibleProjects = planningProjects.length ? planningProjects : sorted;
+  const planningProjectIds = new Set(planningProjects.map((project) => project.id));
+  const planningSchedules = schedules.filter((schedule) => planningProjectIds.has(schedule.projectId));
+  const openHardGates = gates.filter((gate) => planningProjectIds.has(gate.projectId) && gate.severity === "hard" && gate.status !== "cleared").length;
+  const criticalCount = planningSchedules.reduce((sum, schedule) => sum + schedule.items.filter((item) => item.isCritical).length, 0);
+  const activeDeliveryProjects = planningProjects.filter((project) => project.status === "active" && (!isShapeUpProject(project) || isShapeUpBet(project)));
+  const shapeUpProjects = planningProjects.filter(isShapeUpProject);
   const shapeUpStreams = [
     {
       label: "Shaping",
@@ -1984,15 +2057,15 @@ function PortfolioDashboard({
       projects: shapeUpProjects.filter((project) => project.status === "paused")
     }
   ];
-  const focusProject = sorted[0];
+  const focusProject = visibleProjects[0];
   const focusHealth = health.find((item) => item.projectId === focusProject.id);
   const focusSchedule = schedules.find((schedule) => schedule.projectId === focusProject.id);
   const focusNext = focusSchedule ? nextScheduledItem(focusSchedule.items) : undefined;
   const focusGate = gates.find((gate) => gate.projectId === focusProject.id && gate.severity === "hard" && gate.status !== "cleared");
   const overdueRows = schedules
     .flatMap((schedule) => schedule.items.map((item) => ({ item, projectId: schedule.projectId })))
-    .filter(({ item }) => item.workItem.kind !== "phase" && item.workItem.percentComplete < 100 && scheduleTiming(item) === "Overdue");
-  const staleEvidenceProjects = health.filter((item) => item.evidenceFreshnessDays === undefined || item.evidenceFreshnessDays >= 5);
+    .filter(({ item, projectId }) => planningProjectIds.has(projectId) && item.workItem.kind !== "phase" && item.workItem.percentComplete < 100 && scheduleTiming(item) === "Overdue");
+  const staleEvidenceProjects = health.filter((item) => planningProjectIds.has(item.projectId) && (item.evidenceFreshnessDays === undefined || item.evidenceFreshnessDays >= 5));
   const criticalFocus = focusSchedule?.items.filter((item) => item.isCritical && item.workItem.kind !== "phase").length ?? 0;
   const portfolioRisk = Math.round(health.reduce((sum, item) => sum + item.riskScore, 0) / Math.max(1, health.length));
 
@@ -2121,13 +2194,13 @@ function PortfolioDashboard({
             <CardDescription>Ranked by risk, momentum, evidence debt, and hard gates.</CardDescription>
           </CardHeader>
           <CardContent className="space-y-3">
-          {sorted.map((project, index) => {
+          {visibleProjects.map((project, index) => {
             const projectHealth = health.find((item) => item.projectId === project.id)!;
             const projectSchedule = schedules.find((schedule) => schedule.projectId === project.id);
             const finish = projectSchedule?.items.reduce((max, item) => (item.finish > max ? item.finish : max), project.start);
             const next = projectSchedule ? nextScheduledItem(projectSchedule.items) : undefined;
             const projectCritical = projectSchedule?.items.filter((item) => item.isCritical && item.workItem.kind !== "phase").length ?? 0;
-            const action = focusAction(projectHealth, project.status);
+            const action = focusAction(projectHealth, projectLifecycleStatus(project));
             return (
               <a
                 key={project.id}
@@ -2142,7 +2215,7 @@ function PortfolioDashboard({
                     <span>#{index + 1}</span>
                     <span className="text-[10px] uppercase tracking-wide">{action}</span>
                   </div>
-                  <Badge variant={project.status === "active" ? "success" : "warning"} className="md:mt-2">{project.status}</Badge>
+                  <Badge variant={project.status === "active" && !isProjectArchived(project) ? "success" : "warning"} className="md:mt-2">{projectLifecycleLabel(project)}</Badge>
                 </div>
                 <div className="min-w-0 space-y-3">
                   <div className="flex flex-wrap items-start justify-between gap-2">
@@ -2185,7 +2258,7 @@ function PortfolioDashboard({
           <span className="matrixZone zoneNarrow">Narrow / stop</span>
           <span className="matrixZone zoneWatch">Watch evidence</span>
           <span className="matrixZone zoneShip">Push</span>
-          {projects.map((project) => {
+          {visibleProjects.map((project) => {
             const item = health.find((candidate) => candidate.projectId === project.id)!;
             return (
               <a
@@ -2194,10 +2267,10 @@ function PortfolioDashboard({
                 style={{ left: `${Math.min(78, Math.max(22, item.momentumScore))}%`, bottom: `${Math.min(78, Math.max(14, item.riskScore))}%` }}
                 href={hashForRoute({ view: "project", selectedProjectId: project.id })}
                 title={`${project.name}: momentum ${item.momentumScore}, risk ${item.riskScore}`}
-                aria-label={`${project.name}, momentum ${item.momentumScore}, risk ${item.riskScore}, status ${project.status}`}
+                aria-label={`${project.name}, momentum ${item.momentumScore}, risk ${item.riskScore}, status ${projectLifecycleLabel(project)}`}
               >
-                <span className={`statusDot ${project.status}`} />
-                <span className="srOnly">Status {project.status}</span>
+                <span className={`statusDot ${projectLifecycleStatus(project)}`} />
+                <span className="srOnly">Status {projectLifecycleLabel(project)}</span>
                 <span className="matrixNodeName">{compactProjectLabel(project.name)}</span>
                 <span className="matrixNodeMeta">R{item.riskScore} M{item.momentumScore}</span>
               </a>
@@ -2372,13 +2445,14 @@ function ProjectWorkspace({
             />
             <NativeSelectField
               label="Lifecycle status"
-              value={project.status}
+              value={projectLifecycleStatus(project)}
               onChange={(value) => onProjectStatusUpdate(project.id, value as ProjectStatus)}
               options={projectStatuses.map((status) => ({ value: status, label: status }))}
               testId="project-status-selector"
             />
             <div className="flex flex-wrap gap-2">
               <Badge variant="secondary">{project.mode}</Badge>
+              {isProjectArchived(project) && <Badge variant="outline">Archived</Badge>}
               <Badge variant="outline">Horizon {project.horizon.slice(0, 10)}</Badge>
               <Badge variant={blockingGate ? "destructive" : "success"}>{blockingGate ? "Hard gate" : "No blocker"}</Badge>
             </div>
@@ -2715,8 +2789,8 @@ function ShapeUpProjectPanel({
             <CardDescription>Fixed appetite, variable scope, human-approved bet before execution.</CardDescription>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <Badge variant={isShapeUpBet(project) ? "success" : project.status === "paused" ? "warning" : "outline"}>
-              {isShapeUpBet(project) ? "bet accepted" : project.status === "paused" ? "circuit review" : "waiting"}
+            <Badge variant={isShapeUpBet(project) ? "success" : projectLifecycleStatus(project) === "paused" ? "warning" : "outline"}>
+              {isShapeUpBet(project) ? "bet accepted" : projectLifecycleStatus(project) === "paused" ? "circuit review" : "waiting"}
             </Badge>
             {bet && <Badge variant="outline">Ends {bet.cycleEnd.slice(0, 10)}</Badge>}
           </div>
@@ -2814,7 +2888,7 @@ function ShapeUpProjectPanel({
           <Button type="button" onClick={() => onSave(draft)}>Save Shape Up pitch</Button>
           <Button type="button" variant="outline" onClick={onBet} disabled={!savedCanBet || Boolean(bet)}>Approve Betting Gate</Button>
           {bet && <Badge variant="success">Approved {bet.approvedAt.slice(0, 10)}</Badge>}
-          {project.status === "paused" && <Badge variant="warning">Circuit breaker review required</Badge>}
+          {projectLifecycleStatus(project) === "paused" && <Badge variant="warning">Circuit breaker review required</Badge>}
         </div>
       </CardContent>
     </Card>
@@ -2851,14 +2925,14 @@ function ProjectCompletionPanel({
     keyItemsMissingEvidence.length ? `${keyItemsMissingEvidence.length} key/evidence-required item${keyItemsMissingEvidence.length === 1 ? "" : "s"} need linked evidence. First: ${keyItemsMissingEvidence[0]?.title}.` : undefined,
     openHardGates.length ? `${openHardGates.length} hard gate${openHardGates.length === 1 ? "" : "s"} still need review. First: ${openHardGates[0]?.reason}` : undefined
   ].filter(Boolean);
-  const setDoneDisabled = !readyToComplete || project.status === "done" || project.status === "archived";
-  const doneDisabledReason = project.status === "done"
+  const archived = isProjectArchived(project);
+  const lifecycleStatus = projectLifecycleStatus(project);
+  const setDoneDisabled = !readyToComplete || lifecycleStatus === "done";
+  const doneDisabledReason = lifecycleStatus === "done"
     ? "Project is already done."
-    : project.status === "archived"
-      ? "Archived projects cannot be marked done."
-      : completionBlockers.join(" ");
-  const badgeLabel = project.status === "archived" ? "archived" : project.status === "done" ? "done" : readyToComplete ? "ready for done" : "not ready";
-  const badgeVariant = project.status === "archived" || project.status === "done" || readyToComplete ? "success" : "warning";
+    : completionBlockers.join(" ");
+  const badgeLabel = archived ? projectLifecycleLabel(project) : lifecycleStatus === "done" ? "done" : readyToComplete ? "ready for done" : "not ready";
+  const badgeVariant = archived || lifecycleStatus === "done" || readyToComplete ? "success" : "warning";
 
   return (
     <Card id="project-completion">
@@ -2866,7 +2940,7 @@ function ProjectCompletionPanel({
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <CardTitle className="flex items-center gap-2"><CheckCircle2 className="h-4 w-4" /> Completion Gate</CardTitle>
-            <CardDescription>Use Done for verified completion. Use Archive to close a project without pretending it passed final review.</CardDescription>
+            <CardDescription>Done records verified completion. Archive removes the project from active planning without changing completion status.</CardDescription>
           </div>
           <Badge variant={badgeVariant}>{badgeLabel}</Badge>
         </div>
@@ -2893,7 +2967,7 @@ function ProjectCompletionPanel({
           <Button type="button" onClick={onComplete} disabled={setDoneDisabled} title={setDoneDisabled ? doneDisabledReason : "Mark this project as verified done."} data-testid="lifecycle-set-done">
             Set project done
           </Button>
-          <Button type="button" variant="outline" onClick={onArchive} disabled={project.status === "archived"} title={project.status === "archived" ? "Project is already archived." : "Close this project and remove it from active planning."} data-testid="lifecycle-archive-project">
+          <Button type="button" variant="outline" onClick={onArchive} disabled={archived} title={archived ? "Project is already archived." : "Close this project and remove it from active planning."} data-testid="lifecycle-archive-project">
             <Archive />
             Archive / close
           </Button>
@@ -3226,7 +3300,9 @@ function TodayExecution({
   gates: AuditGate[];
   onActualRecord: (projectId: string, workItemId: string, values: ActualRecordValues) => void;
 }) {
+  const activeProjectIds = new Set(projects.filter((project) => !isProjectArchived(project)).map((project) => project.id));
   const rows = schedules
+    .filter((schedule) => activeProjectIds.has(schedule.projectId))
     .flatMap((schedule) => schedule.items.map((item) => ({ item, project: projects.find((project) => project.id === schedule.projectId)! })))
     .filter(({ item }) => item.workItem.kind !== "phase" && item.workItem.percentComplete < 100)
     .map(({ item, project }) => {
@@ -3315,7 +3391,7 @@ function TodayExecution({
           <CardTitle className="flex items-center gap-2"><ShieldAlert className="h-4 w-4" /> Blocking Gates</CardTitle>
         </CardHeader>
         <CardContent>
-          <SignalList gates={sortGates(gates.filter((gate) => gate.severity === "hard" && gate.status !== "cleared")).slice(0, 8)} />
+          <SignalList gates={sortGates(gates.filter((gate) => activeProjectIds.has(gate.projectId) && gate.severity === "hard" && gate.status !== "cleared")).slice(0, 8)} />
         </CardContent>
       </Card>
     </section>
@@ -3400,9 +3476,12 @@ function AuditQueue({
   onChangeSetStatus: (changeSetId: string, status: ChangeSet["status"]) => void;
   onLevelingApply: (proposal: ReturnType<typeof generateLevelingProposals>[number]) => void;
 }) {
-  const hardGates = sortGates(gates.filter((gate) => gate.severity === "hard" && gate.status !== "cleared"));
-  const warningGates = sortGates(gates.filter((gate) => gate.severity !== "hard" && gate.status !== "cleared"));
-  const workById = new Map(schedules.flatMap((schedule) => schedule.items.map((item) => [item.workItem.id, { item, projectId: schedule.projectId }])));
+  const activeProjectIds = new Set(projects.filter((project) => !isProjectArchived(project)).map((project) => project.id));
+  const hardGates = sortGates(gates.filter((gate) => activeProjectIds.has(gate.projectId) && gate.severity === "hard" && gate.status !== "cleared"));
+  const warningGates = sortGates(gates.filter((gate) => activeProjectIds.has(gate.projectId) && gate.severity !== "hard" && gate.status !== "cleared"));
+  const activeDecisions = decisions.filter((decision) => activeProjectIds.has(decision.projectId));
+  const activeLeveling = leveling.filter((proposal) => activeProjectIds.has(proposal.projectId));
+  const workById = new Map(schedules.filter((schedule) => activeProjectIds.has(schedule.projectId)).flatMap((schedule) => schedule.items.map((item) => [item.workItem.id, { item, projectId: schedule.projectId }])));
   return (
     <section className="grid gap-4 lg:grid-cols-2">
       <Card id="hard-gates">
@@ -3420,7 +3499,7 @@ function AuditQueue({
           <CardDescription>Default operator stance is skeptical until evidence clears risk.</CardDescription>
         </CardHeader>
         <CardContent className="space-y-2">
-          {decisions.map((decision) => (
+          {activeDecisions.map((decision) => (
             <article className="grid gap-3 rounded-lg border bg-background p-3 sm:grid-cols-[96px_minmax(0,1fr)_auto]" key={decision.id}>
               <Badge variant={decision.action === "Stop" || decision.action === "Pivot" || decision.action === "Narrow" ? "destructive" : "secondary"} className="h-fit justify-center">{decision.action}</Badge>
               <div>
@@ -3483,7 +3562,7 @@ function AuditQueue({
               </TableRow>
             </TableHeader>
             <TableBody>
-              {leveling.map((proposal) => {
+              {activeLeveling.map((proposal) => {
                 const row = workById.get(proposal.workItemId);
                 const project = projects.find((candidate) => candidate.id === proposal.projectId);
                 return (

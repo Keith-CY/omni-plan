@@ -1,4 +1,5 @@
 import type { WorkspaceSnapshot } from "./types";
+import { normalizeWorkspaceSnapshot } from "./projectLifecycle";
 
 export interface WorkspaceRepository {
   load(): Promise<WorkspaceSnapshot | undefined>;
@@ -20,7 +21,7 @@ export class BrowserWorkspaceRepository implements WorkspaceRepository {
   }
 
   exportWorkspace(snapshot: WorkspaceSnapshot): string {
-    return JSON.stringify({ schemaVersion: 1, exportedAt: new Date().toISOString(), snapshot }, null, 2);
+    return JSON.stringify({ schemaVersion: 1, exportedAt: new Date().toISOString(), snapshot: normalizeWorkspaceSnapshot(snapshot) }, null, 2);
   }
 
   importWorkspace(payload: string): WorkspaceSnapshot {
@@ -28,7 +29,7 @@ export class BrowserWorkspaceRepository implements WorkspaceRepository {
     if (parsed.schemaVersion !== 1) {
       throw new Error(`Unsupported workspace schema version ${parsed.schemaVersion}`);
     }
-    return parsed.snapshot;
+    return normalizeWorkspaceSnapshot(parsed.snapshot);
   }
 }
 

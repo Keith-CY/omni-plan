@@ -9,6 +9,7 @@ import {
   createSyncChangeEnvelope,
   createFirebaseE2eeManifest,
   createFirebaseWorkspaceSnapshotEnvelope,
+  decryptFirebaseWorkspaceSnapshotEnvelope,
   decryptSyncPayload,
   FirebaseE2eeSyncClient,
   githubSyncCommitMessage,
@@ -24,6 +25,16 @@ describe("workspace, GitHub, and secrets", () => {
 
     expect(imported.projects).toHaveLength(sampleWorkspace.projects.length);
     expect(imported.workItems).toHaveLength(sampleWorkspace.workItems.length);
+  });
+
+  it("migrates legacy archived project status into an archive flag", () => {
+    const repository = new BrowserWorkspaceRepository();
+    const legacy = JSON.parse(JSON.stringify(sampleWorkspace));
+    legacy.projects[0].status = "archived";
+    const imported = repository.importWorkspace(JSON.stringify({ schemaVersion: 1, snapshot: legacy }));
+
+    expect(imported.projects[0].status).toBe("done");
+    expect(imported.projects[0].archived).toBe(true);
   });
 
   it("maps GitHub pull requests to evidence with a mocked readonly fetcher", async () => {
@@ -229,6 +240,25 @@ describe("workspace, GitHub, and secrets", () => {
     expect(JSON.stringify(envelope)).not.toContain(sampleWorkspace.projects[0].name);
     expect(decrypted.projects[0].name).toBe(sampleWorkspace.projects[0].name);
     await expect(decryptSyncPayload(envelope.payload, "wrong horse")).rejects.toThrow();
+  });
+
+  it("normalizes archived projects before writing Firebase workspace snapshots", async () => {
+    const legacy = JSON.parse(JSON.stringify(sampleWorkspace));
+    legacy.projects[0].status = "archived";
+    const envelope = await createFirebaseWorkspaceSnapshotEnvelope(
+      legacy,
+      { workspaceId: "personal", deviceId: "mac" },
+      undefined,
+      "correct horse",
+      "2026-07-08T00:00:00.000Z"
+    );
+    const encryptedSnapshot = await decryptSyncPayload<typeof sampleWorkspace>(envelope.payload, "correct horse");
+    const pulled = await decryptFirebaseWorkspaceSnapshotEnvelope(envelope, "correct horse");
+
+    expect(encryptedSnapshot.projects[0].status).toBe("done");
+    expect(encryptedSnapshot.projects[0].archived).toBe(true);
+    expect(pulled.projects[0].status).toBe("done");
+    expect(pulled.projects[0].archived).toBe(true);
   });
 
   it("pushes and pulls Firebase E2EE workspace snapshots through REST documents", async () => {

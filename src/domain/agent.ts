@@ -1,5 +1,6 @@
 import { evaluateAuditGates } from "./audit";
 import { calculateProjectHealth } from "./portfolio";
+import { isProjectArchived, projectLifecycleLabel, projectLifecycleStatus } from "./projectLifecycle";
 import { createShapeUpPitch, isShapeUpBet, isShapeUpPitchComplete, scheduleShapeUpAwarePortfolio, scheduleShapeUpAwareProject, shapeUpAppetiteDays, shapeUpMissingBetRequirements, shapeUpScopeStatus } from "./shapeUp";
 import type {
   Actual,
@@ -114,7 +115,7 @@ export interface AgentCommandExecution {
 
 export function workspaceRevision(snapshot: WorkspaceSnapshot) {
   return `rev-${hashText(JSON.stringify({
-    projects: snapshot.projects.map((project) => [project.id, project.status, project.mode, project.priority, project.horizon]),
+    projects: snapshot.projects.map((project) => [project.id, projectLifecycleStatus(project), isProjectArchived(project), project.mode, project.priority, project.horizon]),
     workItems: snapshot.workItems.map((item) => [item.id, item.projectId, item.percentComplete, item.title, item.outline]),
     dependencies: snapshot.dependencies.map((dependency) => [dependency.id, dependency.fromId, dependency.toId, dependency.type, dependency.lagSeconds]),
     baselines: snapshot.baselines.map((baseline) => [baseline.id, baseline.projectId, baseline.capturedAt, baseline.approvedByDecisionId]),
@@ -882,10 +883,10 @@ function previewDiffs(snapshot: WorkspaceSnapshot, project: Project, workItem: W
     return [{ entity: "Project", entityId: project.id, field: "shapeUpPitch", before: project.shapeUpPitch ?? null, after: nextShapeUpPitch(project, command, generatedAt) }];
   }
   if (command.command_type === "request_complete_project") {
-    return [{ entity: "Project", entityId: project.id, field: "status", before: project.status, after: "done" }];
+    return [{ entity: "Project", entityId: project.id, field: "status", before: projectLifecycleStatus(project), after: "done" }];
   }
   if (command.command_type === "request_archive_project") {
-    return [{ entity: "Project", entityId: project.id, field: "status", before: project.status, after: "archived" }];
+    return [{ entity: "Project", entityId: project.id, field: "archived", before: isProjectArchived(project), after: true }];
   }
   return [{ entity: "AgentCommand", entityId: project.id, field: command.command_type, before: null, after: command }];
 }
@@ -999,21 +1000,21 @@ function projectJson(
   const shapeUpPitch = project.shapeUpPitch;
   const shapeUpStage = !shapeUpPitch
     ? "off"
-    : project.status === "waiting" && !isShapeUpPitchComplete(shapeUpPitch)
+    : projectLifecycleStatus(project) === "waiting" && !isShapeUpPitchComplete(shapeUpPitch)
       ? "shaping"
-      : project.status === "waiting"
+      : projectLifecycleStatus(project) === "waiting"
         ? "betting"
-        : project.status === "active"
+        : projectLifecycleStatus(project) === "active"
           ? "building"
-          : project.status === "paused"
+          : projectLifecycleStatus(project) === "paused"
             ? "circuit_breaker"
-            : project.status === "done"
+            : projectLifecycleStatus(project) === "done"
               ? "shipped"
               : "killed";
   const base = {
     id: project.id,
     name: project.name,
-    status: project.status,
+    status: projectLifecycleLabel(project),
     mode: project.mode,
     priority: project.priority,
     north_star: project.northStar,

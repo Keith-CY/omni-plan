@@ -28,6 +28,8 @@ export interface Project {
   id: Id;
   name: string;
   status: ProjectStatus;
+  archived?: boolean;
+  archivedAt?: ISODate;
   mode: ProjectMode;
   priority: number;
   northStar: string;
