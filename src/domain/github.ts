@@ -1,4 +1,5 @@
 import type { Evidence, Id } from "./types";
+import { browserFetch } from "./http";
 
 export interface GitHubPullRequestEvidence {
   title: string;
@@ -12,7 +13,7 @@ export async function fetchPullRequestEvidence(
   owner: string,
   repo: string,
   token: string,
-  fetcher: typeof fetch = fetch
+  fetcher: typeof fetch = browserFetch
 ): Promise<GitHubPullRequestEvidence[]> {
   const headers = {
     Accept: "application/vnd.github+json",

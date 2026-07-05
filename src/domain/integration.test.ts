@@ -305,6 +305,13 @@ describe("workspace, GitHub, and secrets", () => {
           json: async () => ({ idToken: "firebase-id-token", localId: "anonymous-user" })
         } as Response);
       }
+      if (url.includes("/pulls?")) {
+        return Promise.resolve({
+          ok: true,
+          headers: { get: () => null },
+          json: async () => []
+        } as unknown as Response);
+      }
       if (url.startsWith("https://api.github.com")) {
         return Promise.resolve({ ok: false, status: 404, json: async () => ({}) } as Response);
       }
@@ -331,11 +338,14 @@ describe("workspace, GitHub, and secrets", () => {
 
       const session = await firebaseClient.signInAnonymously();
       const missingFile = await githubClient.readText(".omni-plan/workspaces/personal/manifest.json");
+      const pullRequests = await fetchPullRequestEvidence("acme", "repo", "github-token");
 
       expect(session.idToken).toBe("firebase-id-token");
       expect(missingFile).toBeUndefined();
+      expect(pullRequests).toEqual([]);
       expect(calls.some((url) => url.startsWith("https://identitytoolkit.googleapis.com"))).toBe(true);
       expect(calls.some((url) => url.startsWith("https://api.github.com"))).toBe(true);
+      expect(calls.some((url) => url.includes("/pulls?"))).toBe(true);
     } finally {
       globalThis.fetch = originalFetch;
     }
