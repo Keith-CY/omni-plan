@@ -94,6 +94,7 @@ import type {
   AuditGate,
   Baseline,
   ChangeSet,
+  Decision,
   Dependency,
   DependencyType,
   DirectionCard,
@@ -1435,9 +1436,43 @@ function RoutedApp() {
 
   const clearGate = (gate: AuditGate, rationale: string) => {
     setWorkspace((previous) => {
+      const createdAt = timestamp();
       const clearedGate: AuditGate = { ...gate, status: "cleared" };
+      const baselineChangeSet = gate.targetType === "baseline"
+        ? previous.changeSets.find((changeSet) => changeSet.id === gate.targetId && changeSet.status !== "approved")
+        : undefined;
+      const baselineIds = baselineChangeSet?.diffs.filter((diff) => diff.entity === "Baseline").map((diff) => diff.entityId) ?? [];
+      const baselineApprovalDecision = baselineChangeSet ? {
+        id: uniqueId("decision", `approve-${baselineChangeSet.title}`, previous.decisions.map((decision) => decision.id)),
+        projectId: baselineChangeSet.projectId,
+        statement: `Approve ${baselineChangeSet.title}`,
+        context: gate.reason,
+        options: ["Approve", "Block", "Defer"],
+        rationale: rationale.trim() || "Baseline gate was cleared after operator review, so the underlying ChangeSet is approved.",
+        consequences: "The baseline ChangeSet no longer regenerates a hard gate and the baseline can be used for final reporting.",
+        linkedEvidenceIds: [],
+        createdAt
+      } satisfies Decision : undefined;
+      const baselineStatusChangeSet = baselineChangeSet ? createChangeSet(
+        baselineChangeSet.projectId,
+        `Set ChangeSet ${baselineChangeSet.title} approved`,
+        "Approved from the baseline gate clear action.",
+        [{ entity: "ChangeSet", entityId: baselineChangeSet.id, field: "status", before: baselineChangeSet.status, after: "approved" }],
+        previous.changeSets.length,
+        "approved"
+      ) : undefined;
+      const clearChangeSet = createChangeSet(
+        gate.projectId,
+        `Clear gate ${gate.targetType}`,
+        baselineChangeSet ? "Cleared from Audit Queue and approved the linked baseline ChangeSet." : "Cleared from Audit Queue after operator review.",
+        [{ entity: "AuditGate", entityId: gate.id, field: "status", before: gate.status, after: "cleared" }],
+        previous.changeSets.length + (baselineStatusChangeSet ? 1 : 0)
+      );
       return {
         ...previous,
+        baselines: baselineApprovalDecision
+          ? previous.baselines.map((baseline) => baselineIds.includes(baseline.id) ? { ...baseline, approvedByDecisionId: baselineApprovalDecision.id } : baseline)
+          : previous.baselines,
         auditGates: [clearedGate, ...previous.auditGates.filter((candidate) => candidate.id !== gate.id)],
         decisions: [
           {
@@ -1447,21 +1482,19 @@ function RoutedApp() {
             context: gate.reason,
             options: ["Clear", "Block", "Defer"],
             rationale: rationale.trim() || gate.requiredAction,
-            consequences: "The gate remains documented and no longer blocks the current plan.",
+            consequences: baselineChangeSet
+              ? "The linked baseline ChangeSet was approved, so this gate will not regenerate from the same baseline edit."
+              : "The gate remains documented and no longer blocks the current plan.",
             linkedEvidenceIds: previous.evidence.filter((item) => item.projectId === gate.projectId && (item.workItemId === gate.targetId || gate.targetType === "project")).map((item) => item.id),
-            createdAt: timestamp()
+            createdAt
           },
+          ...(baselineApprovalDecision ? [baselineApprovalDecision] : []),
           ...previous.decisions
         ],
         changeSets: [
-          createChangeSet(
-            gate.projectId,
-            `Clear gate ${gate.targetType}`,
-            "Cleared from Audit Queue after operator review.",
-            [{ entity: "AuditGate", entityId: gate.id, field: "status", before: gate.status, after: "cleared" }],
-            previous.changeSets.length
-          ),
-          ...previous.changeSets
+          ...(baselineStatusChangeSet ? [baselineStatusChangeSet] : []),
+          clearChangeSet,
+          ...previous.changeSets.map((changeSet) => baselineChangeSet && changeSet.id === baselineChangeSet.id ? { ...changeSet, status: "approved" as const } : changeSet)
         ]
       };
     });
@@ -1717,6 +1750,11 @@ function RoutedApp() {
           <ProjectWorkspace
             project={selectedProject}
             baseline={selectedBaseline}
+            baselineChangeSet={selectedBaseline ? workspace.changeSets.find((changeSet) =>
+              changeSet.projectId === selectedProject.id &&
+              changeSet.status !== "approved" &&
+              changeSet.diffs.some((diff) => diff.entity === "Baseline" && diff.entityId === selectedBaseline.id)
+            ) : undefined}
             baselineApproved={isBaselineApproved(selectedBaseline, workspace.changeSets)}
             dependencies={selectedDependencies}
             schedule={selectedSchedule}
@@ -1737,6 +1775,7 @@ function RoutedApp() {
             onProjectComplete={(projectId) => updateProjectStatus(projectId, "done")}
             onProjectArchive={(projectId) => updateProjectStatus(projectId, "archived")}
             onBaselineCapture={() => captureBaseline(selectedProject.id, selectedSchedule)}
+            onChangeSetStatus={setChangeSetStatus}
             onGateClear={clearGate}
             onDependencyUpdate={updateDependency}
             onDependencyRemove={removeDependency}
@@ -2229,6 +2268,7 @@ function ProjectWorkspace({
   project,
   projects,
   baseline,
+  baselineChangeSet,
   baselineApproved,
   dependencies,
   schedule,
@@ -2249,6 +2289,7 @@ function ProjectWorkspace({
   onProjectComplete,
   onProjectArchive,
   onBaselineCapture,
+  onChangeSetStatus,
   onGateClear,
   onDependencyUpdate,
   onDependencyRemove
@@ -2256,6 +2297,7 @@ function ProjectWorkspace({
   project: Project;
   projects: Project[];
   baseline?: Baseline;
+  baselineChangeSet?: ChangeSet;
   baselineApproved: boolean;
   dependencies: Dependency[];
   schedule: ScheduleResult;
@@ -2276,6 +2318,7 @@ function ProjectWorkspace({
   onProjectComplete: (projectId: string) => void;
   onProjectArchive: (projectId: string) => void;
   onBaselineCapture: () => void;
+  onChangeSetStatus: (changeSetId: string, status: ChangeSet["status"]) => void;
   onGateClear: (gate: AuditGate, rationale: string) => void;
   onDependencyUpdate: (dependencyId: string, patch: DependencyPatch) => void;
   onDependencyRemove: (dependencyId: string) => void;
@@ -2483,6 +2526,12 @@ function ProjectWorkspace({
                 <div className="flex flex-wrap items-center gap-2">
                   {baseline && <Badge variant={baselineApproved ? "success" : "warning"}>{baselineApproved ? "approved" : "pending"}</Badge>}
                   <Button type="button" variant="outline" onClick={onBaselineCapture}>Capture baseline</Button>
+                  {baseline && !baselineApproved && baselineChangeSet && (
+                    <Button type="button" onClick={() => onChangeSetStatus(baselineChangeSet.id, "approved")}>
+                      <CheckCircle2 />
+                      Approve baseline
+                    </Button>
+                  )}
                 </div>
               </div>
             </CardHeader>
