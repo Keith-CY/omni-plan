@@ -3,21 +3,31 @@ import {
   Archive,
   BarChart3,
   CalendarClock,
+  ChevronDown,
+  ChevronUp,
   CheckCircle2,
   ClipboardCheck,
   FileDown,
+  FileJson,
+  FileText,
   GitPullRequest,
   Home,
+  Inbox,
   KeyRound,
   Layers3,
   Lock,
   Network,
   PanelRight,
+  Play,
   Plus,
+  RefreshCw,
   Search,
+  Settings as SettingsIcon,
   ShieldAlert,
   Target,
   Timer,
+  Save,
+  Upload,
   Workflow,
   Zap
 } from "lucide-react";
@@ -112,13 +122,13 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
 
-type View = "portfolio" | "project" | "today" | "audit" | "reports" | "settings";
+type View = "portfolio" | "project" | "today" | "audit" | "reports" | "agent" | "settings";
 type ScheduleTiming = "Overdue" | "Due now" | "Upcoming";
 
 const now = new Date().toISOString();
 const asOfLabel = `As of ${now.slice(0, 10)}`;
 const defaultProjectId = sampleWorkspace.projects[0]?.id ?? "p-omni";
-const views = new Set<View>(["portfolio", "project", "today", "audit", "reports", "settings"]);
+const views = new Set<View>(["portfolio", "project", "today", "audit", "reports", "agent", "settings"]);
 const daySeconds = 24 * 60 * 60;
 const dependencyTypes: DependencyType[] = ["FS", "SS", "FF", "SF"];
 const workItemKinds: WorkItemKind[] = ["phase", "task", "milestone", "hammock"];
@@ -1603,6 +1613,7 @@ function RoutedApp() {
           <NavButton active={view === "today"} icon={<Timer />} label="Today" href={hashForRoute({ view: "today", selectedProjectId })} />
           <NavButton active={view === "audit"} icon={<ShieldAlert />} label="Audit" href={hashForRoute({ view: "audit", selectedProjectId })} />
           <NavButton active={view === "reports"} icon={<FileDown />} label="Reports" href={hashForRoute({ view: "reports", selectedProjectId })} />
+          <NavButton active={view === "agent"} icon={<ClipboardCheck />} label="Agent" href={hashForRoute({ view: "agent", selectedProjectId })} />
           <NavButton active={view === "settings"} icon={<KeyRound />} label="Settings" href={hashForRoute({ view: "settings", selectedProjectId })} />
         </nav>
         <Separator className="my-4" />
@@ -1625,9 +1636,8 @@ function RoutedApp() {
             <div className="flex items-center gap-2">
               <Sheet open={searchOpen} onOpenChange={setSearchOpen}>
                 <SheetTrigger asChild>
-                  <Button variant="outline" size="sm" aria-label="Search projects, tasks, and evidence">
+                  <Button variant="outline" size="icon" aria-label="Search projects, tasks, and evidence" title="Command search">
                     <Search />
-                    <span className="hidden sm:inline">Command</span>
                   </Button>
                 </SheetTrigger>
                 <SheetContent side="right" className="w-[92vw] sm:max-w-xl">
@@ -1673,18 +1683,21 @@ function RoutedApp() {
                 </SheetContent>
               </Sheet>
               <Badge variant="outline" className="hidden sm:inline-flex">{asOfLabel}</Badge>
-              <Badge variant={openHardGateCount ? "destructive" : "success"}>
-                {openHardGateCount ? `${openHardGateCount} hard gates` : "Audit clear"}
-              </Badge>
+              <IconStatusBadge
+                variant={openHardGateCount ? "destructive" : "success"}
+                status={openHardGateCount ? `${openHardGateCount} hard gates require review` : "Audit clear"}
+                icon={openHardGateCount ? <ShieldAlert /> : <CheckCircle2 />}
+              />
             </div>
           </div>
         </header>
-        <nav className="fixed inset-x-3 bottom-3 z-30 grid grid-cols-6 rounded-xl border bg-card/95 p-1 shadow-lg backdrop-blur lg:hidden" aria-label="Mobile primary">
+        <nav className="fixed inset-x-3 bottom-3 z-30 grid grid-cols-7 rounded-xl border bg-card/95 p-1 shadow-lg backdrop-blur lg:hidden" aria-label="Mobile primary">
           <NavButton active={view === "portfolio"} icon={<Home />} label="Portfolio" href={hashForRoute({ view: "portfolio", selectedProjectId })} />
           <NavButton active={view === "project"} icon={<Workflow />} label="Project" href={hashForRoute({ view: "project", selectedProjectId: selectedProject.id })} />
           <NavButton active={view === "today"} icon={<Timer />} label="Today" href={hashForRoute({ view: "today", selectedProjectId })} />
           <NavButton active={view === "audit"} icon={<ShieldAlert />} label="Audit" href={hashForRoute({ view: "audit", selectedProjectId })} />
           <NavButton active={view === "reports"} icon={<FileDown />} label="Reports" href={hashForRoute({ view: "reports", selectedProjectId })} />
+          <NavButton active={view === "agent"} icon={<ClipboardCheck />} label="Agent" href={hashForRoute({ view: "agent", selectedProjectId })} />
           <NavButton active={view === "settings"} icon={<KeyRound />} label="Settings" href={hashForRoute({ view: "settings", selectedProjectId })} />
         </nav>
         <main className="px-4 py-4 pb-24 lg:px-6 lg:pb-8" aria-labelledby="page-title">
@@ -1774,11 +1787,19 @@ function RoutedApp() {
             baseline={selectedApprovedBaseline}
           />
         )}
-        {view === "settings" && (
-          <Settings
+        {view === "agent" && (
+          <AgentCenter
             workspace={workspace}
             schedules={model.schedules}
             gates={model.gates}
+            settings={appSettings}
+            sessionPassphrase={sessionPassphrase}
+            onAuditDecisionSave={saveAuditDecision}
+          />
+        )}
+        {view === "settings" && (
+          <Settings
+            workspace={workspace}
             settings={appSettings}
             onSettingsSave={saveAppSettings}
             sessionPassphrase={sessionPassphrase}
@@ -1792,7 +1813,6 @@ function RoutedApp() {
             onWorkspaceImport={(nextWorkspace) => setWorkspace(nextWorkspace)}
             onWorkspaceReset={() => setWorkspace(sampleWorkspace)}
             onEvidenceImport={importEvidenceItems}
-            onAuditDecisionSave={saveAuditDecision}
           />
         )}
         </main>
@@ -1813,6 +1833,8 @@ function viewTitle(view: View, projectName: string) {
       return "Audit Queue";
     case "reports":
       return "Reports";
+    case "agent":
+      return "Agent";
     case "settings":
       return "Secrets & Storage";
   }
@@ -3560,10 +3582,173 @@ function Reports({
   );
 }
 
-function Settings({
+type SettingsPanelId = "sync" | "secrets" | "ai-provider" | "workspace";
+
+function AgentCenter({
   workspace,
   schedules,
   gates,
+  settings,
+  sessionPassphrase,
+  onAuditDecisionSave
+}: {
+  workspace: WorkspaceSnapshot;
+  schedules: ScheduleResult[];
+  gates: AuditGate[];
+  settings: AppSettings;
+  sessionPassphrase: string;
+  onAuditDecisionSave: (decision: AuditDecision, reason: string) => void;
+}) {
+  const secretVault = useMemo(() => new BrowserEncryptedSecretVault(), []);
+  const [auditProjectId, setAuditProjectId] = useState(() => workspace.projects[0]?.id ?? defaultProjectId);
+  const [aiBusy, setAiBusy] = useState(false);
+  const idleAgentNotice = "No agent action has run yet.";
+  const [notice, setNotice] = useState(idleAgentNotice);
+  const aiProvider = settings.aiProviders[0] ?? defaultCustomAiProviderSettings;
+  const auditProject = workspace.projects.find((project) => project.id === auditProjectId) ?? workspace.projects[0];
+  const auditSchedule = schedules.find((schedule) => schedule.projectId === auditProject?.id) ?? (auditProject ? scheduleShapeUpAwareProject(auditProject, workspace.workItems, workspace.dependencies) : undefined);
+  const aiProviderReady = Boolean(aiProvider.baseUrl.trim() && aiProvider.model.trim() && aiProvider.apiKeySecretId);
+  const agentProjectId = auditProject?.id ?? workspace.projects[0]?.id ?? defaultProjectId;
+
+  useEffect(() => {
+    if (!workspace.projects.some((project) => project.id === auditProjectId)) {
+      setAuditProjectId(workspace.projects[0]?.id ?? defaultProjectId);
+    }
+  }, [workspace.projects, auditProjectId]);
+
+  const unlockAiProviderKey = async (): Promise<string | undefined> => {
+    if (!aiProvider.apiKeySecretId) {
+      setNotice("Save an AI provider key in Settings before running AI audit.");
+      return undefined;
+    }
+    if (!sessionPassphrase.trim()) {
+      setNotice("Enter the workspace passphrase in Settings > Secrets to unlock the saved AI provider key.");
+      return undefined;
+    }
+    const key = await secretVault.unlock(aiProvider.apiKeySecretId, sessionPassphrase);
+    if (!key) setNotice("Could not unlock AI provider key.");
+    return key;
+  };
+
+  const runAiAudit = async () => {
+    if (!auditProject || !auditSchedule) {
+      setNotice("Create or select a project before running AI audit.");
+      return;
+    }
+    if (!aiProvider.baseUrl.trim() || !aiProvider.model.trim()) {
+      setNotice("Set AI provider Base URL and model in Settings before running audit.");
+      return;
+    }
+    const key = await unlockAiProviderKey();
+    if (!key) return;
+    setAiBusy(true);
+    try {
+      const decision = await runContrarianAiAudit({
+        provider: aiProvider,
+        apiKey: key,
+        project: auditProject,
+        gates: gates.filter((gate) => gate.projectId === auditProject.id),
+        evidence: workspace.evidence.filter((item) => item.projectId === auditProject.id),
+        schedule: auditSchedule
+      });
+      onAuditDecisionSave(decision, `AI audit generated by ${aiProvider.label} / ${aiProvider.model}.`);
+      setNotice(`AI audit recorded ${decision.action} for ${auditProject.name}.`);
+    } catch (error) {
+      setNotice(`AI audit failed: ${error instanceof Error ? error.message : "unknown error"}`);
+    } finally {
+      setAiBusy(false);
+    }
+  };
+
+  return (
+    <section className="grid gap-4 lg:grid-cols-2">
+      {notice !== idleAgentNotice && (
+        <div className="rounded-lg border bg-background p-3 text-sm font-medium lg:col-span-2">{notice}</div>
+      )}
+
+      <Card className="lg:col-span-2">
+        <CardHeader>
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <CardTitle className="flex items-center gap-2"><ClipboardCheck className="h-4 w-4" /> Agent</CardTitle>
+              <CardDescription>Machine-readable status endpoints, command inbox, and AI audit runtime.</CardDescription>
+            </div>
+            <IconStatusBadge variant="outline" status="No secrets exposed" icon={<Lock />} />
+          </div>
+        </CardHeader>
+        <CardContent className="grid gap-3 md:grid-cols-3">
+          <SettingsRow label="Protocol" value="/agent/manual.txt" />
+          <SettingsRow label="Portfolio state" value="/agent/projects.txt | .json" />
+          <SettingsRow label="Write entry" value="/agent/commands" />
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2"><FileDown className="h-4 w-4" /> Read Endpoints</CardTitle>
+          <CardDescription>Plaintext and JSON project state for external agents.</CardDescription>
+        </CardHeader>
+        <CardContent className="flex flex-wrap gap-2">
+          <IconLinkButton label="Open agent manual" href="/agent/manual.txt"><FileText /></IconLinkButton>
+          <IconLinkButton label="Open projects text endpoint" href="/agent/projects.txt"><FileText /></IconLinkButton>
+          <IconLinkButton label="Open projects JSON endpoint" href="/agent/projects.json"><FileJson /></IconLinkButton>
+          <IconLinkButton label="Open selected project endpoint" href={`/agent/projects/${encodeURIComponent(agentProjectId)}.txt`}><Target /></IconLinkButton>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2"><ClipboardCheck className="h-4 w-4" /> Command Inbox</CardTitle>
+          <CardDescription>Dry-run receipts and guarded write boundary.</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <div className="grid gap-3 md:grid-cols-2">
+            <SettingsRow label="Low-risk commands" value="auto-apply" />
+            <SettingsRow label="Guarded commands" value="queue gate" />
+          </div>
+          <IconLinkButton label="Open command inbox" href="/agent/commands"><Inbox /></IconLinkButton>
+        </CardContent>
+      </Card>
+
+      <Card className="lg:col-span-2" id="agent-ai-audit">
+        <CardHeader>
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <CardTitle className="flex items-center gap-2"><Zap className="h-4 w-4" /> AI Contrarian Audit</CardTitle>
+              <CardDescription>Runs the saved provider against bounded project context and records an audit decision.</CardDescription>
+            </div>
+            <IconStatusBadge
+              variant={aiProviderReady ? sessionPassphrase.trim() ? "success" : "warning" : "warning"}
+              status={aiProviderReady ? sessionPassphrase.trim() ? "Ready" : "Locked" : "Needs provider"}
+              icon={aiProviderReady ? sessionPassphrase.trim() ? <CheckCircle2 /> : <Lock /> : <AlertTriangle />}
+            />
+          </div>
+        </CardHeader>
+        <CardContent className="grid gap-3 md:grid-cols-[1fr_auto]">
+          <NativeSelectField
+            label="Audit project"
+            value={auditProject?.id ?? ""}
+            onChange={setAuditProjectId}
+            options={workspace.projects.map((project) => ({ value: project.id, label: project.name }))}
+            testId="ai-audit-project"
+          />
+          <div className="flex items-end gap-2">
+            <IconActionButton label={aiBusy ? "Running AI audit" : "Run AI audit"} type="button" onClick={() => void runAiAudit()} disabled={aiBusy || !aiProviderReady || !auditProject || !auditSchedule}>
+              <Play className={aiBusy ? "animate-pulse" : undefined} />
+            </IconActionButton>
+            <IconLinkButton label="Open settings" href={hashForRoute({ view: "settings", selectedProjectId: agentProjectId })}><SettingsIcon /></IconLinkButton>
+          </div>
+          <div className="rounded-lg border bg-muted/40 p-3 text-sm text-muted-foreground md:col-span-2">
+            Sends project direction, open gates, recent evidence summaries, and first schedule rows only.
+          </div>
+        </CardContent>
+      </Card>
+    </section>
+  );
+}
+
+function Settings({
+  workspace,
   settings,
   onSettingsSave,
   sessionPassphrase,
@@ -3576,12 +3761,9 @@ function Settings({
   workspacePersistence,
   onWorkspaceImport,
   onWorkspaceReset,
-  onEvidenceImport,
-  onAuditDecisionSave
+  onEvidenceImport
 }: {
   workspace: WorkspaceSnapshot;
-  schedules: ScheduleResult[];
-  gates: AuditGate[];
   settings: AppSettings;
   onSettingsSave: (settings: AppSettings) => void;
   sessionPassphrase: string;
@@ -3595,7 +3777,6 @@ function Settings({
   onWorkspaceImport: (workspace: WorkspaceSnapshot) => void;
   onWorkspaceReset: () => void;
   onEvidenceImport: (projectId: string, evidenceItems: Evidence[], reason: string) => void;
-  onAuditDecisionSave: (decision: AuditDecision, reason: string) => void;
 }) {
   const secretVault = useMemo(() => new BrowserEncryptedSecretVault(), []);
   const workspaceRepository = useMemo(() => new BrowserWorkspaceRepository(), []);
@@ -3605,21 +3786,19 @@ function Settings({
   const [aiDraft, setAiDraft] = useState<AiProviderSettings>(() => settings.aiProviders[0] ?? defaultCustomAiProviderSettings);
   const [githubToken, setGithubToken] = useState("");
   const [aiProviderKey, setAiProviderKey] = useState("");
-  const [notice, setNotice] = useState("No settings action has run yet.");
+  const idleSettingsNotice = "No settings action has run yet.";
+  const [notice, setNotice] = useState(idleSettingsNotice);
   const [savedSecretCount, setSavedSecretCount] = useState(() => secretVault.listEncrypted().length);
   const [syncBusy, setSyncBusy] = useState(false);
   const [evidenceProjectId, setEvidenceProjectId] = useState(() => workspace.projects[0]?.id ?? defaultProjectId);
   const [evidenceWorkItemId, setEvidenceWorkItemId] = useState<string>("project");
-  const [auditProjectId, setAuditProjectId] = useState(() => workspace.projects[0]?.id ?? defaultProjectId);
-  const [aiBusy, setAiBusy] = useState(false);
+  const [expandedPanels, setExpandedPanels] = useState<Set<SettingsPanelId>>(() => new Set());
   const githubSecret = githubDraft.tokenSecretId ? secretVault.readEncrypted(githubDraft.tokenSecretId) : undefined;
   const aiSecret = aiDraft.apiKeySecretId ? secretVault.readEncrypted(aiDraft.apiKeySecretId) : undefined;
   const gitHubReady = Boolean(githubDraft.owner.trim() && githubDraft.repo.trim() && githubDraft.tokenSecretId);
   const firebaseReady = firebaseSettingsReady(firebaseDraft);
   const evidenceProject = workspace.projects.find((project) => project.id === evidenceProjectId) ?? workspace.projects[0];
   const evidenceWorkItems = workspace.workItems.filter((item) => item.projectId === evidenceProject?.id && item.kind !== "phase");
-  const auditProject = workspace.projects.find((project) => project.id === auditProjectId) ?? workspace.projects[0];
-  const auditSchedule = schedules.find((schedule) => schedule.projectId === auditProject?.id) ?? (auditProject ? scheduleShapeUpAwareProject(auditProject, workspace.workItems, workspace.dependencies) : undefined);
   const rememberedPassphraseStatus = rememberedPassphraseSavedAt
     ? `saved ${rememberedPassphraseSavedAt.slice(0, 19).replace("T", " ")}`
     : rememberedPassphraseLoaded
@@ -3681,10 +3860,7 @@ function Settings({
     if (!workspace.projects.some((project) => project.id === evidenceProjectId)) {
       setEvidenceProjectId(workspace.projects[0]?.id ?? defaultProjectId);
     }
-    if (!workspace.projects.some((project) => project.id === auditProjectId)) {
-      setAuditProjectId(workspace.projects[0]?.id ?? defaultProjectId);
-    }
-  }, [workspace.projects, evidenceProjectId, auditProjectId]);
+  }, [workspace.projects, evidenceProjectId]);
 
   const saveGitHubSync = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -3803,20 +3979,6 @@ function Settings({
     const token = await secretVault.unlock(githubDraft.tokenSecretId, sessionPassphrase);
     if (!token) setNotice("Could not unlock GitHub PAT.");
     return token;
-  };
-
-  const unlockAiProviderKey = async (): Promise<string | undefined> => {
-    if (!aiDraft.apiKeySecretId) {
-      setNotice("Save an AI provider key before running AI audit.");
-      return undefined;
-    }
-    if (!sessionPassphrase.trim()) {
-      setNotice("Enter the workspace passphrase to unlock the saved AI provider key.");
-      return undefined;
-    }
-    const key = await secretVault.unlock(aiDraft.apiKeySecretId, sessionPassphrase);
-    if (!key) setNotice("Could not unlock AI provider key.");
-    return key;
   };
 
   const testGitHubSync = async () => {
@@ -3953,36 +4115,6 @@ function Settings({
     }
   };
 
-  const runAiAudit = async () => {
-    if (!auditProject || !auditSchedule) {
-      setNotice("Create or select a project before running AI audit.");
-      return;
-    }
-    if (!aiDraft.baseUrl.trim() || !aiDraft.model.trim()) {
-      setNotice("Set AI provider Base URL and model before running audit.");
-      return;
-    }
-    const key = await unlockAiProviderKey();
-    if (!key) return;
-    setAiBusy(true);
-    try {
-      const decision = await runContrarianAiAudit({
-        provider: aiDraft,
-        apiKey: key,
-        project: auditProject,
-        gates: gates.filter((gate) => gate.projectId === auditProject.id),
-        evidence: workspace.evidence.filter((item) => item.projectId === auditProject.id),
-        schedule: auditSchedule
-      });
-      onAuditDecisionSave(decision, `AI audit generated by ${aiDraft.label} / ${aiDraft.model}.`);
-      setNotice(`AI audit recorded ${decision.action} for ${auditProject.name}.`);
-    } catch (error) {
-      setNotice(`AI audit failed: ${error instanceof Error ? error.message : "unknown error"}`);
-    } finally {
-      setAiBusy(false);
-    }
-  };
-
   const pushLocalChangeSets = async () => {
     if (!workspace.changeSets.length) {
       setNotice("No local ChangeSets to push.");
@@ -4068,98 +4200,234 @@ function Settings({
     setNotice("Local workspace reset to sample data.");
   };
 
+  const openPanel = (panel: SettingsPanelId) => {
+    setExpandedPanels((current) => {
+      const next = new Set(current);
+      next.add(panel);
+      return next;
+    });
+  };
+
+  const togglePanel = (panel: SettingsPanelId) => {
+    setExpandedPanels((current) => {
+      const next = new Set(current);
+      if (next.has(panel)) {
+        next.delete(panel);
+      } else {
+        next.add(panel);
+      }
+      return next;
+    });
+  };
+
+  const syncLocked = firebaseReady && !sessionPassphrase.trim();
+  const syncStatus = !firebaseReady
+    ? "Needs configuration"
+    : syncLocked
+      ? "Locked"
+      : autoSyncStatus.state === "error" || autoSyncStatus.state === "conflict"
+        ? "Needs review"
+        : "Ready";
+  const syncPrimaryLabel = !firebaseReady ? "Configure sync" : syncLocked ? "Unlock" : syncBusy ? "Syncing" : "Sync now";
+  const syncBadgeVariant = syncStatus === "Ready" ? "success" : syncStatus === "Needs review" ? "destructive" : "warning";
+  const syncStatusIcon = syncStatus === "Ready" ? <CheckCircle2 /> : syncStatus === "Locked" ? <Lock /> : <AlertTriangle />;
+  const syncPrimaryIcon = !firebaseReady
+    ? <SettingsIcon />
+    : syncLocked
+      ? <KeyRound />
+      : <RefreshCw className={syncBusy ? "animate-spin" : undefined} />;
+
+  const hasSecretDependency = savedSecretCount > 0 || firebaseReady || Boolean(aiDraft.apiKeySecretId || githubDraft.tokenSecretId);
+  const secretsStatus = sessionPassphrase.trim() ? "Unlocked" : hasSecretDependency ? "Locked" : "No saved secrets";
+  const secretsPrimaryLabel = sessionPassphrase.trim()
+    ? rememberedPassphraseSavedAt ? "Manage" : "Remember"
+    : secretsStatus === "No saved secrets" ? "Manage" : "Unlock";
+  const secretsBadgeVariant = secretsStatus === "Unlocked" ? "success" : secretsStatus === "Locked" ? "warning" : "secondary";
+  const secretsStatusIcon = secretsStatus === "Unlocked" ? <CheckCircle2 /> : secretsStatus === "Locked" ? <Lock /> : <KeyRound />;
+  const secretsPrimaryIcon = secretsPrimaryLabel === "Remember" ? <Save /> : secretsPrimaryLabel === "Unlock" ? <KeyRound /> : <SettingsIcon />;
+
+  const aiProviderConfigured = Boolean(aiDraft.baseUrl.trim() && aiDraft.model.trim() && aiDraft.apiKeySecretId);
+  const aiProviderLocked = aiProviderConfigured && !sessionPassphrase.trim();
+  const aiProviderStatus = !aiProviderConfigured ? "Needs provider" : aiProviderLocked ? "Locked" : "Ready";
+  const aiProviderBadgeVariant = aiProviderStatus === "Ready" ? "success" : "warning";
+  const aiProviderPrimaryLabel = aiProviderLocked ? "Unlock" : "Configure provider";
+  const aiProviderStatusIcon = aiProviderStatus === "Ready" ? <CheckCircle2 /> : aiProviderStatus === "Locked" ? <Lock /> : <AlertTriangle />;
+  const aiProviderPrimaryIcon = aiProviderLocked ? <KeyRound /> : <SettingsIcon />;
+
+  const workspaceStatus = workspacePersistence.status.toLowerCase().includes("failed")
+    ? "Storage issue"
+    : workspacePersistence.loaded
+      ? "Saved locally"
+      : "Loading";
+  const workspaceBadgeVariant = workspaceStatus === "Storage issue" ? "destructive" : workspaceStatus === "Saved locally" ? "success" : "warning";
+  const workspaceStatusIcon = workspaceStatus === "Saved locally" ? <CheckCircle2 /> : workspaceStatus === "Loading" ? <RefreshCw className="animate-spin" /> : <AlertTriangle />;
+
   return (
     <section className="grid gap-4 lg:grid-cols-2">
-      <Card className="lg:col-span-2">
-        <CardHeader>
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div>
-              <CardTitle className="flex items-center gap-2"><Lock className="h-4 w-4" /> Firebase E2EE Sync</CardTitle>
-              <CardDescription>Primary multi-device sync. Firebase stores encrypted workspace snapshots and operation records only.</CardDescription>
+      {notice !== idleSettingsNotice && (
+        <div className="rounded-lg border bg-background p-3 text-sm font-medium lg:col-span-2">{notice}</div>
+      )}
+
+      <SettingsOverviewCard
+        icon={<Lock className="h-4 w-4" />}
+        title="Sync"
+        status={syncStatus}
+        statusIcon={syncStatusIcon}
+        description={autoSyncStatus.message}
+        badgeVariant={syncBadgeVariant}
+        primaryActionLabel={syncPrimaryLabel}
+        primaryActionIcon={syncPrimaryIcon}
+        primaryDisabled={syncBusy}
+        onPrimaryAction={() => {
+          if (!firebaseReady) {
+            openPanel("sync");
+          } else if (syncLocked) {
+            openPanel("secrets");
+          } else {
+            void pushFirebaseWorkspace();
+          }
+        }}
+        expanded={expandedPanels.has("sync")}
+        onToggle={() => togglePanel("sync")}
+      >
+        <div className="grid gap-4">
+          <div className="rounded-lg border bg-muted/20 p-3">
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+              <h3 className="text-sm font-semibold">Firebase Workspace Sync</h3>
+              <Badge variant={firebaseReady ? "success" : "warning"}>{firebaseReady ? "Ready" : "Needs Firebase config"}</Badge>
             </div>
-            <Badge variant={firebaseReady ? "success" : "warning"}>{firebaseReady ? "Ready" : "Needs Firebase config"}</Badge>
-          </div>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="grid gap-3 md:grid-cols-2">
-            <SettingsRow label="Provider" value={firebaseE2eeSyncStatus.provider} />
-            <SettingsRow label="Remote truth" value={firebaseE2eeSyncStatus.remoteTruth} />
-            <SettingsRow label="Encryption" value={firebaseE2eeSyncStatus.encryption} />
-            <SettingsRow label="Secret boundary" value={firebaseE2eeSyncStatus.secretBoundary} />
-            <SettingsRow label="Workspace" value={firebaseDraft.workspaceId || "personal"} />
-            <SettingsRow label="Device" value={firebaseDraft.deviceId || "current-device"} />
-            <SettingsRow label="Auto sync" value={firebaseDraft.autoSyncEnabled ? (sessionPassphrase ? "enabled and unlocked" : "enabled, locked") : "off"} />
-            <SettingsRow label="Auto status" value={autoSyncStatus.message} />
-            <SettingsRow label="Last synced revision" value={firebaseDraft.lastSyncedRevision ? firebaseDraft.lastSyncedRevision.slice(0, 12) : "none"} />
-            <SettingsRow label="Last push / pull" value={`${firebaseDraft.lastPushedAt ? firebaseDraft.lastPushedAt.slice(0, 19).replace("T", " ") : "never"} / ${firebaseDraft.lastPulledAt ? firebaseDraft.lastPulledAt.slice(0, 19).replace("T", " ") : "never"}`} />
-          </div>
-          <div className="flex flex-wrap gap-2">
-            <Button type="button" variant="outline" onClick={() => void testFirebaseSync()} disabled={syncBusy || !firebaseReady}>Test Firebase</Button>
-            <Button type="button" variant="outline" onClick={() => void pullFirebaseWorkspace()} disabled={syncBusy || !firebaseReady}>Pull latest workspace</Button>
-            <Button type="button" onClick={() => void pushFirebaseWorkspace()} disabled={syncBusy || !firebaseReady}>Push encrypted workspace</Button>
-            <Badge variant="outline">{firebaseE2eeSyncStatus.conflictPolicy}</Badge>
-          </div>
-          <form className="space-y-4 rounded-lg border bg-muted/20 p-3" onSubmit={saveFirebaseSync}>
-            <div className="grid gap-3 md:grid-cols-3">
-              <SettingsInput label="Firebase Project ID" name="firebase-project-id" value={firebaseDraft.projectId} onChange={(value) => updateFirebaseDraft({ projectId: value })} placeholder="my-firebase-project" autoComplete="off" />
-              <SettingsInput label="Web API key" name="firebase-api-key" value={firebaseDraft.apiKey} onChange={(value) => updateFirebaseDraft({ apiKey: value })} placeholder="AIza..." autoComplete="off" />
-              <SettingsInput label="Database ID" name="firebase-database-id" value={firebaseDraft.databaseId} onChange={(value) => updateFirebaseDraft({ databaseId: value })} placeholder="(default)" autoComplete="off" />
-              <SettingsInput label="Collection path" name="firebase-collection-path" value={firebaseDraft.collectionPath} onChange={(value) => updateFirebaseDraft({ collectionPath: value })} placeholder="omniPlanSync" autoComplete="off" />
-              <SettingsInput label="Workspace ID" name="firebase-workspace-id" value={firebaseDraft.workspaceId} onChange={(value) => updateFirebaseDraft({ workspaceId: value })} placeholder="personal" autoComplete="off" />
-              <SettingsInput label="Device ID" name="firebase-device-id" value={firebaseDraft.deviceId} onChange={(value) => updateFirebaseDraft({ deviceId: value })} placeholder="macbook-pro" autoComplete="off" />
-              <SettingsInput label="Poll interval seconds" name="firebase-auto-interval" value={String(firebaseDraft.autoSyncIntervalSeconds || 45)} onChange={(value) => updateFirebaseDraft({ autoSyncIntervalSeconds: Math.max(15, Math.round(Number(value) || 45)) })} placeholder="45" autoComplete="off" />
-              <SettingsInput label="Push debounce seconds" name="firebase-auto-debounce" value={String(firebaseDraft.autoPushDebounceSeconds || 8)} onChange={(value) => updateFirebaseDraft({ autoPushDebounceSeconds: Math.max(3, Math.round(Number(value) || 8)) })} placeholder="8" autoComplete="off" />
+            <div className="grid gap-3 md:grid-cols-2">
+              <SettingsRow label="Workspace" value={firebaseDraft.workspaceId || "personal"} />
+              <SettingsRow label="Device" value={firebaseDraft.deviceId || "current-device"} />
+              <SettingsRow label="Auto sync" value={firebaseDraft.autoSyncEnabled ? (sessionPassphrase ? "enabled and unlocked" : "enabled, locked") : "off"} />
+              <SettingsRow label="Last push / pull" value={`${firebaseDraft.lastPushedAt ? firebaseDraft.lastPushedAt.slice(0, 19).replace("T", " ") : "never"} / ${firebaseDraft.lastPulledAt ? firebaseDraft.lastPulledAt.slice(0, 19).replace("T", " ") : "never"}`} />
             </div>
-            <div className="flex flex-wrap items-center gap-2">
-              <label className="inline-flex min-h-9 items-center gap-2 rounded-md border px-3 text-sm font-medium">
-                <input
-                  type="checkbox"
-                  checked={firebaseDraft.autoSyncEnabled}
-                  onChange={(event) => updateFirebaseDraft({ autoSyncEnabled: event.target.checked })}
-                  aria-label="Enable Firebase auto sync"
-                />
-                Auto sync
-              </label>
-              <Button type="submit">Save Firebase sync</Button>
-              <Badge variant="outline">Anonymous Auth</Badge>
-              <Badge variant="outline">Firestore REST</Badge>
-              <Badge variant="outline">Passphrase decrypts locally</Badge>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <Button type="button" variant="outline" onClick={() => void testFirebaseSync()} disabled={syncBusy || !firebaseReady}>Test Firebase</Button>
+              <Button type="button" variant="outline" onClick={() => void pullFirebaseWorkspace()} disabled={syncBusy || !firebaseReady}>Pull latest workspace</Button>
+              <Button type="button" onClick={() => void pushFirebaseWorkspace()} disabled={syncBusy || !firebaseReady}>Push encrypted workspace</Button>
+              <Badge variant="outline">{firebaseE2eeSyncStatus.conflictPolicy}</Badge>
             </div>
-          </form>
-        </CardContent>
-      </Card>
-      <Card className="lg:col-span-2">
-        <CardHeader>
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div>
-              <CardTitle className="flex items-center gap-2"><GitPullRequest className="h-4 w-4" /> GitHub Sync Runtime</CardTitle>
-              <CardDescription>Real repo connection and encrypted ChangeSet push controls.</CardDescription>
+            <form className="mt-4 space-y-4 rounded-lg border bg-background p-3" onSubmit={saveFirebaseSync}>
+              <div className="grid gap-3 md:grid-cols-3">
+                <SettingsInput label="Firebase Project ID" name="firebase-project-id" value={firebaseDraft.projectId} onChange={(value) => updateFirebaseDraft({ projectId: value })} placeholder="my-firebase-project" autoComplete="off" />
+                <SettingsInput label="Web API key" name="firebase-api-key" value={firebaseDraft.apiKey} onChange={(value) => updateFirebaseDraft({ apiKey: value })} placeholder="AIza..." autoComplete="off" />
+                <SettingsInput label="Database ID" name="firebase-database-id" value={firebaseDraft.databaseId} onChange={(value) => updateFirebaseDraft({ databaseId: value })} placeholder="(default)" autoComplete="off" />
+                <SettingsInput label="Collection path" name="firebase-collection-path" value={firebaseDraft.collectionPath} onChange={(value) => updateFirebaseDraft({ collectionPath: value })} placeholder="omniPlanSync" autoComplete="off" />
+                <SettingsInput label="Workspace ID" name="firebase-workspace-id" value={firebaseDraft.workspaceId} onChange={(value) => updateFirebaseDraft({ workspaceId: value })} placeholder="personal" autoComplete="off" />
+                <SettingsInput label="Device ID" name="firebase-device-id" value={firebaseDraft.deviceId} onChange={(value) => updateFirebaseDraft({ deviceId: value })} placeholder="macbook-pro" autoComplete="off" />
+                <SettingsInput label="Poll interval seconds" name="firebase-auto-interval" value={String(firebaseDraft.autoSyncIntervalSeconds || 45)} onChange={(value) => updateFirebaseDraft({ autoSyncIntervalSeconds: Math.max(15, Math.round(Number(value) || 45)) })} placeholder="45" autoComplete="off" />
+                <SettingsInput label="Push debounce seconds" name="firebase-auto-debounce" value={String(firebaseDraft.autoPushDebounceSeconds || 8)} onChange={(value) => updateFirebaseDraft({ autoPushDebounceSeconds: Math.max(3, Math.round(Number(value) || 8)) })} placeholder="8" autoComplete="off" />
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <label className="inline-flex min-h-9 items-center gap-2 rounded-md border px-3 text-sm font-medium">
+                  <input
+                    type="checkbox"
+                    checked={firebaseDraft.autoSyncEnabled}
+                    onChange={(event) => updateFirebaseDraft({ autoSyncEnabled: event.target.checked })}
+                    aria-label="Enable Firebase auto sync"
+                  />
+                  Auto sync
+                </label>
+                <Button type="submit">Save Firebase sync</Button>
+                <Badge variant="outline">Passphrase decrypts locally</Badge>
+              </div>
+            </form>
+          </div>
+
+          <div className="rounded-lg border bg-muted/20 p-3">
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+              <h3 className="text-sm font-semibold">GitHub ChangeSets and Evidence</h3>
+              <Badge variant={gitHubReady ? "success" : "warning"}>{gitHubReady ? "Ready" : "Needs repo and PAT"}</Badge>
             </div>
-            <Badge variant={gitHubReady ? "success" : "warning"}>{gitHubReady ? "Ready" : "Needs repo and PAT"}</Badge>
+            <div className="grid gap-3 md:grid-cols-2">
+              <SettingsRow label="Remote repo" value={githubDraft.owner && githubDraft.repo ? `${githubDraft.owner}/${githubDraft.repo}` : "not configured"} />
+              <SettingsRow label="Repo root" value={githubDraft.rootPath || ".omni-plan"} />
+              <SettingsRow label="PAT" value={providerSecretSummary(githubSecret)} />
+              <SettingsRow label="Local ChangeSets" value={String(workspace.changeSets.length)} />
+            </div>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <Button type="button" variant="outline" onClick={() => void testGitHubSync()} disabled={syncBusy}>Test GitHub access</Button>
+              <Button type="button" onClick={() => void pushLocalChangeSets()} disabled={syncBusy || !workspace.changeSets.length}>Push local ChangeSets</Button>
+              <Badge variant="outline">{githubPrivateRepoSyncStatus.conflictPolicy}</Badge>
+            </div>
+            <form className="mt-4 space-y-4 rounded-lg border bg-background p-3" onSubmit={saveGitHubSync}>
+              <div className="grid gap-3 md:grid-cols-3">
+                <SettingsInput label="Owner" name="github-owner" value={githubDraft.owner} onChange={(value) => updateGithubDraft({ owner: value })} placeholder="your-github-org" autoComplete="organization" />
+                <SettingsInput label="Private repo" name="github-repo" value={githubDraft.repo} onChange={(value) => updateGithubDraft({ repo: value })} placeholder="omni-plan-sync" autoComplete="off" />
+                <SettingsInput label="Branch" name="github-branch" value={githubDraft.branch} onChange={(value) => updateGithubDraft({ branch: value })} placeholder="main" autoComplete="off" />
+                <SettingsInput label="Repo root" name="github-root-path" value={githubDraft.rootPath} onChange={(value) => updateGithubDraft({ rootPath: value })} placeholder=".omni-plan" autoComplete="off" />
+                <SettingsInput label="Workspace ID" name="github-workspace-id" value={githubDraft.workspaceId} onChange={(value) => updateGithubDraft({ workspaceId: value })} placeholder="personal" autoComplete="off" />
+                <SettingsInput label="Device ID" name="github-device-id" value={githubDraft.deviceId} onChange={(value) => updateGithubDraft({ deviceId: value })} placeholder="macbook-pro" autoComplete="off" />
+              </div>
+              <div className="grid gap-3 md:grid-cols-[1fr_auto]">
+                <label className="block">
+                  <span className="text-sm font-medium">GitHub fine-grained PAT</span>
+                  <Input
+                    className="mt-2"
+                    type="password"
+                    name="github-sync-token"
+                    autoComplete="current-password"
+                    value={githubToken}
+                    onChange={(event) => setGithubToken(event.target.value)}
+                    placeholder="github_pat_..."
+                    aria-label="GitHub fine-grained PAT"
+                  />
+                </label>
+                <div className="rounded-lg border bg-background p-3 text-sm">
+                  <div className="font-semibold">PAT</div>
+                  <div className="text-muted-foreground">{providerSecretSummary(githubSecret)}</div>
+                </div>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <Button type="submit">Save GitHub sync</Button>
+                <Badge variant="outline">Contents read/write</Badge>
+                <Badge variant="outline">Private repo only</Badge>
+              </div>
+            </form>
+            <div className="mt-4 grid gap-3 rounded-lg border bg-background p-3 md:grid-cols-[1fr_1fr_auto]">
+              <NativeSelectField
+                label="Evidence project"
+                value={evidenceProject?.id ?? ""}
+                onChange={setEvidenceProjectId}
+                options={workspace.projects.map((project) => ({ value: project.id, label: project.name }))}
+                testId="github-evidence-project"
+              />
+              <NativeSelectField
+                label="Link to work item"
+                value={evidenceWorkItemId}
+                onChange={setEvidenceWorkItemId}
+                options={[{ value: "project", label: "Project-level" }, ...evidenceWorkItems.map((item) => ({ value: item.id, label: `${item.outline} ${item.title}` }))]}
+                testId="github-evidence-work-item"
+              />
+              <div className="flex items-end">
+                <Button type="button" onClick={() => void importGitHubEvidence()} disabled={syncBusy || !gitHubReady}>Import PR evidence</Button>
+              </div>
+            </div>
           </div>
-        </CardHeader>
-        <CardContent className="grid gap-3 md:grid-cols-2">
-          <SettingsRow label="Provider" value={githubPrivateRepoSyncStatus.provider} />
-          <SettingsRow label="Local source" value={githubPrivateRepoSyncStatus.sourceOfTruth} />
-          <SettingsRow label="Remote repo" value={githubDraft.owner && githubDraft.repo ? `${githubDraft.owner}/${githubDraft.repo}` : "not configured"} />
-          <SettingsRow label="Repo root" value={githubDraft.rootPath || ".omni-plan"} />
-          <SettingsRow label="Secret boundary" value={githubPrivateRepoSyncStatus.secretBoundary} />
-          <SettingsRow label="Secret sync" value={githubPrivateRepoSyncStatus.secretSync} />
-          <SettingsRow label="PAT scope" value={githubPrivateRepoSyncStatus.tokenPermission} />
-          <SettingsRow label="Local ChangeSets" value={String(workspace.changeSets.length)} />
-          <div className="flex flex-wrap gap-2 md:col-span-2">
-            <Button type="button" variant="outline" onClick={() => void testGitHubSync()} disabled={syncBusy}>Test GitHub access</Button>
-            <Button type="button" onClick={() => void pushLocalChangeSets()} disabled={syncBusy || !workspace.changeSets.length}>Push local ChangeSets</Button>
-            <Badge variant="outline">{githubPrivateRepoSyncStatus.conflictPolicy}</Badge>
-          </div>
-        </CardContent>
-      </Card>
-      <Card className="lg:col-span-2">
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2"><KeyRound className="h-4 w-4" /> Secret Unlock</CardTitle>
-          <CardDescription>Apple Passwords can autofill this passphrase; you can also remember it in this browser only.</CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
+        </div>
+      </SettingsOverviewCard>
+
+      <SettingsOverviewCard
+        icon={<KeyRound className="h-4 w-4" />}
+        title="Secrets"
+        status={secretsStatus}
+        statusIcon={secretsStatusIcon}
+        description={`${savedSecretCount} encrypted secret${savedSecretCount === 1 ? "" : "s"} stored in this browser`}
+        badgeVariant={secretsBadgeVariant}
+        primaryActionLabel={secretsPrimaryLabel}
+        primaryActionIcon={secretsPrimaryIcon}
+        onPrimaryAction={() => {
+          if (secretsPrimaryLabel === "Remember") {
+            void rememberPassphrase();
+          } else {
+            openPanel("secrets");
+          }
+        }}
+        expanded={expandedPanels.has("secrets")}
+        onToggle={() => togglePanel("secrets")}
+      >
+        <div className="grid gap-4">
           <div className="grid gap-3 md:grid-cols-2">
             <SettingsRow label="Input source" value={browserSecretVaultStatus.inputSource} />
             <SettingsRow label="Local protection" value={browserSecretVaultStatus.localProtection} />
@@ -4197,187 +4465,88 @@ function Settings({
             </Button>
             <Badge variant="outline">This browser only</Badge>
           </div>
-          <p className="rounded-lg border bg-muted/40 p-3 text-sm text-muted-foreground">
-            Remembered passphrase stays in local IndexedDB. It is not included in workspace export files, GitHub sync objects, Firebase sync snapshots, evidence reports, or PDF/Markdown/CSV exports.
-          </p>
-          <p className="rounded-lg border bg-background p-3 text-sm font-medium">{notice}</p>
-        </CardContent>
-      </Card>
-      <Card className="lg:col-span-2">
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2"><ClipboardCheck className="h-4 w-4" /> Agent Interfaces</CardTitle>
-          <CardDescription>Plaintext operating manual, UIless project state, and Shortcut command inbox.</CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-3">
+        </div>
+      </SettingsOverviewCard>
+
+      <SettingsOverviewCard
+        icon={<Zap className="h-4 w-4" />}
+        title="AI Provider"
+        status={aiProviderStatus}
+        statusIcon={aiProviderStatusIcon}
+        description={aiProviderConfigured ? `${aiDraft.label} / ${aiDraft.model}` : "OpenAI-compatible provider not ready"}
+        badgeVariant={aiProviderBadgeVariant}
+        primaryActionLabel={aiProviderPrimaryLabel}
+        primaryActionIcon={aiProviderPrimaryIcon}
+        onPrimaryAction={() => {
+          if (aiProviderLocked) {
+            openPanel("secrets");
+          } else {
+            openPanel("ai-provider");
+          }
+        }}
+        expanded={expandedPanels.has("ai-provider")}
+        onToggle={() => togglePanel("ai-provider")}
+      >
+        <form className="space-y-4" onSubmit={saveAiProvider}>
           <div className="grid gap-3 md:grid-cols-3">
-            <SettingsRow label="Protocol" value="/agent/manual.txt" />
-            <SettingsRow label="Portfolio state" value="/agent/projects.txt | .json" />
-            <SettingsRow label="Write entry" value="/agent/commands" />
+            <SettingsInput label="Provider label" name="ai-provider-label" value={aiDraft.label} onChange={(value) => updateAiDraft({ label: value })} placeholder="My OpenAI-compatible provider" autoComplete="organization-title" />
+            <SettingsInput label="Base URL" name="ai-provider-base-url" value={aiDraft.baseUrl} onChange={(value) => updateAiDraft({ baseUrl: value })} placeholder="https://api.example.com/v1" autoComplete="url" />
+            <SettingsInput label="Model" name="ai-provider-model" value={aiDraft.model} onChange={(value) => updateAiDraft({ model: value })} placeholder="gpt-4.1-compatible" autoComplete="off" />
+          </div>
+          <div className="grid gap-3 md:grid-cols-[1fr_auto]">
+            <label className="block">
+              <span className="text-sm font-medium">API key</span>
+              <Input
+                className="mt-2"
+                type="password"
+                name="ai-provider-key"
+                autoComplete="current-password"
+                value={aiProviderKey}
+                onChange={(event) => setAiProviderKey(event.target.value)}
+                placeholder="sk-... / provider key"
+                aria-label="AI provider API key"
+              />
+            </label>
+            <div className="rounded-lg border bg-background p-3 text-sm">
+              <div className="font-semibold">API key</div>
+              <div className="text-muted-foreground">{providerSecretSummary(aiSecret)}</div>
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button type="submit">Save AI provider</Button>
+            <IconLinkButton label="Open Agent" href={hashForRoute({ view: "agent", selectedProjectId: workspace.projects[0]?.id ?? defaultProjectId })}><ClipboardCheck /></IconLinkButton>
+            <Badge variant="outline">OpenAI-compatible</Badge>
+          </div>
+        </form>
+      </SettingsOverviewCard>
+
+      <SettingsOverviewCard
+        icon={<Archive className="h-4 w-4" />}
+        title="Workspace"
+        status={workspaceStatus}
+        statusIcon={workspaceStatusIcon}
+        description={workspacePersistence.lastSavedAt ? `Last saved ${workspacePersistence.lastSavedAt.slice(0, 19).replace("T", " ")}` : workspacePersistence.status}
+        badgeVariant={workspaceBadgeVariant}
+        primaryActionLabel="Export backup"
+        primaryActionIcon={<FileDown />}
+        onPrimaryAction={exportWorkspace}
+        expanded={expandedPanels.has("workspace")}
+        onToggle={() => togglePanel("workspace")}
+      >
+        <div className="grid gap-4">
+          <div className="grid gap-3 md:grid-cols-2">
+            <SettingsRow label="Engine" value={browserWorkspaceStorageStatus.engine} />
+            <SettingsRow label="Source of truth" value={browserWorkspaceStorageStatus.sourceOfTruth} />
+            <SettingsRow label="Persistence" value={workspacePersistence.status} />
+            <SettingsRow label="Last saved" value={workspacePersistence.lastSavedAt ? workspacePersistence.lastSavedAt.slice(0, 19).replace("T", " ") : "pending"} />
           </div>
           <div className="flex flex-wrap gap-2">
-            <a className="inline-flex h-9 items-center rounded-md border px-3 text-sm font-medium hover:bg-accent" href="/agent/manual.txt">Open manual</a>
-            <a className="inline-flex h-9 items-center rounded-md border px-3 text-sm font-medium hover:bg-accent" href="/agent/projects.txt">Open UIless projects</a>
-            <a className="inline-flex h-9 items-center rounded-md border px-3 text-sm font-medium hover:bg-accent" href={`/agent/projects/${encodeURIComponent(workspace.projects[0]?.id ?? defaultProjectId)}.txt`}>Open sample project</a>
-            <a className="inline-flex h-9 items-center rounded-md border px-3 text-sm font-medium hover:bg-accent" href="/agent/commands">Open Command Inbox</a>
-          </div>
-          <p className="rounded-lg border bg-muted/40 p-3 text-sm text-muted-foreground">
-            Agent status endpoints are read-only and noindex. Commands support dry-run receipts; guarded writes queue ChangeSets and Audit Gates instead of mutating project state directly.
-          </p>
-        </CardContent>
-      </Card>
-      <Card className="lg:col-span-2">
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2"><GitPullRequest className="h-4 w-4" /> GitHub Evidence Import</CardTitle>
-          <CardDescription>Read pull requests from the configured private repo and attach them as project evidence.</CardDescription>
-        </CardHeader>
-        <CardContent className="grid gap-3 md:grid-cols-[1fr_1fr_auto]">
-          <NativeSelectField
-            label="Project"
-            value={evidenceProject?.id ?? ""}
-            onChange={setEvidenceProjectId}
-            options={workspace.projects.map((project) => ({ value: project.id, label: project.name }))}
-            testId="github-evidence-project"
-          />
-          <NativeSelectField
-            label="Link to work item"
-            value={evidenceWorkItemId}
-            onChange={setEvidenceWorkItemId}
-            options={[{ value: "project", label: "Project-level" }, ...evidenceWorkItems.map((item) => ({ value: item.id, label: `${item.outline} ${item.title}` }))]}
-            testId="github-evidence-work-item"
-          />
-          <div className="flex items-end">
-            <Button type="button" onClick={() => void importGitHubEvidence()} disabled={syncBusy || !gitHubReady}>
-              Import PR evidence
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
-      <Card className="lg:col-span-2">
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2"><Zap className="h-4 w-4" /> AI Contrarian Audit Runtime</CardTitle>
-          <CardDescription>Calls the saved OpenAI-compatible provider with minimal project context and records the returned decision.</CardDescription>
-        </CardHeader>
-        <CardContent className="grid gap-3 md:grid-cols-[1fr_auto]">
-          <NativeSelectField
-            label="Audit project"
-            value={auditProject?.id ?? ""}
-            onChange={setAuditProjectId}
-            options={workspace.projects.map((project) => ({ value: project.id, label: project.name }))}
-            testId="ai-audit-project"
-          />
-          <div className="flex items-end">
-            <Button type="button" onClick={() => void runAiAudit()} disabled={aiBusy || !aiDraft.apiKeySecretId || !aiDraft.baseUrl || !aiDraft.model}>
-              Run AI audit
-            </Button>
-          </div>
-          <div className="rounded-lg border bg-muted/40 p-3 text-sm text-muted-foreground md:col-span-2">
-            Sends project direction, open gates, recent evidence summaries, and first schedule rows only. Full workspace data and secret values are not sent.
-          </div>
-        </CardContent>
-      </Card>
-      <Card className="lg:col-span-2">
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2"><GitPullRequest className="h-4 w-4" /> GitHub Sync Configuration</CardTitle>
-          <CardDescription>Save the private repo target and encrypt the PAT locally.</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <form className="space-y-4" onSubmit={saveGitHubSync}>
-            <div className="grid gap-3 md:grid-cols-3">
-              <SettingsInput label="Owner" name="github-owner" value={githubDraft.owner} onChange={(value) => updateGithubDraft({ owner: value })} placeholder="your-github-org" autoComplete="organization" />
-              <SettingsInput label="Private repo" name="github-repo" value={githubDraft.repo} onChange={(value) => updateGithubDraft({ repo: value })} placeholder="omni-plan-sync" autoComplete="off" />
-              <SettingsInput label="Branch" name="github-branch" value={githubDraft.branch} onChange={(value) => updateGithubDraft({ branch: value })} placeholder="main" autoComplete="off" />
-              <SettingsInput label="Repo root" name="github-root-path" value={githubDraft.rootPath} onChange={(value) => updateGithubDraft({ rootPath: value })} placeholder=".omni-plan" autoComplete="off" />
-              <SettingsInput label="Workspace ID" name="github-workspace-id" value={githubDraft.workspaceId} onChange={(value) => updateGithubDraft({ workspaceId: value })} placeholder="personal" autoComplete="off" />
-              <SettingsInput label="Device ID" name="github-device-id" value={githubDraft.deviceId} onChange={(value) => updateGithubDraft({ deviceId: value })} placeholder="macbook-pro" autoComplete="off" />
-            </div>
-            <div className="grid gap-3 md:grid-cols-[1fr_auto]">
-              <label className="block">
-                <span className="text-sm font-medium">GitHub fine-grained PAT</span>
-                <Input
-                  className="mt-2"
-                  type="password"
-                  name="github-sync-token"
-                  autoComplete="current-password"
-                  value={githubToken}
-                  onChange={(event) => setGithubToken(event.target.value)}
-                  placeholder="github_pat_..."
-                  aria-label="GitHub fine-grained PAT"
-                />
-                <span className="mt-2 block text-xs text-muted-foreground">Apple Passwords may autofill this. It is encrypted locally after save.</span>
-              </label>
-              <div className="rounded-lg border bg-background p-3 text-sm">
-                <div className="font-semibold">PAT</div>
-                <div className="text-muted-foreground">{providerSecretSummary(githubSecret)}</div>
-              </div>
-            </div>
-            <div className="flex flex-wrap items-center gap-2">
-              <Button type="submit">Save GitHub sync</Button>
-              <Badge variant="outline">Contents read/write</Badge>
-              <Badge variant="outline">Private repo only</Badge>
-            </div>
-          </form>
-        </CardContent>
-      </Card>
-      <Card className="lg:col-span-2">
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2"><Zap className="h-4 w-4" /> AI Provider</CardTitle>
-          <CardDescription>Custom OpenAI-compatible endpoint for audit operators.</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <form className="space-y-4" onSubmit={saveAiProvider}>
-            <div className="grid gap-3 md:grid-cols-3">
-              <SettingsInput label="Provider label" name="ai-provider-label" value={aiDraft.label} onChange={(value) => updateAiDraft({ label: value })} placeholder="My OpenAI-compatible provider" autoComplete="organization-title" />
-              <SettingsInput label="Base URL" name="ai-provider-base-url" value={aiDraft.baseUrl} onChange={(value) => updateAiDraft({ baseUrl: value })} placeholder="https://api.example.com/v1" autoComplete="url" />
-              <SettingsInput label="Model" name="ai-provider-model" value={aiDraft.model} onChange={(value) => updateAiDraft({ model: value })} placeholder="gpt-4.1-compatible" autoComplete="off" />
-            </div>
-            <div className="grid gap-3 md:grid-cols-[1fr_auto]">
-              <label className="block">
-                <span className="text-sm font-medium">API key</span>
-                <Input
-                  className="mt-2"
-                  type="password"
-                  name="ai-provider-key"
-                  autoComplete="current-password"
-                  value={aiProviderKey}
-                  onChange={(event) => setAiProviderKey(event.target.value)}
-                  placeholder="sk-... / provider key"
-                  aria-label="AI provider API key"
-                />
-                <span className="mt-2 block text-xs text-muted-foreground">Apple Passwords may autofill this. It is encrypted locally after save.</span>
-              </label>
-              <div className="rounded-lg border bg-background p-3 text-sm">
-                <div className="font-semibold">API key</div>
-                <div className="text-muted-foreground">{providerSecretSummary(aiSecret)}</div>
-              </div>
-            </div>
-            <div className="flex flex-wrap items-center gap-2">
-              <Button type="submit">Save AI provider</Button>
-              <Badge variant="outline">OpenAI-compatible</Badge>
-              <Badge variant="outline">Base URL required</Badge>
-            </div>
-          </form>
-        </CardContent>
-      </Card>
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2"><Archive className="h-4 w-4" /> Storage</CardTitle>
-          <CardDescription>Real browser-local workspace persistence with file backup controls.</CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <SettingsRow label="Engine" value={browserWorkspaceStorageStatus.engine} />
-          <SettingsRow label="Source of truth" value={browserWorkspaceStorageStatus.sourceOfTruth} />
-          <SettingsRow label="Persistence" value={workspacePersistence.status} />
-          <SettingsRow label="Last saved" value={workspacePersistence.lastSavedAt ? workspacePersistence.lastSavedAt.slice(0, 19).replace("T", " ") : "pending"} />
-          <div className="flex flex-wrap gap-2">
-            <Button type="button" variant="outline" onClick={exportWorkspace}>
-              <FileDown size={15} />
-              Export backup
-            </Button>
-            <Button type="button" variant="outline" onClick={() => workspaceImportRef.current?.click()}>
-              <Archive size={15} />
-              Import backup
-            </Button>
-            <Button type="button" variant="destructive" onClick={resetWorkspace}>Reset local workspace</Button>
+            <IconActionButton label="Import backup" type="button" variant="outline" onClick={() => workspaceImportRef.current?.click()}>
+              <Upload />
+            </IconActionButton>
+            <IconActionButton label="Reset local workspace" type="button" variant="destructive" onClick={resetWorkspace}>
+              <AlertTriangle />
+            </IconActionButton>
             <input
               ref={workspaceImportRef}
               className="srOnly"
@@ -4388,9 +4557,131 @@ function Settings({
             />
           </div>
           <p className="rounded-lg border bg-muted/40 p-3 text-sm text-muted-foreground">{browserWorkspaceStorageStatus.backupPolicy}</p>
-        </CardContent>
-      </Card>
+        </div>
+      </SettingsOverviewCard>
     </section>
+  );
+}
+
+function SettingsOverviewCard({
+  icon,
+  title,
+  status,
+  statusIcon,
+  description,
+  badgeVariant,
+  primaryActionLabel,
+  primaryActionIcon,
+  primaryDisabled,
+  onPrimaryAction,
+  expanded,
+  onToggle,
+  children
+}: {
+  icon: ReactNode;
+  title: string;
+  status: string;
+  statusIcon: ReactNode;
+  description: string;
+  badgeVariant: "default" | "secondary" | "destructive" | "outline" | "warning" | "success";
+  primaryActionLabel: string;
+  primaryActionIcon: ReactNode;
+  primaryDisabled?: boolean;
+  onPrimaryAction: () => void;
+  expanded: boolean;
+  onToggle: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <Card className="min-w-0">
+      <CardHeader className="pb-3">
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0 flex-1">
+            <CardTitle className="flex items-center gap-2">{icon}{title}</CardTitle>
+            <CardDescription className="mt-1 line-clamp-2">{description}</CardDescription>
+          </div>
+          <div className="flex shrink-0 items-center gap-1.5">
+            <IconStatusBadge variant={badgeVariant} status={status} icon={statusIcon} />
+            <IconActionButton label={primaryActionLabel} type="button" onClick={onPrimaryAction} disabled={primaryDisabled}>
+              {primaryActionIcon}
+            </IconActionButton>
+            <IconActionButton
+              label={expanded ? "Hide configure" : "Configure"}
+              type="button"
+              variant="outline"
+              onClick={onToggle}
+              aria-expanded={expanded}
+            >
+              {expanded ? <ChevronUp /> : <ChevronDown />}
+            </IconActionButton>
+          </div>
+        </div>
+      </CardHeader>
+      {expanded && (
+        <CardContent className="border-t pt-4">
+          {children}
+        </CardContent>
+      )}
+    </Card>
+  );
+}
+
+function IconStatusBadge({
+  variant,
+  status,
+  icon,
+  className
+}: {
+  variant: "default" | "secondary" | "destructive" | "outline" | "warning" | "success";
+  status: string;
+  icon: ReactNode;
+  className?: string;
+}) {
+  return (
+    <Badge
+      variant={variant}
+      role="status"
+      aria-label={status}
+      title={status}
+      className={cn("h-8 w-8 justify-center rounded-md p-0 [&_svg]:h-4 [&_svg]:w-4", className)}
+    >
+      {icon}
+    </Badge>
+  );
+}
+
+function IconActionButton({
+  label,
+  children,
+  className,
+  ...props
+}: React.ComponentProps<typeof Button> & {
+  label: string;
+}) {
+  return (
+    <Button {...props} size="icon" aria-label={label} title={label} className={cn("shrink-0", className)}>
+      {children}
+    </Button>
+  );
+}
+
+function IconLinkButton({
+  label,
+  href,
+  children,
+  variant = "outline"
+}: {
+  label: string;
+  href: string;
+  children: ReactNode;
+  variant?: React.ComponentProps<typeof Button>["variant"];
+}) {
+  return (
+    <Button asChild variant={variant} size="icon" title={label}>
+      <a href={href} aria-label={label}>
+        {children}
+      </a>
+    </Button>
   );
 }
 
@@ -4516,6 +4807,7 @@ function NativeSelectField<T extends string>({
       <span className="text-sm font-medium">{label}</span>
       <select
         className="mt-2 flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+        name={testId ?? label.toLowerCase().replace(/\s+/g, "-")}
         value={value}
         onChange={(event) => onChange(event.target.value as T)}
         aria-label={label}
