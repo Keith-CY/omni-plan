@@ -2441,6 +2441,7 @@ function ProjectWorkspace({
             items={schedule.items.map((item) => item.workItem)}
             gates={gates}
             evidence={evidence}
+            baseline={baseline}
             baselineApproved={baselineApproved}
             onFinishWork={() => onProjectWorkFinish(project.id)}
             onComplete={() => onProjectComplete(project.id)}
@@ -2749,6 +2750,7 @@ function ProjectCompletionPanel({
   items,
   gates,
   evidence,
+  baseline,
   baselineApproved,
   onFinishWork,
   onComplete,
@@ -2758,6 +2760,7 @@ function ProjectCompletionPanel({
   items: WorkItem[];
   gates: AuditGate[];
   evidence: Evidence[];
+  baseline?: Baseline;
   baselineApproved: boolean;
   onFinishWork: () => void;
   onComplete: () => void;
@@ -2770,12 +2773,18 @@ function ProjectCompletionPanel({
     (item.evidenceRequired || item.isKeyTask) &&
     !evidence.some((candidate) => candidate.workItemId === item.id)
   ));
+  const baselineLabel = !baseline ? "Missing" : baselineApproved ? "Approved" : "Pending";
+  const baselineDetail = !baseline
+    ? "Capture a baseline from the Baselines tab first."
+    : baselineApproved
+      ? "Baseline can be used for final reporting."
+      : "Approve the baseline ChangeSet from Audit > Change Sets.";
   const readyToComplete = incompleteItems.length === 0 && openHardGates.length === 0 && keyItemsMissingEvidence.length === 0 && baselineApproved;
   const completionBlockers = [
     incompleteItems.length ? `${incompleteItems.length} open work item${incompleteItems.length === 1 ? "" : "s"} still below 100%. First: ${incompleteItems[0]?.title}.` : undefined,
     keyItemsMissingEvidence.length ? `${keyItemsMissingEvidence.length} key/evidence-required item${keyItemsMissingEvidence.length === 1 ? "" : "s"} need linked evidence. First: ${keyItemsMissingEvidence[0]?.title}.` : undefined,
     openHardGates.length ? `${openHardGates.length} hard gate${openHardGates.length === 1 ? "" : "s"} still need review. First: ${openHardGates[0]?.reason}` : undefined,
-    baselineApproved ? undefined : "Baseline is still pending approval."
+    baselineApproved ? undefined : baseline ? "Baseline is captured but still pending approval. Open Audit > Change Sets and approve the baseline ChangeSet." : "No baseline has been captured. Open Baselines and click Capture baseline."
   ].filter(Boolean);
   const setDoneDisabled = !readyToComplete || project.status === "done" || project.status === "archived";
   const doneDisabledReason = project.status === "done"
@@ -2802,7 +2811,7 @@ function ProjectCompletionPanel({
           <SummaryTile label="Open work" value={String(incompleteItems.length)} detail={incompleteItems[0]?.title ?? "All non-phase work is complete."} tone={incompleteItems.length ? "warning" : "default"} />
           <SummaryTile label="Missing evidence" value={String(keyItemsMissingEvidence.length)} detail={keyItemsMissingEvidence[0]?.title ?? "Key and evidence-required work is linked."} tone={keyItemsMissingEvidence.length ? "danger" : "default"} />
           <SummaryTile label="Hard gates" value={String(openHardGates.length)} detail={openHardGates[0]?.reason ?? "No hard gate is open."} tone={openHardGates.length ? "danger" : "default"} />
-          <SummaryTile label="Baseline" value={baselineApproved ? "Approved" : "Pending"} detail={baselineApproved ? "Baseline can be used for final reporting." : "Capture and approve a baseline first."} tone={baselineApproved ? "default" : "warning"} />
+          <SummaryTile label="Baseline" value={baselineLabel} detail={baselineDetail} tone={baselineApproved ? "default" : "warning"} />
         </div>
         {completionBlockers.length > 0 && (
           <div className="rounded-lg border bg-muted/25 p-3 text-sm">
@@ -4978,7 +4987,7 @@ function EvidenceList({ evidence }: { evidence: Evidence[] }) {
 
 function BaselineTable({ baseline, items }: { baseline?: Baseline; items: ScheduledItem[] }) {
   if (!baseline) {
-    return <div className="rounded-lg border border-dashed p-6 text-sm text-muted-foreground">No approved baseline for this project.</div>;
+    return <div className="rounded-lg border border-dashed p-6 text-sm text-muted-foreground">No baseline captured for this project. Capture one from the current schedule, then approve the generated ChangeSet in Audit.</div>;
   }
   return (
     <Table>
