@@ -826,6 +826,11 @@ function RoutedApp() {
   }, [view, selectedProjectId]);
 
   useEffect(() => {
+    if (!workspace.projects.length || route.selectedProjectId === selectedProjectId) return;
+    routerNavigate(pathForRoute({ view, selectedProjectId, target: route.target }), { replace: true });
+  }, [route.selectedProjectId, route.target, routerNavigate, selectedProjectId, view, workspace.projects.length]);
+
+  useEffect(() => {
     if (!route.target) return;
     const frame = window.requestAnimationFrame(() => {
       const target = document.getElementById(route.target!);
