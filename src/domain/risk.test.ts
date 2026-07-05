@@ -51,14 +51,14 @@ describe("risk, EVM, and audit", () => {
     expect(Date.parse(result.p90Finish)).toBeGreaterThan(Date.parse("2026-07-01T08:00:00.000Z"));
   });
 
-  it("opens hard gates for missing evidence and queued baseline changes", () => {
+  it("opens hard gates for missing evidence without blocking on optional baseline changes", () => {
     const project = projects.find((item) => item.id === "p-omni")!;
     const schedule = scheduleProject(project, workItems, dependencies);
     const gates = evaluateAuditGates(project, workItems, schedule.items, evidence, changeSets, now);
     const decision = recommendAuditDecision(project, gates, evidence, now);
 
     expect(gates.some((gate) => gate.targetType === "milestone" && gate.severity === "hard")).toBe(true);
-    expect(gates.some((gate) => gate.targetType === "baseline" && gate.status === "queued")).toBe(true);
+    expect(gates.some((gate) => gate.targetType === "baseline")).toBe(false);
     expect(gates.find((gate) => gate.id === decision.sourceGateIds[0])?.severity).toBe("hard");
     expect(["Accelerate", "Continue", "Narrow", "Pivot", "Stop"]).toContain(decision.action);
   });

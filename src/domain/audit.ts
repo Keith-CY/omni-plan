@@ -35,6 +35,7 @@ export function evaluateAuditGates(
 ): AuditGate[] {
   const gates: AuditGate[] = [];
   const shapeUpPitch = project.shapeUpPitch;
+  void changeSets; // ChangeSets stay visible in Audit; baseline review is optional and no longer blocks project completion.
 
   if (shapeUpPitch) {
     const missing = shapeUpMissingBetRequirements(project);
@@ -142,22 +143,6 @@ export function evaluateAuditGates(
         reason: `${item.title} moved quickly but lacks value evidence.`,
         requiredAction: "Record what was learned, not only what was shipped.",
         status: "open"
-      });
-    }
-  }
-
-  for (const changeSet of changeSets.filter((candidate) => candidate.projectId === project.id)) {
-    const touchesBaseline = changeSet.diffs.some((diff) => diff.entity === "Baseline");
-    if (touchesBaseline && changeSet.status !== "approved") {
-      gates.push({
-        id: `gate-baseline-${changeSet.id}`,
-        projectId: project.id,
-        targetType: "baseline",
-        targetId: changeSet.id,
-        severity: "hard",
-        reason: "Baseline change is not approved.",
-        requiredAction: "Attach a Decision Log entry and approve the Change Set after review.",
-        status: changeSet.status === "queued-audit" ? "queued" : "open"
       });
     }
   }
