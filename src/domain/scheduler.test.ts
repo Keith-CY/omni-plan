@@ -8,6 +8,20 @@ import {
 } from "./scheduler";
 
 describe("scheduler", () => {
+  it("returns an empty schedule for projects without work items", () => {
+    const project = {
+      ...projects[0],
+      id: "p-empty",
+      name: "Empty Project"
+    };
+    const result = scheduleProject(project, workItems, dependencies);
+
+    expect(result.projectId).toBe("p-empty");
+    expect(result.items).toHaveLength(0);
+    expect(result.diagnostics).toHaveLength(0);
+    expect(result.unsupported).toHaveLength(0);
+  });
+
   it("schedules dependency order and hammock windows", () => {
     const project = projects.find((item) => item.id === "p-omni")!;
     const result = scheduleProject(project, workItems, dependencies);

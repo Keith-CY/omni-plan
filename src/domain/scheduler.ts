@@ -135,6 +135,16 @@ export function scheduleProject(project: Project, allItems: WorkItem[], allDepen
   const byId = itemMap(items);
   const diagnostics: ScheduleResult["diagnostics"] = [];
   const unsupported: string[] = [];
+
+  if (!items.length) {
+    return {
+      projectId: project.id,
+      items: [],
+      diagnostics,
+      unsupported
+    };
+  }
+
   const sorted = topologicalSort(items, dependencies);
 
   if (sorted.cycle) {
