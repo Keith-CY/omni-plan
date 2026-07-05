@@ -610,7 +610,9 @@ function RoutedApp() {
       const manifest = await client.readManifest(session);
       const localChecksum = await workspacePlaintextChecksum(workspaceRef.current);
       const latestSettings = appSettingsRef.current.firebaseSync;
-      const localDirty = Boolean(latestSettings.lastSyncedChecksum && localChecksum !== latestSettings.lastSyncedChecksum);
+      const localDirty = latestSettings.lastSyncedChecksum
+        ? localChecksum !== latestSettings.lastSyncedChecksum
+        : intent === "push";
       const remoteRevision = manifest?.latestRevision;
       const remoteAdvanced = Boolean(remoteRevision && remoteRevision !== latestSettings.lastSyncedRevision);
 
@@ -675,6 +677,30 @@ function RoutedApp() {
       autoSyncBusyRef.current = false;
     }
   }, [updateFirebaseSyncSettings]);
+
+  const saveWorkspaceImmediately = useCallback((nextWorkspace: WorkspaceSnapshot) => {
+    workspaceRef.current = nextWorkspace;
+    const savedAt = new Date().toISOString();
+    void workspaceRepository.save(nextWorkspace).then(() => {
+      setWorkspacePersistence((current) => ({ ...current, status: "Saved to browser local workspace", lastSavedAt: savedAt }));
+    }).catch((error: unknown) => {
+      setWorkspacePersistence((current) => ({ ...current, status: `Workspace save failed: ${error instanceof Error ? error.message : "unknown error"}` }));
+    });
+  }, [workspaceRepository]);
+
+  const pushWorkspaceSoon = useCallback((reason: string) => {
+    const settings = appSettingsRef.current.firebaseSync;
+    if (!settings.autoSyncEnabled || !firebaseSettingsReady(settings) || !sessionPassphraseRef.current.trim()) return;
+    if (autoPushTimerRef.current) window.clearTimeout(autoPushTimerRef.current);
+    setAutoSyncStatus((current) => ({
+      ...current,
+      state: current.state === "conflict" || current.state === "error" ? current.state : "pending",
+      message: current.state === "conflict" || current.state === "error" ? current.message : reason
+    }));
+    autoPushTimerRef.current = window.setTimeout(() => {
+      void runFirebaseAutoSync("push");
+    }, 250);
+  }, [runFirebaseAutoSync]);
 
   useEffect(() => {
     let active = true;
@@ -1074,24 +1100,27 @@ function RoutedApp() {
   };
 
   const updateProjectStatus = (projectId: string, status: ProjectStatus) => {
-    setWorkspace((previous) => {
-      const project = previous.projects.find((candidate) => candidate.id === projectId);
-      if (!project || project.status === status) return previous;
-      return {
-        ...previous,
-        projects: previous.projects.map((candidate) => candidate.id === projectId ? { ...candidate, status } : candidate),
-        changeSets: [
-          createChangeSet(
-            projectId,
-            `Set ${project.name} status ${status}`,
-            "Updated project lifecycle state.",
-            [{ entity: "Project", entityId: projectId, field: "status", before: project.status, after: status }],
-            previous.changeSets.length
-          ),
-          ...previous.changeSets
-        ]
-      };
-    });
+    const previous = workspaceRef.current;
+    const project = previous.projects.find((candidate) => candidate.id === projectId);
+    if (!project || project.status === status) return;
+    const nextWorkspace = {
+      ...previous,
+      projects: previous.projects.map((candidate) => candidate.id === projectId ? { ...candidate, status } : candidate),
+      changeSets: [
+        createChangeSet(
+          projectId,
+          `Set ${project.name} status ${status}`,
+          "Updated project lifecycle state.",
+          [{ entity: "Project", entityId: projectId, field: "status", before: project.status, after: status }],
+          previous.changeSets.length
+        ),
+        ...previous.changeSets
+      ]
+    };
+    workspaceRef.current = nextWorkspace;
+    setWorkspace(nextWorkspace);
+    saveWorkspaceImmediately(nextWorkspace);
+    pushWorkspaceSoon(`Project status changed to ${status}; syncing workspace now.`);
   };
 
   const createWorkItem = (projectId: string, values: WorkItemCreateValues) => {
