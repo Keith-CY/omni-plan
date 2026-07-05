@@ -4006,6 +4006,7 @@ function Settings({
       setNotice("Set Firebase Project ID, Web API key, and Workspace ID before testing.");
       return;
     }
+    setNotice("Testing Firebase connection...");
     setSyncBusy(true);
     try {
       const client = new FirebaseE2eeSyncClient(firebaseConfig());
@@ -4030,6 +4031,7 @@ function Settings({
       setNotice("Enter the workspace passphrase before encrypting the Firebase workspace snapshot.");
       return;
     }
+    setNotice("Pushing encrypted workspace to Firebase...");
     setSyncBusy(true);
     try {
       const client = new FirebaseE2eeSyncClient(firebaseConfig());
@@ -4067,6 +4069,7 @@ function Settings({
       setNotice("Enter the workspace passphrase before decrypting the Firebase workspace snapshot.");
       return;
     }
+    setNotice("Pulling latest encrypted workspace from Firebase...");
     setSyncBusy(true);
     try {
       const client = new FirebaseE2eeSyncClient(firebaseConfig());
@@ -4262,11 +4265,16 @@ function Settings({
   const workspaceBadgeVariant = workspaceStatus === "Storage issue" ? "destructive" : workspaceStatus === "Saved locally" ? "success" : "warning";
   const workspaceStatusIcon = workspaceStatus === "Saved locally" ? <CheckCircle2 /> : workspaceStatus === "Loading" ? <RefreshCw className="animate-spin" /> : <AlertTriangle />;
 
+  const hasSettingsNotice = notice !== idleSettingsNotice;
+  const settingsNoticeTone = noticeTone(notice);
+
   return (
-    <section className="grid gap-4 lg:grid-cols-2">
-      {notice !== idleSettingsNotice && (
-        <div className="rounded-lg border bg-background p-3 text-sm font-medium lg:col-span-2">{notice}</div>
-      )}
+    <>
+      {hasSettingsNotice && <SettingsToast message={notice} tone={settingsNoticeTone} />}
+      <section className="grid gap-4 lg:grid-cols-2">
+        {hasSettingsNotice && (
+          <div className={cn("rounded-lg border p-3 text-sm font-medium lg:col-span-2", noticeBannerClassName(settingsNoticeTone))}>{notice}</div>
+        )}
 
       <SettingsOverviewCard
         icon={<Lock className="h-4 w-4" />}
@@ -4330,7 +4338,7 @@ function Settings({
                   Auto sync
                 </label>
                 <Button type="submit">Save Firebase sync</Button>
-                <Badge variant="outline">Passphrase decrypts locally</Badge>
+                <Badge variant="outline">Passphrase stays local</Badge>
               </div>
             </form>
           </div>
@@ -4413,7 +4421,7 @@ function Settings({
         title="Secrets"
         status={secretsStatus}
         statusIcon={secretsStatusIcon}
-        description={`${savedSecretCount} encrypted secret${savedSecretCount === 1 ? "" : "s"} stored in this browser`}
+        description={sessionPassphrase.trim() ? "Workspace passphrase entered for this browser session" : "Enter the workspace passphrase here before syncing"}
         badgeVariant={secretsBadgeVariant}
         primaryActionLabel={secretsPrimaryLabel}
         primaryActionIcon={secretsPrimaryIcon}
@@ -4445,7 +4453,7 @@ function Settings({
                 autoComplete="current-password"
                 value={sessionPassphrase}
                 onChange={(event) => onSessionPassphraseChange(event.target.value)}
-                placeholder="Autofill or enter passphrase"
+                placeholder="Set or enter workspace passphrase"
                 aria-label="Workspace passphrase"
               />
             </label>
@@ -4559,7 +4567,60 @@ function Settings({
           <p className="rounded-lg border bg-muted/40 p-3 text-sm text-muted-foreground">{browserWorkspaceStorageStatus.backupPolicy}</p>
         </div>
       </SettingsOverviewCard>
-    </section>
+      </section>
+    </>
+  );
+}
+
+type NoticeTone = "success" | "warning" | "danger" | "loading" | "neutral";
+
+function noticeTone(message: string): NoticeTone {
+  const normalized = message.toLowerCase();
+  if (normalized.includes("failed") || normalized.includes("error") || normalized.includes("newer") || normalized.includes("conflict")) return "danger";
+  if (normalized.includes("testing") || normalized.includes("pushing") || normalized.includes("pulling") || normalized.includes("importing")) return "loading";
+  if (normalized.startsWith("enter ") || normalized.startsWith("set ") || normalized.startsWith("save ") || normalized.includes("before ")) return "warning";
+  if (normalized.includes("connected") || normalized.includes("saved") || normalized.includes("pushed") || normalized.includes("pulled") || normalized.includes("remembered")) return "success";
+  return "neutral";
+}
+
+function noticeBannerClassName(tone: NoticeTone) {
+  switch (tone) {
+    case "success":
+      return "border-emerald-200 bg-emerald-50 text-emerald-950";
+    case "warning":
+      return "border-amber-200 bg-amber-50 text-amber-950";
+    case "danger":
+      return "border-destructive/30 bg-destructive/10 text-destructive";
+    case "loading":
+      return "border-primary/20 bg-primary/10 text-foreground";
+    case "neutral":
+      return "bg-background";
+  }
+}
+
+function SettingsToast({ message, tone }: { message: string; tone: NoticeTone }) {
+  const icon = tone === "success"
+    ? <CheckCircle2 />
+    : tone === "danger"
+      ? <AlertTriangle />
+      : tone === "loading"
+        ? <RefreshCw className="animate-spin" />
+        : tone === "warning"
+          ? <AlertTriangle />
+          : <SettingsIcon />;
+
+  return (
+    <div
+      className={cn(
+        "pointer-events-none fixed inset-x-4 bottom-20 z-50 flex items-start gap-3 rounded-lg border bg-background p-3 text-sm font-medium shadow-lg lg:inset-x-auto lg:bottom-6 lg:right-6 lg:w-[min(420px,calc(100vw-3rem))]",
+        noticeBannerClassName(tone)
+      )}
+      role={tone === "danger" ? "alert" : "status"}
+      aria-live={tone === "danger" ? "assertive" : "polite"}
+    >
+      <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center [&_svg]:h-4 [&_svg]:w-4">{icon}</span>
+      <span className="min-w-0">{message}</span>
+    </div>
   );
 }
 

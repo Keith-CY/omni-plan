@@ -291,4 +291,53 @@ describe("workspace, GitHub, and secrets", () => {
     expect(commitBody).not.toContain(sampleWorkspace.projects[0].name);
     expect(commitBody).toContain("envelopeJson");
   });
+
+  it("keeps default sync fetch calls bound for Safari", async () => {
+    const originalFetch = globalThis.fetch;
+    const calls: string[] = [];
+    globalThis.fetch = (function (this: unknown, input: RequestInfo | URL) {
+      if (this !== globalThis) throw new Error("Can only call Window.fetch on instances of Window");
+      const url = String(input);
+      calls.push(url);
+      if (url.startsWith("https://identitytoolkit.googleapis.com")) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({ idToken: "firebase-id-token", localId: "anonymous-user" })
+        } as Response);
+      }
+      if (url.startsWith("https://api.github.com")) {
+        return Promise.resolve({ ok: false, status: 404, json: async () => ({}) } as Response);
+      }
+      return Promise.resolve({ ok: false, status: 500, json: async () => ({}) } as Response);
+    }) as typeof fetch;
+
+    try {
+      const firebaseClient = new FirebaseE2eeSyncClient({
+        projectId: "firebase-project",
+        apiKey: "firebase-web-api-key",
+        databaseId: "(default)",
+        collectionPath: "omniPlanSync",
+        workspaceId: "personal",
+        deviceId: "safari"
+      });
+      const githubClient = new GitHubPrivateRepoSyncClient({
+        owner: "acme",
+        repo: "repo",
+        branch: "main",
+        rootPath: ".omni-plan",
+        workspaceId: "personal",
+        deviceId: "safari"
+      }, "github-token");
+
+      const session = await firebaseClient.signInAnonymously();
+      const missingFile = await githubClient.readText(".omni-plan/workspaces/personal/manifest.json");
+
+      expect(session.idToken).toBe("firebase-id-token");
+      expect(missingFile).toBeUndefined();
+      expect(calls.some((url) => url.startsWith("https://identitytoolkit.googleapis.com"))).toBe(true);
+      expect(calls.some((url) => url.startsWith("https://api.github.com"))).toBe(true);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
 });

@@ -321,11 +321,13 @@ export function githubSyncCommitMessage(envelope: SyncChangeEnvelope): string {
   return `OmniPlan sync ${envelope.workspaceId} ${envelope.revision.slice(0, 12)}`;
 }
 
+const defaultFetch = ((input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => globalThis.fetch(input, init)) as typeof fetch;
+
 export class GitHubPrivateRepoSyncClient {
   constructor(
     private readonly config: GitHubSyncConfig,
     private readonly token: string,
-    private readonly fetcher: typeof fetch = fetch
+    private readonly fetcher: typeof fetch = defaultFetch
   ) {}
 
   async readText(path: string): Promise<GitHubRepoTextFile | undefined> {
@@ -412,7 +414,7 @@ export interface FirebaseWorkspacePullResult {
 export class FirebaseE2eeSyncClient {
   constructor(
     private readonly config: FirebaseE2eeSyncConfig,
-    private readonly fetcher: typeof fetch = fetch
+    private readonly fetcher: typeof fetch = defaultFetch
   ) {}
 
   async signInAnonymously(): Promise<FirebaseAnonymousSession> {
