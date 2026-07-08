@@ -9,9 +9,9 @@ import {
   previewAgentCommandInput,
   type AgentCommandReceipt
 } from "./domain/agent";
-import { sampleWorkspace } from "./domain/sampleData";
 import { BrowserWorkspaceRepository } from "./domain/storage";
 import type { WorkspaceSnapshot } from "./domain/types";
+import { createEmptyWorkspace } from "./domain/workspace";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -40,17 +40,17 @@ export function AgentApp() {
 
 function AgentDocumentPage({ route }: { route: AgentRoute }) {
   const repository = useMemo(() => new BrowserWorkspaceRepository(), []);
-  const [workspace, setWorkspace] = useState<WorkspaceSnapshot>(sampleWorkspace);
+  const [workspace, setWorkspace] = useState<WorkspaceSnapshot>(() => createEmptyWorkspace());
   const generatedAt = useMemo(() => new Date().toISOString(), []);
 
   useEffect(() => {
     let active = true;
     void repository.load().then((stored) => {
       if (!active) return;
-      setWorkspace(stored ?? sampleWorkspace);
+      setWorkspace(stored ?? createEmptyWorkspace());
     }).catch(() => {
       if (!active) return;
-      setWorkspace(sampleWorkspace);
+      setWorkspace(createEmptyWorkspace());
     });
     return () => {
       active = false;
@@ -89,7 +89,7 @@ function AgentDocumentPage({ route }: { route: AgentRoute }) {
 
 function AgentCommandsPage() {
   const repository = useMemo(() => new BrowserWorkspaceRepository(), []);
-  const [workspace, setWorkspace] = useState<WorkspaceSnapshot>(sampleWorkspace);
+  const [workspace, setWorkspace] = useState<WorkspaceSnapshot>(() => createEmptyWorkspace());
   const [loaded, setLoaded] = useState(false);
   const [commandInput, setCommandInput] = useState(() => initialCommandInput());
   const [receipt, setReceipt] = useState<AgentCommandReceipt | undefined>(() => lastReceipt());
@@ -102,7 +102,7 @@ function AgentCommandsPage() {
     let active = true;
     void repository.load().then((stored) => {
       if (!active) return;
-      setWorkspace(stored ?? sampleWorkspace);
+      setWorkspace(stored ?? createEmptyWorkspace());
       setLoaded(true);
     }).catch((error: unknown) => {
       if (!active) return;
@@ -138,7 +138,7 @@ function AgentCommandsPage() {
 
   const sampleJson = JSON.stringify({
     command_type: "create_task",
-    project_id: workspace.projects[0]?.id ?? "p-omni",
+    project_id: workspace.projects[0]?.id ?? "workspace",
     title: "Review Shortcut import",
     effort_hours: 1,
     duration_days: 1,

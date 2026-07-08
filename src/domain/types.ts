@@ -98,9 +98,15 @@ export interface SplitSegment {
 }
 
 export interface RepeatRule {
-  everyDays: number;
+  cadence?: RepeatCadenceKind;
+  everyDays?: number;
   count: number;
+  startMode?: RepeatStartMode;
+  startAt?: ISODate;
 }
+
+export type RepeatCadenceKind = "every-n-days" | "weekly" | "monthly";
+export type RepeatStartMode = "fixed-time" | "after-previous-finish";
 
 export interface WorkItem {
   id: Id;

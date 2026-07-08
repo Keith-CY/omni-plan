@@ -33,6 +33,25 @@ export function normalizeWorkspaceSnapshot(snapshot: WorkspaceSnapshot): Workspa
   };
 }
 
+export function canDeleteEmptyProject(snapshot: WorkspaceSnapshot, projectId: string): boolean {
+  return snapshot.projects.some((project) => project.id === projectId) && !snapshot.workItems.some((item) => item.projectId === projectId);
+}
+
+export function removeEmptyProjectFromWorkspace(snapshot: WorkspaceSnapshot, projectId: string): WorkspaceSnapshot | undefined {
+  if (!canDeleteEmptyProject(snapshot, projectId)) return undefined;
+
+  return {
+    ...snapshot,
+    projects: snapshot.projects.filter((project) => project.id !== projectId),
+    dependencies: snapshot.dependencies.filter((dependency) => dependency.projectId !== projectId),
+    baselines: snapshot.baselines.filter((baseline) => baseline.projectId !== projectId),
+    evidence: snapshot.evidence.filter((item) => item.projectId !== projectId),
+    decisions: snapshot.decisions.filter((decision) => decision.projectId !== projectId),
+    auditGates: snapshot.auditGates.filter((gate) => gate.projectId !== projectId),
+    auditDecisions: snapshot.auditDecisions.filter((decision) => decision.projectId !== projectId)
+  };
+}
+
 export function withProjectLifecycleStatus(project: Project, status: ProjectStatus): Project {
   const normalized = normalizeProjectLifecycle(project);
   if (status === "archived") {

@@ -3,6 +3,8 @@ import {
   Archive,
   BarChart3,
   CalendarClock,
+  ChevronLeft,
+  ChevronRight,
   ChevronDown,
   ChevronUp,
   CheckCircle2,
@@ -21,11 +23,11 @@ import {
   Play,
   Plus,
   RefreshCw,
-  Search,
   Settings as SettingsIcon,
   ShieldAlert,
   Target,
   Timer,
+  Trash2,
   Save,
   Upload,
   Workflow,
@@ -39,10 +41,12 @@ import { exportProjectMarkdown, exportScheduleCsv } from "./domain/exports";
 import { fetchPullRequestEvidence, githubPrToEvidence } from "./domain/github";
 import { runMonteCarlo } from "./domain/monteCarlo";
 import { calculateProjectHealth } from "./domain/portfolio";
+import { generateRecurringOccurrences, repeatCadenceLabel, repeatStartModeLabel } from "./domain/recurring";
 import {
   isProjectArchived,
   projectLifecycleLabel,
   projectLifecycleStatus,
+  removeEmptyProjectFromWorkspace,
   selectableProjectStatuses,
   withProjectArchived,
   withProjectLifecycleStatus
@@ -51,7 +55,6 @@ import {
   detectCrossProjectOverload,
   generateLevelingProposals
 } from "./domain/scheduler";
-import { sampleWorkspace } from "./domain/sampleData";
 import { BrowserEncryptedSecretVault, BrowserRememberedPassphraseVault, browserSecretVaultStatus, encryptProviderSecret } from "./domain/secrets";
 import {
   buildShapeUpBet,
@@ -111,6 +114,9 @@ import type {
   Project,
   ProjectMode,
   ProjectStatus,
+  RepeatCadenceKind,
+  RepeatRule,
+  RepeatStartMode,
   ScheduleResult,
   ScheduledItem,
   ShapeUpAppetiteKind,
@@ -120,6 +126,7 @@ import type {
   WorkItemKind,
   WorkspaceSnapshot
 } from "./domain/types";
+import { createEmptyWorkspace } from "./domain/workspace";
 import { addSeconds, secondsBetween, startOfDay } from "./domain/time";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -131,13 +138,15 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
 
-type View = "portfolio" | "project" | "today" | "audit" | "reports" | "agent" | "settings";
+type View = "portfolio" | "project" | "calendar" | "today" | "audit" | "reports" | "agent" | "settings";
 type ScheduleTiming = "Overdue" | "Due now" | "Upcoming";
+type MatrixDecision = "narrow" | "audit" | "watch" | "push";
+type CalendarEventKind = "scheduled" | "recurring";
 
 const now = new Date().toISOString();
 const asOfLabel = `As of ${now.slice(0, 10)}`;
-const defaultProjectId = sampleWorkspace.projects[0]?.id ?? "p-omni";
-const views = new Set<View>(["portfolio", "project", "today", "audit", "reports", "agent", "settings"]);
+const defaultProjectId = "workspace";
+const views = new Set<View>(["portfolio", "project", "calendar", "today", "audit", "reports", "agent", "settings"]);
 const daySeconds = 24 * 60 * 60;
 const dependencyTypes: DependencyType[] = ["FS", "SS", "FF", "SF"];
 const workItemKinds: WorkItemKind[] = ["phase", "task", "milestone", "hammock"];
@@ -145,6 +154,25 @@ const projectModes: ProjectMode[] = ["explore", "build", "ship", "maintain"];
 const projectStatuses = selectableProjectStatuses;
 const auditActions: AuditAction[] = ["Accelerate", "Continue", "Narrow", "Pivot", "Stop"];
 const evidenceKinds: EvidenceKind[] = ["note", "commit", "pr", "ci", "doc", "screenshot", "release", "feedback", "metric", "email", "calendar", "minutes", "booking"];
+const sidebarCollapsedStorageKey = "omni-plan-sidebar-collapsed";
+
+function readSidebarCollapsedPreference() {
+  if (typeof window === "undefined") return false;
+  try {
+    return window.localStorage.getItem(sidebarCollapsedStorageKey) === "true";
+  } catch {
+    return false;
+  }
+}
+
+function writeSidebarCollapsedPreference(collapsed: boolean) {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(sidebarCollapsedStorageKey, String(collapsed));
+  } catch {
+    // Sidebar state is only a UI preference; storage failures should not affect planning.
+  }
+}
 
 type AutoSyncState = "disabled" | "locked" | "ready" | "pending" | "syncing" | "conflict" | "error";
 
@@ -182,6 +210,16 @@ interface WorkItemCreateValues {
   isFastDelivery: boolean;
 }
 
+interface RepeatRuleDraft {
+  enabled: boolean;
+  cadence: RepeatCadenceKind;
+  everyDays: number;
+  count: number;
+  startMode: RepeatStartMode;
+  startDate: string;
+  startTime: string;
+}
+
 interface EvidenceCreateValues {
   kind: EvidenceKind;
   summary: string;
@@ -204,6 +242,19 @@ interface DependencyCreateValues {
   toId: string;
   type: DependencyType;
   lagDays: number;
+}
+
+interface CalendarEvent {
+  id: string;
+  kind: CalendarEventKind;
+  projectId: string;
+  projectName: string;
+  title: string;
+  start: string;
+  finish: string;
+  href: string;
+  critical?: boolean;
+  repeatLabel?: string;
 }
 
 interface RouteState {
@@ -313,6 +364,44 @@ function toUtcStart(date: string) {
   return `${date || timestamp().slice(0, 10)}T00:00:00.000Z`;
 }
 
+function toUtcDateTime(date: string, time: string) {
+  const safeDate = /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : timestamp().slice(0, 10);
+  const safeTime = /^\d{2}:\d{2}$/.test(time) ? time : "09:00";
+  return `${safeDate}T${safeTime}:00.000Z`;
+}
+
+function datePart(iso?: string) {
+  return iso?.slice(0, 10) || now.slice(0, 10);
+}
+
+function timePart(iso?: string) {
+  return iso?.slice(11, 16) || "09:00";
+}
+
+function monthStartIso(iso: string) {
+  const date = new Date(iso);
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1)).toISOString();
+}
+
+function addUtcMonths(iso: string, months: number) {
+  const date = new Date(iso);
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + months, 1)).toISOString();
+}
+
+function monthLabel(iso: string) {
+  return new Intl.DateTimeFormat("en", { month: "long", timeZone: "UTC", year: "numeric" }).format(new Date(iso));
+}
+
+function buildCalendarDays(monthStart: string) {
+  const start = new Date(monthStart);
+  const gridStart = addSeconds(monthStart, -start.getUTCDay() * daySeconds);
+  return Array.from({ length: 42 }, (_, index) => addSeconds(gridStart, index * daySeconds).slice(0, 10));
+}
+
+function isSameUtcMonth(day: string, monthStart: string) {
+  return day.slice(0, 7) === monthStart.slice(0, 7);
+}
+
 function hoursToSeconds(hours: number) {
   return Math.max(0, Math.round(hours * 3600));
 }
@@ -326,6 +415,31 @@ function nextOutline(workItems: WorkItem[], projectId: string, parentId?: string
   if (!parentId) return String(siblings.length + 1);
   const parent = workItems.find((item) => item.id === parentId);
   return `${parent?.outline ?? "1"}.${siblings.length + 1}`;
+}
+
+function repeatRuleFromDraft(draft: RepeatRuleDraft): RepeatRule | undefined {
+  if (!draft.enabled) return undefined;
+  return {
+    cadence: draft.cadence,
+    everyDays: draft.cadence === "every-n-days" ? Math.max(1, Math.round(draft.everyDays || 1)) : undefined,
+    count: Math.max(1, Math.round(draft.count || 1)),
+    startMode: draft.startMode,
+    startAt: toUtcDateTime(draft.startDate, draft.startTime)
+  };
+}
+
+function draftFromRepeatRule(item?: WorkItem, fallbackStart = now): RepeatRuleDraft {
+  const rule = item?.repeatRule;
+  const startAt = rule?.startAt ?? item?.constraint?.fixedStart ?? item?.constraint?.noEarlierThan ?? fallbackStart;
+  return {
+    enabled: Boolean(rule),
+    cadence: rule?.cadence ?? "every-n-days",
+    everyDays: Math.max(1, Math.round(rule?.everyDays ?? 7)),
+    count: Math.max(1, Math.round(rule?.count ?? 6)),
+    startMode: rule?.startMode ?? "fixed-time",
+    startDate: datePart(startAt),
+    startTime: timePart(startAt)
+  };
 }
 
 function createChangeSet(
@@ -368,6 +482,26 @@ function createDependencyChangeSet(projectId: string, title: string, diffs: Chan
 function applyGateOverrides(gates: AuditGate[], overrides: AuditGate[]) {
   const overrideById = new Map(overrides.map((gate) => [gate.id, gate]));
   return gates.map((gate) => ({ ...gate, status: overrideById.get(gate.id)?.status ?? gate.status }));
+}
+
+function usePagedItems<T>(items: T[], pageSize: number) {
+  const [page, setPage] = useState(0);
+  const pageCount = Math.max(1, Math.ceil(items.length / pageSize));
+  useEffect(() => {
+    setPage((current) => Math.min(current, pageCount - 1));
+  }, [pageCount]);
+  const pageItems = useMemo(() => {
+    const start = page * pageSize;
+    return items.slice(start, start + pageSize);
+  }, [items, page, pageSize]);
+  return {
+    items: pageItems,
+    page,
+    pageCount,
+    pageSize,
+    setPage,
+    total: items.length
+  };
 }
 
 function latestDecisionForProject(projectId: string, decisions: AuditDecision[]) {
@@ -498,10 +632,8 @@ function RoutedApp() {
   const workspaceRepository = useMemo(() => new BrowserWorkspaceRepository(), []);
   const settingsRepository = useMemo(() => new BrowserAppSettingsRepository(), []);
   const rememberedPassphraseVault = useMemo(() => new BrowserRememberedPassphraseVault(), []);
-  const [searchOpen, setSearchOpen] = useState(false);
-  const [searchQuery, setSearchQuery] = useState("");
-  const [focusedWorkItemId, setFocusedWorkItemId] = useState<string | undefined>();
-  const [workspace, setWorkspace] = useState(sampleWorkspace);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(readSidebarCollapsedPreference);
+  const [workspace, setWorkspace] = useState<WorkspaceSnapshot>(() => createEmptyWorkspace());
   const [appSettings, setAppSettings] = useState<AppSettings>(() => settingsRepository.load());
   const [sessionPassphrase, setSessionPassphrase] = useState("");
   const [rememberedPassphraseSavedAt, setRememberedPassphraseSavedAt] = useState<string | undefined>();
@@ -522,10 +654,15 @@ function RoutedApp() {
   const autoSyncBusyRef = useRef(false);
   const autoPushTimerRef = useRef<number | undefined>();
   const firebaseSessionRef = useRef<FirebaseAnonymousSession | undefined>();
+
+  useEffect(() => {
+    writeSidebarCollapsedPreference(sidebarCollapsed);
+  }, [sidebarCollapsed]);
   const suppressNextAutoPushRef = useRef(false);
   const view = route.view;
-  const selectedProject = workspace.projects.find((project) => project.id === route.selectedProjectId) ?? workspace.projects[0] ?? sampleWorkspace.projects[0];
-  const selectedProjectId = selectedProject.id;
+  const selectedProject = workspace.projects.find((project) => project.id === route.selectedProjectId) ?? workspace.projects[0];
+  const selectedProjectId = selectedProject?.id ?? defaultProjectId;
+  const selectedProjectName = selectedProject?.name ?? "No project";
 
   useEffect(() => {
     workspaceRef.current = workspace;
@@ -718,7 +855,8 @@ function RoutedApp() {
         setWorkspace(storedWorkspace);
         setWorkspacePersistence({ loaded: true, status: "Loaded from browser local workspace", lastSavedAt: "" });
       } else {
-        setWorkspacePersistence({ loaded: true, status: "Initialized sample workspace in browser storage", lastSavedAt: "" });
+        setWorkspace(createEmptyWorkspace());
+        setWorkspacePersistence({ loaded: true, status: "No local workspace saved yet", lastSavedAt: "" });
       }
     }).catch((error: unknown) => {
       if (!active) return;
@@ -822,7 +960,6 @@ function RoutedApp() {
 
   useEffect(() => {
     pageTitleRef.current?.focus({ preventScroll: true });
-    setSearchOpen(false);
   }, [view, selectedProjectId]);
 
   useEffect(() => {
@@ -840,17 +977,6 @@ function RoutedApp() {
     });
     return () => window.cancelAnimationFrame(frame);
   }, [view, selectedProjectId, route.target]);
-
-  useEffect(() => {
-    if (view !== "project" || !focusedWorkItemId) return;
-    const frame = window.requestAnimationFrame(() => {
-      const target = document.querySelector(`[data-work-item-id="${focusedWorkItemId}"]`);
-      target?.scrollIntoView({ block: "center", behavior: "smooth" });
-      target?.classList.add("focusFlash");
-      window.setTimeout(() => target?.classList.remove("focusFlash"), 1600);
-    });
-    return () => window.cancelAnimationFrame(frame);
-  }, [view, selectedProjectId, focusedWorkItemId]);
 
   const navigate = (nextView: View, nextProjectId = selectedProjectId) => {
     const nextRoute = { view: nextView, selectedProjectId: nextProjectId };
@@ -1194,6 +1320,43 @@ function RoutedApp() {
     pushWorkspaceSoon("Project archived; syncing workspace now.");
   };
 
+  const deleteEmptyProject = (projectId: string) => {
+    const previous = workspaceRef.current;
+    const project = previous.projects.find((candidate) => candidate.id === projectId);
+    if (!project) return;
+
+    const withoutProject = removeEmptyProjectFromWorkspace(previous, projectId);
+    if (!withoutProject) return;
+
+    const confirmed = window.confirm(`Delete empty project "${project.name}"? This removes the project and its project-level notes, gates, baselines, and decisions.`);
+    if (!confirmed) return;
+
+    const nextProjectId = previous.projects.find((candidate) => candidate.id !== projectId)?.id;
+    const deletedAt = timestamp();
+    const nextWorkspace = {
+      ...withoutProject,
+      changeSets: [
+        createChangeSet(
+          projectId,
+          `Delete empty project ${project.name}`,
+          "Removed an empty project with no work items from the workspace.",
+          [
+            { entity: "Project", entityId: projectId, field: "deleted", before: project.name, after: null },
+            { entity: "Project", entityId: projectId, field: "deletedAt", before: null, after: deletedAt }
+          ],
+          previous.changeSets.length,
+          "approved"
+        ),
+        ...previous.changeSets
+      ]
+    };
+    workspaceRef.current = nextWorkspace;
+    setWorkspace(nextWorkspace);
+    saveWorkspaceImmediately(nextWorkspace);
+    pushWorkspaceSoon("Empty project deleted; syncing workspace now.");
+    navigate("portfolio", nextProjectId);
+  };
+
   const createWorkItem = (projectId: string, values: WorkItemCreateValues) => {
     const title = values.title.trim();
     if (!title) return;
@@ -1239,6 +1402,41 @@ function RoutedApp() {
         ]
       };
     });
+  };
+
+  const updateWorkItemRepeatRule = (projectId: string, workItemId: string, repeatRule?: RepeatRule) => {
+    const previous = workspaceRef.current;
+    const workItem = previous.workItems.find((item) => item.id === workItemId && item.projectId === projectId);
+    if (!workItem) return;
+
+    const before = workItem.repeatRule ?? null;
+    const after = repeatRule ?? null;
+    if (JSON.stringify(before) === JSON.stringify(after)) return;
+
+    const nextWorkspace = {
+      ...previous,
+      workItems: previous.workItems.map((item) => {
+        if (item.id !== workItemId) return item;
+        if (repeatRule) return { ...item, repeatRule };
+        const nextItem = { ...item };
+        delete nextItem.repeatRule;
+        return nextItem;
+      }),
+      changeSets: [
+        createChangeSet(
+          projectId,
+          repeatRule ? `Set recurrence for ${workItem.title}` : `Clear recurrence for ${workItem.title}`,
+          repeatRule ? "Updated the work item's recurring schedule rule." : "Removed the work item's recurring schedule rule.",
+          [{ entity: "WorkItem", entityId: workItemId, field: "repeatRule", before, after }],
+          previous.changeSets.length
+        ),
+        ...previous.changeSets
+      ]
+    };
+    workspaceRef.current = nextWorkspace;
+    setWorkspace(nextWorkspace);
+    saveWorkspaceImmediately(nextWorkspace);
+    pushWorkspaceSoon("Recurring work changed; syncing workspace now.");
   };
 
   const createDependency = (projectId: string, values: DependencyCreateValues) => {
@@ -1628,46 +1826,6 @@ function RoutedApp() {
     });
   };
 
-  const searchResults = useMemo(() => {
-    const query = searchQuery.trim().toLowerCase();
-    if (!query) return [];
-
-    const projectResults = workspace.projects
-      .filter((project) => `${project.name} ${project.currentOutcome} ${project.northStar}`.toLowerCase().includes(query))
-      .map((project) => ({
-        id: `project-${project.id}`,
-        label: project.name,
-        detail: project.currentOutcome,
-        href: hashForRoute({ view: "project", selectedProjectId: project.id }),
-        workItemId: undefined
-      }));
-
-    const workItemResults = workspace.workItems
-      .filter((item) => `${item.title} ${item.outline}`.toLowerCase().includes(query))
-      .map((item) => {
-        const project = workspace.projects.find((candidate) => candidate.id === item.projectId);
-        return {
-          id: `work-${item.id}`,
-          label: item.title,
-          detail: `${project?.name ?? "Project"} / ${item.outline}`,
-          href: hashForRoute({ view: "project", selectedProjectId: item.projectId }),
-          workItemId: item.id
-        };
-      });
-
-    const evidenceResults = workspace.evidence
-      .filter((item) => `${item.summary} ${item.kind} ${item.tags.join(" ")}`.toLowerCase().includes(query))
-      .map((item) => ({
-        id: `evidence-${item.id}`,
-        label: item.summary,
-        detail: `${item.kind} evidence`,
-        href: hashForRoute({ view: "project", selectedProjectId: item.projectId }),
-        workItemId: item.workItemId
-      }));
-
-    return [...projectResults, ...workItemResults, ...evidenceResults].slice(0, 8);
-  }, [searchQuery, workspace]);
-
   const model = useMemo(() => {
     const schedules = scheduleShapeUpAwarePortfolio(workspace.projects, workspace.workItems, workspace.dependencies);
     const calculatedGates = workspace.projects.flatMap((project) => {
@@ -1702,18 +1860,22 @@ function RoutedApp() {
     return { schedules, gates, decisions, health, overloads, leveling };
   }, [workspace]);
 
-  const selectedSchedule = model.schedules.find((schedule) => schedule.projectId === selectedProject.id) ?? scheduleShapeUpAwarePortfolio([selectedProject], workspace.workItems, workspace.dependencies)[0];
-  const selectedDependencies = isShapeUpProject(selectedProject)
-    ? executableDependenciesForItems(
-      workspace.dependencies.filter((dependency) => dependency.projectId === selectedProject.id),
-      selectedSchedule.items.map((item) => item.workItem)
-    )
-    : workspace.dependencies.filter((dependency) => dependency.projectId === selectedProject.id);
-  const selectedBaseline = workspace.baselines.find((baseline) => baseline.projectId === selectedProject.id);
+  const selectedSchedule = selectedProject
+    ? model.schedules.find((schedule) => schedule.projectId === selectedProject.id) ?? scheduleShapeUpAwarePortfolio([selectedProject], workspace.workItems, workspace.dependencies)[0]
+    : undefined;
+  const selectedDependencies = selectedProject && selectedSchedule
+    ? isShapeUpProject(selectedProject)
+      ? executableDependenciesForItems(
+        workspace.dependencies.filter((dependency) => dependency.projectId === selectedProject.id),
+        selectedSchedule.items.map((item) => item.workItem)
+      )
+      : workspace.dependencies.filter((dependency) => dependency.projectId === selectedProject.id)
+    : [];
+  const selectedBaseline = selectedProject ? workspace.baselines.find((baseline) => baseline.projectId === selectedProject.id) : undefined;
   const selectedApprovedBaseline = isBaselineApproved(selectedBaseline, workspace.changeSets) ? selectedBaseline : undefined;
-  const selectedGates = model.gates.filter((gate) => gate.projectId === selectedProject.id);
-  const selectedDecision = model.decisions.find((decision) => decision.projectId === selectedProject.id) ?? model.decisions[0];
-  const selectedEvm = selectedApprovedBaseline
+  const selectedGates = selectedProject ? model.gates.filter((gate) => gate.projectId === selectedProject.id) : [];
+  const selectedDecision = selectedProject ? model.decisions.find((decision) => decision.projectId === selectedProject.id) ?? model.decisions[0] : undefined;
+  const selectedEvm = selectedProject && selectedSchedule && selectedApprovedBaseline
     ? calculateEvm(
         selectedProject,
         selectedSchedule.items,
@@ -1723,113 +1885,77 @@ function RoutedApp() {
         now
       )
     : undefined;
-  const selectedMonteCarlo = runMonteCarlo(
-    selectedProject,
-    workspace.workItems.filter((item) => item.projectId === selectedProject.id),
-    workspace.dependencies.filter((dependency) => dependency.projectId === selectedProject.id),
-    300,
-    7
-  );
+  const selectedMonteCarlo = selectedProject ? runMonteCarlo(
+      selectedProject,
+      workspace.workItems.filter((item) => item.projectId === selectedProject.id),
+      workspace.dependencies.filter((dependency) => dependency.projectId === selectedProject.id),
+      300,
+      7
+    ) : undefined;
   const activePlanningProjectIds = new Set(workspace.projects.filter((project) => !isProjectArchived(project)).map((project) => project.id));
   const openHardGateCount = model.gates.filter((gate) => activePlanningProjectIds.has(gate.projectId) && gate.severity === "hard" && gate.status !== "cleared").length;
 
   return (
     <div className="min-h-screen bg-background text-foreground">
-      <aside className="fixed inset-y-0 left-0 z-30 hidden w-64 border-r bg-card/95 px-3 py-4 shadow-sm backdrop-blur lg:block">
-        <div className="flex items-center gap-3 px-2 pb-5">
+      <aside
+        data-collapsed={sidebarCollapsed ? "true" : "false"}
+        className={cn(
+          "desktopSidebar fixed inset-y-0 left-0 z-30 hidden border-r bg-card/95 py-4 shadow-sm backdrop-blur lg:block",
+          sidebarCollapsed ? "w-20 px-2" : "w-64 px-3"
+        )}
+      >
+        <div className={cn("desktopSidebarBrand", sidebarCollapsed && "collapsed")}>
           <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary text-sm font-bold text-primary-foreground">OP</div>
-          <div>
+          {!sidebarCollapsed && (
+          <div className="min-w-0">
             <div className="text-sm font-semibold">OmniPlan Personal</div>
             <div className="text-xs text-muted-foreground">AI-era project OS</div>
           </div>
+          )}
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="sidebarCollapseButton"
+            aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+            title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+            onClick={() => setSidebarCollapsed((current) => !current)}
+          >
+            {sidebarCollapsed ? <ChevronRight /> : <ChevronLeft />}
+          </Button>
         </div>
         <nav className="space-y-1" aria-label="Primary">
-          <NavButton active={view === "portfolio"} icon={<Home />} label="Portfolio" href={hashForRoute({ view: "portfolio", selectedProjectId })} />
-          <NavButton active={view === "project"} icon={<Workflow />} label="Project" href={hashForRoute({ view: "project", selectedProjectId: selectedProject.id })} />
-          <NavButton active={view === "today"} icon={<Timer />} label="Today" href={hashForRoute({ view: "today", selectedProjectId })} />
-          <NavButton active={view === "audit"} icon={<ShieldAlert />} label="Audit" href={hashForRoute({ view: "audit", selectedProjectId })} />
-          <NavButton active={view === "reports"} icon={<FileDown />} label="Reports" href={hashForRoute({ view: "reports", selectedProjectId })} />
-          <NavButton active={view === "agent"} icon={<ClipboardCheck />} label="Agent" href={hashForRoute({ view: "agent", selectedProjectId })} />
-          <NavButton active={view === "settings"} icon={<KeyRound />} label="Settings" href={hashForRoute({ view: "settings", selectedProjectId })} />
+          <NavButton collapsed={sidebarCollapsed} active={view === "portfolio"} icon={<Home />} label="Portfolio" href={hashForRoute({ view: "portfolio", selectedProjectId })} />
+          <NavButton collapsed={sidebarCollapsed} active={view === "project"} icon={<Workflow />} label="Project" href={hashForRoute({ view: "project", selectedProjectId })} />
+          <NavButton collapsed={sidebarCollapsed} active={view === "calendar"} icon={<CalendarClock />} label="Calendar" href={hashForRoute({ view: "calendar", selectedProjectId })} />
+          <NavButton collapsed={sidebarCollapsed} active={view === "today"} icon={<Timer />} label="Today" href={hashForRoute({ view: "today", selectedProjectId })} />
+          <NavButton collapsed={sidebarCollapsed} active={view === "audit"} icon={<ShieldAlert />} label="Audit" href={hashForRoute({ view: "audit", selectedProjectId })} />
+          <NavButton collapsed={sidebarCollapsed} active={view === "reports"} icon={<FileDown />} label="Reports" href={hashForRoute({ view: "reports", selectedProjectId })} />
+          <NavButton collapsed={sidebarCollapsed} active={view === "agent"} icon={<ClipboardCheck />} label="Agent" href={hashForRoute({ view: "agent", selectedProjectId })} />
+          <NavButton collapsed={sidebarCollapsed} active={view === "settings"} icon={<KeyRound />} label="Settings" href={hashForRoute({ view: "settings", selectedProjectId })} />
         </nav>
         <Separator className="my-4" />
+        {sidebarCollapsed ? (
+        <div className="flex justify-center">
+          <IconStatusBadge
+            variant={openHardGateCount ? "destructive" : "success"}
+            status={openHardGateCount ? `${openHardGateCount} hard gates require review` : "Audit clear"}
+            icon={openHardGateCount ? <ShieldAlert /> : <CheckCircle2 />}
+          />
+        </div>
+        ) : (
         <div className="space-y-2 rounded-lg border bg-muted/40 p-3 text-xs text-muted-foreground">
           <div className="font-medium text-foreground">{asOfLabel}</div>
           <div>{openHardGateCount ? `${openHardGateCount} hard gates require review` : "Audit clear"}</div>
         </div>
+        )}
       </aside>
 
-      <div className="lg:pl-64">
-        <header className="sticky top-0 z-20 border-b bg-background/92 px-4 py-3 backdrop-blur lg:px-6">
-          <div className="flex items-center justify-between gap-3">
-            <div className="min-w-0">
-              <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Portfolio-first personal planning</p>
-              <h1 id="page-title" ref={pageTitleRef} tabIndex={-1} className="truncate text-2xl font-semibold tracking-tight outline-none">
-                {viewTitle(view, selectedProject.name)}
-              </h1>
-              <p className="text-xs text-muted-foreground">{breadcrumbFor(view, selectedProject.name)} / {asOfLabel}</p>
-            </div>
-            <div className="flex items-center gap-2">
-              <Sheet open={searchOpen} onOpenChange={setSearchOpen}>
-                <SheetTrigger asChild>
-                  <Button variant="outline" size="icon" aria-label="Search projects, tasks, and evidence" title="Command search">
-                    <Search />
-                  </Button>
-                </SheetTrigger>
-                <SheetContent side="right" className="w-[92vw] sm:max-w-xl">
-                  <SheetHeader>
-                    <SheetTitle>Command Search</SheetTitle>
-                    <SheetDescription>Search local project, task, and evidence data.</SheetDescription>
-                  </SheetHeader>
-                  <div className="mt-4 space-y-3">
-                    <Input
-                      id="global-search"
-                      type="search"
-                      autoFocus
-                      value={searchQuery}
-                      onChange={(event) => setSearchQuery(event.target.value)}
-                      onKeyDown={(event) => {
-                        if (event.key === "Escape") setSearchOpen(false);
-                      }}
-                      placeholder="Project, task, evidence..."
-                    />
-                    <div className="space-y-2">
-                      {searchResults.length ? (
-                        searchResults.map((result) => (
-                          <a
-                            key={result.id}
-                            href={result.href}
-                            className="block rounded-lg border bg-card p-3 text-sm shadow-sm transition hover:bg-accent"
-                            onClick={() => {
-                              setFocusedWorkItemId(result.workItemId);
-                              setSearchOpen(false);
-                            }}
-                          >
-                            <strong className="block">{result.label}</strong>
-                            <span className="text-muted-foreground">{result.detail}</span>
-                          </a>
-                        ))
-                      ) : (
-                        <p className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">
-                          {searchQuery.trim() ? "No matching project data. Use New Project or the project work item composer to add it." : "Type to search local project data."}
-                        </p>
-                      )}
-                    </div>
-                  </div>
-                </SheetContent>
-              </Sheet>
-              <Badge variant="outline" className="hidden sm:inline-flex">{asOfLabel}</Badge>
-              <IconStatusBadge
-                variant={openHardGateCount ? "destructive" : "success"}
-                status={openHardGateCount ? `${openHardGateCount} hard gates require review` : "Audit clear"}
-                icon={openHardGateCount ? <ShieldAlert /> : <CheckCircle2 />}
-              />
-            </div>
-          </div>
-        </header>
-        <nav className="fixed inset-x-3 bottom-3 z-30 grid grid-cols-7 rounded-xl border bg-card/95 p-1 shadow-lg backdrop-blur lg:hidden" aria-label="Mobile primary">
+      <div className={cn("desktopContent", sidebarCollapsed ? "lg:pl-20" : "lg:pl-64")}>
+        <nav className="fixed inset-x-3 bottom-3 z-30 grid grid-cols-8 rounded-xl border bg-card/95 p-1 shadow-lg backdrop-blur lg:hidden" aria-label="Mobile primary">
           <NavButton active={view === "portfolio"} icon={<Home />} label="Portfolio" href={hashForRoute({ view: "portfolio", selectedProjectId })} />
-          <NavButton active={view === "project"} icon={<Workflow />} label="Project" href={hashForRoute({ view: "project", selectedProjectId: selectedProject.id })} />
+          <NavButton active={view === "project"} icon={<Workflow />} label="Project" href={hashForRoute({ view: "project", selectedProjectId })} />
+          <NavButton active={view === "calendar"} icon={<CalendarClock />} label="Calendar" href={hashForRoute({ view: "calendar", selectedProjectId })} />
           <NavButton active={view === "today"} icon={<Timer />} label="Today" href={hashForRoute({ view: "today", selectedProjectId })} />
           <NavButton active={view === "audit"} icon={<ShieldAlert />} label="Audit" href={hashForRoute({ view: "audit", selectedProjectId })} />
           <NavButton active={view === "reports"} icon={<FileDown />} label="Reports" href={hashForRoute({ view: "reports", selectedProjectId })} />
@@ -1837,7 +1963,8 @@ function RoutedApp() {
           <NavButton active={view === "settings"} icon={<KeyRound />} label="Settings" href={hashForRoute({ view: "settings", selectedProjectId })} />
         </nav>
         <main className="px-4 py-4 pb-24 lg:px-6 lg:pb-8" aria-labelledby="page-title">
-        <div className="routeAnnouncer" aria-live="polite">{breadcrumbFor(view, selectedProject.name)}</div>
+        <h1 id="page-title" ref={pageTitleRef} tabIndex={-1} className="srOnly">{viewTitle(view, selectedProjectName)}</h1>
+        <div className="routeAnnouncer" aria-live="polite">{breadcrumbFor(view, selectedProjectName)}</div>
 
         {view === "portfolio" && (
           <PortfolioDashboard
@@ -1849,9 +1976,10 @@ function RoutedApp() {
             onProjectCreate={createProject}
           />
         )}
-        {view === "project" && (
+        {view === "project" && selectedProject && selectedSchedule && (
           <ProjectWorkspace
             project={selectedProject}
+            workItems={workspace.workItems.filter((item) => item.projectId === selectedProject.id)}
             baseline={selectedBaseline}
             baselineChangeSet={selectedBaseline ? workspace.changeSets.find((changeSet) =>
               changeSet.projectId === selectedProject.id &&
@@ -1871,12 +1999,14 @@ function RoutedApp() {
             onShapeUpBetApprove={approveShapeUpBet}
             onShapeUpConvert={convertProjectToShapeUp}
             onWorkItemCreate={createWorkItem}
+            onWorkItemRepeatRuleUpdate={updateWorkItemRepeatRule}
             onDependencyCreate={createDependency}
             onEvidenceCreate={createEvidence}
             onActualRecord={recordActual}
             onProjectWorkFinish={finishProjectWork}
             onProjectComplete={completeProject}
             onProjectArchive={archiveProject}
+            onProjectDelete={deleteEmptyProject}
             onBaselineCapture={() => captureBaseline(selectedProject.id, selectedSchedule)}
             onChangeSetStatus={setChangeSetStatus}
             onGateClear={clearGate}
@@ -1885,12 +2015,22 @@ function RoutedApp() {
             projects={workspace.projects}
           />
         )}
+        {view === "project" && (!selectedProject || !selectedSchedule) && (
+          <EmptyWorkspacePanel onProjectCreate={createProject} />
+        )}
         {view === "today" && (
           <TodayExecution
             schedules={model.schedules}
             projects={workspace.projects}
             gates={model.gates}
             onActualRecord={recordActual}
+          />
+        )}
+        {view === "calendar" && (
+          <CalendarView
+            projects={workspace.projects}
+            workItems={workspace.workItems}
+            schedules={model.schedules}
           />
         )}
         {view === "audit" && (
@@ -1907,7 +2047,7 @@ function RoutedApp() {
             onLevelingApply={applyLevelingProposal}
           />
         )}
-        {view === "reports" && (
+        {view === "reports" && selectedProject && selectedSchedule && selectedDecision && selectedMonteCarlo && (
           <Reports
             project={selectedProject}
             schedule={selectedSchedule}
@@ -1928,6 +2068,9 @@ function RoutedApp() {
             gates={selectedGates}
             baseline={selectedApprovedBaseline}
           />
+        )}
+        {view === "reports" && (!selectedProject || !selectedSchedule || !selectedDecision || !selectedMonteCarlo) && (
+          <EmptyWorkspacePanel onProjectCreate={createProject} />
         )}
         {view === "agent" && (
           <AgentCenter
@@ -1953,7 +2096,7 @@ function RoutedApp() {
             autoSyncStatus={autoSyncStatus}
             workspacePersistence={workspacePersistence}
             onWorkspaceImport={(nextWorkspace) => setWorkspace(nextWorkspace)}
-            onWorkspaceReset={() => setWorkspace(sampleWorkspace)}
+            onWorkspaceReset={() => setWorkspace(createEmptyWorkspace())}
             onEvidenceImport={importEvidenceItems}
           />
         )}
@@ -1969,6 +2112,8 @@ function viewTitle(view: View, projectName: string) {
       return "Portfolio Control";
     case "project":
       return projectName;
+    case "calendar":
+      return "Calendar";
     case "today":
       return "Today Execution";
     case "audit":
@@ -1992,18 +2137,21 @@ function NavButton({
   active,
   href,
   icon,
-  label
+  label,
+  collapsed = false
 }: {
   active: boolean;
   href: string;
   icon: ReactNode;
   label: string;
+  collapsed?: boolean;
 }) {
   return (
     <a
       data-active={active ? "true" : "false"}
       className={cn(
         "appNavButton flex min-h-10 items-center justify-center gap-2 rounded-lg px-2 text-xs font-medium text-muted-foreground transition hover:bg-accent hover:text-accent-foreground lg:justify-start lg:px-3 lg:text-sm",
+        collapsed && "lg:justify-center lg:px-0",
         active && "bg-primary text-primary-foreground shadow-sm hover:bg-primary hover:text-primary-foreground"
       )}
       href={href}
@@ -2011,8 +2159,27 @@ function NavButton({
       aria-current={active ? "page" : undefined}
     >
       {icon}
-      <span className="hidden lg:inline">{label}</span>
+      <span className={collapsed ? "hidden" : "hidden lg:inline"}>{label}</span>
     </a>
+  );
+}
+
+function EmptyWorkspacePanel({ onProjectCreate }: { onProjectCreate: (values: ProjectCreateValues) => void }) {
+  return (
+    <Card className="border-dashed">
+      <CardHeader className="compactCardHeader">
+        <div className="cardHeaderLine">
+          <CardTitle className="flex items-center gap-2"><Layers3 className="h-4 w-4" /> No local projects</CardTitle>
+          <Badge variant="outline" className="iconBadge" title="Empty workspace"><CheckCircle2 />clean</Badge>
+        </div>
+      </CardHeader>
+      <CardContent className="flex flex-wrap items-center justify-between gap-3">
+        <p className="max-w-xl text-sm text-muted-foreground">
+          This browser has no local workspace data. Create a project, import a backup, or pull from Firebase after configuring sync.
+        </p>
+        <CreateProjectSheet onCreate={onProjectCreate} />
+      </CardContent>
+    </Card>
   );
 }
 
@@ -2031,6 +2198,7 @@ function PortfolioDashboard({
   overloads: ReturnType<typeof detectCrossProjectOverload>;
   onProjectCreate: (values: ProjectCreateValues) => void;
 }) {
+  const [shapeUpOpen, setShapeUpOpen] = useState(false);
   const sorted = [...projects].sort((a, b) => {
     const left = health.find((item) => item.projectId === a.id)?.recommendedFocus ?? 0;
     const right = health.find((item) => item.projectId === b.id)?.recommendedFocus ?? 0;
@@ -2038,6 +2206,7 @@ function PortfolioDashboard({
   });
   const planningProjects = sorted.filter((project) => !isProjectArchived(project));
   const visibleProjects = planningProjects.length ? planningProjects : sorted;
+  const focusStackPage = usePagedItems(visibleProjects, 8);
   const planningProjectIds = new Set(planningProjects.map((project) => project.id));
   const planningSchedules = schedules.filter((schedule) => planningProjectIds.has(schedule.projectId));
   const openHardGates = gates.filter((gate) => planningProjectIds.has(gate.projectId) && gate.severity === "hard" && gate.status !== "cleared").length;
@@ -2062,6 +2231,25 @@ function PortfolioDashboard({
       projects: shapeUpProjects.filter((project) => project.status === "paused")
     }
   ];
+  if (!visibleProjects.length) {
+    return (
+      <section className="grid gap-3">
+        <div className="portfolioHeader">
+          <div className="min-w-0">
+            <h2 className="text-lg font-semibold tracking-tight">Portfolio workspace</h2>
+            <div className="compactBadgeRow">
+              <Badge variant="outline" className="iconBadge" title="No local projects"><Layers3 />0 active</Badge>
+              <Badge variant="success" className="iconBadge" title="No hard gates"><AlertTriangle />0</Badge>
+              <Badge variant="outline" className="iconBadge" title="No critical path items"><Network />0 CP</Badge>
+              <Badge variant="success" className="iconBadge" title="No overloads"><CalendarClock />0</Badge>
+            </div>
+          </div>
+          <CreateProjectSheet onCreate={onProjectCreate} />
+        </div>
+        <EmptyWorkspacePanel onProjectCreate={onProjectCreate} />
+      </section>
+    );
+  }
   const focusProject = visibleProjects[0];
   const focusHealth = health.find((item) => item.projectId === focusProject.id);
   const focusSchedule = schedules.find((schedule) => schedule.projectId === focusProject.id);
@@ -2073,235 +2261,311 @@ function PortfolioDashboard({
   const staleEvidenceProjects = health.filter((item) => planningProjectIds.has(item.projectId) && (item.evidenceFreshnessDays === undefined || item.evidenceFreshnessDays >= 5));
   const criticalFocus = focusSchedule?.items.filter((item) => item.isCritical && item.workItem.kind !== "phase").length ?? 0;
   const portfolioRisk = Math.round(health.reduce((sum, item) => sum + item.riskScore, 0) / Math.max(1, health.length));
+  const matrixBaseItems = visibleProjects.map((project, index) => ({
+    index,
+    project,
+    health: health.find((item) => item.projectId === project.id)!,
+    status: projectLifecycleStatus(project)
+  }));
+  const matrixRiskValues = matrixBaseItems.map((item) => item.health.riskScore);
+  const matrixMomentumValues = matrixBaseItems.map((item) => item.health.momentumScore);
+  const matrixClusterCounts = new Map<string, number>();
+  const matrixItems = matrixBaseItems.map((item) => {
+    const clusterKey = `${item.health.riskScore}:${item.health.momentumScore}`;
+    const clusterIndex = matrixClusterCounts.get(clusterKey) ?? 0;
+    matrixClusterCounts.set(clusterKey, clusterIndex + 1);
+    const offset = matrixNodeOffset(clusterIndex);
+    const x = clampMatrixPosition(matrixRelativePosition(item.health.momentumScore, matrixMomentumValues) + offset.x);
+    const y = clampMatrixPosition(matrixRelativePosition(item.health.riskScore, matrixRiskValues) + offset.y);
+    const decision = matrixDecisionForPoint(x, y, item.health.openHardGates);
+
+    return {
+      ...item,
+      x,
+      y,
+      decision
+    };
+  });
+  const pressureMatrixItems = matrixItems.filter((item) => item.decision === "narrow" || item.decision === "audit");
+  const pushMatrixItems = matrixItems.filter((item) => item.decision === "push");
+  const watchMatrixItems = matrixItems.filter((item) => item.decision === "watch");
+  const matrixLeadItems = pressureMatrixItems.length ? pressureMatrixItems : matrixItems.slice(0, Math.min(2, matrixItems.length));
+  const matrixHeadline = pressureMatrixItems.length
+    ? `${pressureMatrixItems.length} project${pressureMatrixItems.length === 1 ? "" : "s"} need attention before more scope`
+    : `${pushMatrixItems.length} project${pushMatrixItems.length === 1 ? "" : "s"} can keep moving`;
+  const matrixDetail = pressureMatrixItems.length
+    ? `${formatCompactProjectList(matrixLeadItems.map((item) => item.project))} carries the most visible pressure in this portfolio.`
+    : "No high-pressure cluster is visible; keep paused backlog work parked until you choose to promote it.";
 
   return (
-    <section className="grid gap-4">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
+    <section className="grid gap-3">
+      <div className="portfolioHeader">
+        <div className="min-w-0">
           <h2 className="text-lg font-semibold tracking-tight">Portfolio workspace</h2>
-          <p className="text-sm text-muted-foreground">Create real projects, then track task progress, evidence, gates, and reports from the same local workspace.</p>
+          <div className="compactBadgeRow">
+            <Badge variant="secondary" className="iconBadge" title="Active delivery projects"><Layers3 />{activeDeliveryProjects.length} active</Badge>
+            <Badge variant={openHardGates ? "destructive" : "success"} className="iconBadge" title="Open hard gates"><AlertTriangle />{openHardGates}</Badge>
+            <Badge variant="outline" className="iconBadge" title="Critical path items"><Network />{criticalCount} CP</Badge>
+            <Badge variant={overloads.length ? "warning" : "success"} className="iconBadge" title="Attention overloads"><CalendarClock />{overloads.length}</Badge>
+          </div>
         </div>
         <CreateProjectSheet onCreate={onProjectCreate} />
       </div>
-      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-        <Metric
-          icon={<Layers3 />}
-          label="Active projects"
-          value={activeDeliveryProjects.length}
-          detail="Open focus list"
-          href={hashForRoute({ view: "portfolio", selectedProjectId: focusProject.id, target: "portfolio-focus-list" })}
-        />
-        <Metric
-          icon={<AlertTriangle />}
-          label="Hard gates"
-          value={openHardGates}
-          tone={openHardGates ? "danger" : "ok"}
-          detail="Open audit queue"
-          href={hashForRoute({ view: "audit", selectedProjectId: focusProject.id, target: "hard-gates" })}
-        />
-        <Metric
-          icon={<Network />}
-          label="Critical items"
-          value={criticalCount}
-          detail="Open today queue"
-          href={hashForRoute({ view: "today", selectedProjectId: focusProject.id, target: "critical-items" })}
-        />
-        <Metric
-          icon={<CalendarClock />}
-          label="Overloads"
-          value={overloads.length}
-          tone={overloads.length ? "warn" : "ok"}
-          detail="Review leveling"
-          href={hashForRoute({ view: "audit", selectedProjectId: focusProject.id, target: "leveling-proposals" })}
-        />
-      </div>
 
       <Card id="shape-up-streams">
-        <CardHeader className="pb-3">
-          <CardTitle className="flex items-center gap-2"><Target className="h-4 w-4" /> Shape Up Flow</CardTitle>
-          <CardDescription>Unbet projects are excluded from active delivery until a human approves the Betting Gate.</CardDescription>
-        </CardHeader>
-        <CardContent className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-          {shapeUpStreams.map((stream) => (
-            <div key={stream.label} className="rounded-lg border bg-background p-3">
-              <div className="mb-3 flex items-center justify-between gap-2">
-                <h3 className="text-sm font-semibold">{stream.label}</h3>
-                <Badge variant={stream.projects.length ? "secondary" : "outline"}>{stream.projects.length}</Badge>
-              </div>
-              <div className="grid gap-2">
-                {stream.projects.slice(0, 3).map((project) => (
-                  <a key={project.id} className="rounded-md border bg-muted/30 p-2 text-sm hover:bg-accent/50" href={hashForRoute({ view: "project", selectedProjectId: project.id, target: "shape-up" })}>
-                    <strong className="block truncate">{project.name}</strong>
-                    <span className="text-xs text-muted-foreground">
-                      {project.shapeUpPitch?.bet ? `ends ${project.shapeUpPitch.bet.cycleEnd.slice(0, 10)}` : `${shapeUpMissingBetRequirements(project).length} pitch gaps`}
-                    </span>
-                  </a>
-                ))}
-                {!stream.projects.length && <span className="rounded-md border border-dashed p-2 text-xs text-muted-foreground">No projects</span>}
-              </div>
+        <CardHeader className="compactCardHeader">
+          <div className="cardHeaderLine">
+            <button
+              type="button"
+              className="collapseHeaderButton"
+              aria-expanded={shapeUpOpen}
+              aria-controls="shape-up-streams-body"
+              onClick={() => setShapeUpOpen((current) => !current)}
+            >
+              <Target className="h-4 w-4" />
+              <span>Shape Up Flow</span>
+              {shapeUpOpen ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+            </button>
+            <div className="cardHeaderBadges">
+              <Badge variant="outline" className="iconBadge" title="Waiting for shaping or betting"><Target />{shapeUpStreams[0].projects.length + shapeUpStreams[1].projects.length}</Badge>
+              <Badge variant="secondary" className="iconBadge" title="Active Shape Up builds"><Play />{shapeUpStreams[2].projects.length}</Badge>
+              <Badge variant="warning" className="iconBadge" title="Circuit breaker queue"><ShieldAlert />{shapeUpStreams[3].projects.length}</Badge>
             </div>
-          ))}
-        </CardContent>
+          </div>
+        </CardHeader>
+        {shapeUpOpen && (
+          <CardContent id="shape-up-streams-body" className="grid gap-2 md:grid-cols-2 xl:grid-cols-4">
+            {shapeUpStreams.map((stream) => (
+              <div key={stream.label} className="compactStream">
+                <div className="mb-2 flex items-center justify-between gap-2">
+                  <h3 className="text-sm font-semibold">{stream.label}</h3>
+                  <Badge variant={stream.projects.length ? "secondary" : "outline"}>{stream.projects.length}</Badge>
+                </div>
+                <div className="grid gap-1.5">
+                  {stream.projects.slice(0, 3).map((project) => (
+                    <a key={project.id} className="compactStreamProject" href={hashForRoute({ view: "project", selectedProjectId: project.id, target: "shape-up" })}>
+                      <strong className="block truncate">{project.name}</strong>
+                      <span>
+                        {project.shapeUpPitch?.bet ? `ends ${project.shapeUpPitch.bet.cycleEnd.slice(0, 10)}` : `${shapeUpMissingBetRequirements(project).length} pitch gaps`}
+                      </span>
+                    </a>
+                  ))}
+                  {!stream.projects.length && <span className="compactEmpty"><CheckCircle2 />0</span>}
+                </div>
+              </div>
+            ))}
+          </CardContent>
+        )}
       </Card>
 
       <Card>
-        <CardHeader className="pb-3">
-          <div className="flex items-center justify-between gap-3">
-            <div>
-              <CardTitle className="flex items-center gap-2"><Target className="h-4 w-4" /> Command Brief</CardTitle>
-              <CardDescription>Today’s operating decision, blockers, and evidence debt.</CardDescription>
-            </div>
+        <CardHeader className="compactCardHeader">
+          <div className="cardHeaderLine">
+            <CardTitle className="flex items-center gap-2"><Target className="h-4 w-4" /> Command Brief</CardTitle>
             <Badge variant={openHardGates ? "destructive" : "success"}>{openHardGates ? "Action required" : "Clear"}</Badge>
           </div>
         </CardHeader>
-        <CardContent className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+        <CardContent className="grid gap-2 md:grid-cols-2 xl:grid-cols-4">
           <ActionCard
+            icon={<Lock />}
             tone={focusGate ? "danger" : "neutral"}
-            label="Decision gate"
+            label="Gate"
             title={focusGate ? `${focusProject.name}: ${focusGate.targetType}` : "No hard blocker"}
-            detail={focusGate?.reason ?? "Use this window to narrow risk before adding more scope."}
+            detail={focusGate?.reason}
             meta={`${openHardGates} hard gates`}
-            cta="Audit"
             href={hashForRoute({ view: "audit", selectedProjectId: focusProject.id, target: "hard-gates" })}
           />
           <ActionCard
+            icon={<Timer />}
             label={overdueRows.length ? "Overdue work" : focusNext ? `${scheduleTiming(focusNext)} action` : "Next action"}
             title={overdueRows[0]?.item.workItem.title ?? focusNext?.workItem.title ?? "No open scheduled work"}
-            detail={overdueRows[0] ? formatScheduleRange(overdueRows[0].item) : focusNext ? formatScheduleRange(focusNext) : "Review baselines before adding new tasks."}
+            detail={overdueRows[0] ? formatScheduleRange(overdueRows[0].item) : focusNext ? formatScheduleRange(focusNext) : undefined}
             meta={`${overdueRows.length} overdue`}
-            cta="Today"
             href={hashForRoute({ view: "today", selectedProjectId: focusProject.id, target: "critical-items" })}
           />
           <ActionCard
-            label="Critical path exposure"
+            icon={<Network />}
+            label="Critical path"
             title={`${criticalFocus} critical items in focus project`}
-            detail={focusNext ? `${focusNext.workItem.title} is the next visible constraint.` : `${focusProject.name} has no incomplete scheduled item.`}
+            detail={focusNext?.workItem.title}
             meta={`Risk ${focusHealth?.riskScore ?? portfolioRisk}`}
-            cta="Plan"
             href={hashForRoute({ view: "project", selectedProjectId: focusProject.id, target: "project-gantt" })}
           />
           <ActionCard
+            icon={<FileText />}
             tone={staleEvidenceProjects.length ? "warning" : "neutral"}
             label="Evidence debt"
             title={formatFreshness(focusHealth?.evidenceFreshnessDays)}
-            detail={`${staleEvidenceProjects.length} project${staleEvidenceProjects.length === 1 ? "" : "s"} need fresher evidence before milestone closure.`}
+            detail={staleEvidenceProjects.length ? `${staleEvidenceProjects.length} stale project${staleEvidenceProjects.length === 1 ? "" : "s"}` : undefined}
             meta={`${staleEvidenceProjects.length} stale`}
-            cta="Evidence"
             href={hashForRoute({ view: "audit", selectedProjectId: focusProject.id, target: "audit-warnings" })}
           />
         </CardContent>
       </Card>
 
-      <div className="grid gap-4 xl:grid-cols-[minmax(0,1.08fr)_minmax(420px,0.92fr)]">
+      <div className="grid gap-3 xl:grid-cols-[minmax(0,1.08fr)_minmax(420px,0.92fr)]">
         <Card id="portfolio-focus-list">
-          <CardHeader className="pb-3">
-            <CardTitle className="flex items-center gap-2"><Zap className="h-4 w-4" /> Focus Stack</CardTitle>
-            <CardDescription>Ranked by risk, momentum, evidence debt, and hard gates.</CardDescription>
+          <CardHeader className="compactCardHeader">
+            <div className="cardHeaderLine">
+              <CardTitle className="flex items-center gap-2"><Zap className="h-4 w-4" /> Focus Stack</CardTitle>
+              <div className="cardHeaderBadges">
+                <Badge variant="outline" className="iconBadge" title="Risk"><AlertTriangle />R</Badge>
+                <Badge variant="outline" className="iconBadge" title="Momentum"><Zap />M</Badge>
+                <Badge variant="outline" className="iconBadge" title="Evidence debt"><FileText />E</Badge>
+                <Badge variant="outline" className="iconBadge" title="Hard gates"><Lock />G</Badge>
+              </div>
+            </div>
           </CardHeader>
-          <CardContent className="space-y-3">
-          {visibleProjects.map((project, index) => {
+          <CardContent className="focusStackList">
+          {focusStackPage.items.map((project, index) => {
             const projectHealth = health.find((item) => item.projectId === project.id)!;
             const projectSchedule = schedules.find((schedule) => schedule.projectId === project.id);
             const finish = projectSchedule?.items.reduce((max, item) => (item.finish > max ? item.finish : max), project.start);
             const next = projectSchedule ? nextScheduledItem(projectSchedule.items) : undefined;
             const projectCritical = projectSchedule?.items.filter((item) => item.isCritical && item.workItem.kind !== "phase").length ?? 0;
-            const action = focusAction(projectHealth, projectLifecycleStatus(project));
+            const lifecycleStatus = projectLifecycleStatus(project);
+            const action = focusAction(projectHealth, lifecycleStatus);
+            const evidenceDebt = evidenceFreshnessScore(projectHealth.evidenceFreshnessDays);
+            const riskTone = projectHealth.riskScore >= 70 ? "danger" : projectHealth.riskScore >= 45 ? "warn" : "ok";
+            const evidenceTone = projectHealth.evidenceFreshnessDays === undefined || projectHealth.evidenceFreshnessDays >= 5 ? "danger" : "ok";
             return (
               <a
                 key={project.id}
                 className={cn(
-                  "grid gap-3 rounded-lg border bg-card p-3 text-card-foreground shadow-sm transition hover:bg-accent/45 md:grid-cols-[96px_minmax(0,1fr)]",
-                  projectHealth.openHardGates && "border-destructive/35 bg-destructive/5"
+                  "focusStackItem",
+                  projectHealth.openHardGates && "hasGate"
                 )}
                 href={hashForRoute({ view: "project", selectedProjectId: project.id })}
+                aria-label={`${project.name}, ${action}, ${projectLifecycleLabel(project)}, risk ${projectHealth.riskScore}, momentum ${projectHealth.momentumScore}, evidence debt ${evidenceDebt}`}
               >
-                <div className="flex items-center gap-2 md:block">
-                  <div className={cn("grid h-16 w-20 place-items-center rounded-lg border text-sm font-semibold", action === "Narrow" ? "border-destructive/30 bg-destructive/10 text-destructive" : "border-primary/20 bg-primary/10 text-primary")}>
-                    <span>#{index + 1}</span>
-                    <span className="text-[10px] uppercase tracking-wide">{action}</span>
-                  </div>
-                  <Badge variant={project.status === "active" && !isProjectArchived(project) ? "success" : "warning"} className="md:mt-2">{projectLifecycleLabel(project)}</Badge>
-                </div>
-                <div className="min-w-0 space-y-3">
-                  <div className="flex flex-wrap items-start justify-between gap-2">
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-2">
-                        <h3 className="truncate text-sm font-semibold">{project.name}</h3>
-                        <Badge variant="secondary">{project.mode}</Badge>
-                      </div>
-                      <p className="mt-1 line-clamp-1 text-xs text-muted-foreground">{project.currentOutcome}</p>
+                <span className={cn("focusStackRank", action.toLowerCase())} title={action}>#{focusStackPage.page * focusStackPage.pageSize + index + 1}</span>
+                <div className="focusStackBody">
+                  <div className="focusStackTop">
+                    <div className="focusStackTitleLine">
+                      <strong title={project.name}>{project.name}</strong>
+                      <Badge variant={project.status === "active" && !isProjectArchived(project) ? "success" : "warning"} className="focusPill" title={projectLifecycleLabel(project)}>
+                        <CheckCircle2 />{projectLifecycleLabel(project)}
+                      </Badge>
+                      <Badge variant="secondary" className="focusPill" title={`Mode: ${project.mode}`}>
+                        <Workflow />{project.mode}
+                      </Badge>
+                      {action !== "Continue" && (
+                        <Badge variant={action === "Narrow" ? "destructive" : "outline"} className="focusPill" title={`Recommended action: ${action}`}>
+                          <Target />{action}
+                        </Badge>
+                      )}
                     </div>
-                    <Button asChild variant={projectHealth.openHardGates ? "destructive" : "outline"} size="sm">
-                      <span>{projectHealth.openHardGates ? "Review gate" : "Open project"}</span>
-                    </Button>
+                    <span className="focusOpenIcon" title="Open project" aria-hidden="true"><PanelRight /></span>
                   </div>
-                  <div className="grid gap-2 sm:grid-cols-3" aria-label={`${project.name} focus signals`}>
-                  <SignalBar label="Risk" value={projectHealth.riskScore} tone={projectHealth.riskScore >= 70 ? "danger" : projectHealth.riskScore >= 45 ? "warn" : "ok"} />
-                  <SignalBar label="Momentum" value={projectHealth.momentumScore} tone="ok" />
-                  <SignalBar label="Evidence debt" value={evidenceFreshnessScore(projectHealth.evidenceFreshnessDays)} tone={projectHealth.evidenceFreshnessDays === undefined || projectHealth.evidenceFreshnessDays >= 5 ? "danger" : "ok"} />
+                  <div className="focusStackSignals" aria-label={`${project.name} focus signals`}>
+                    <span className={`focusSignalChip ${riskTone}`} title={`Risk ${projectHealth.riskScore}`}><AlertTriangle />R {projectHealth.riskScore}</span>
+                    <span className="focusSignalChip ok" title={`Momentum ${projectHealth.momentumScore}`}><Zap />M {projectHealth.momentumScore}</span>
+                    <span className={`focusSignalChip ${evidenceTone}`} title={`Evidence debt ${evidenceDebt}`}><FileText />E {evidenceDebt}</span>
+                    <span className={cn("focusSignalChip", projectHealth.openHardGates ? "danger" : "neutral")} title={`${projectHealth.openHardGates} hard gates`}><Lock />{projectHealth.openHardGates}</span>
+                    <span className="focusSignalChip neutral" title={finish ? `Finish ${formatShortDateTime(finish)}, ${projectCritical} critical` : "No finish date"}>
+                      <CalendarClock />{finish ? formatShortDateTime(finish) : "-"} · {projectCritical} CP
+                    </span>
                   </div>
-                  <div className="grid gap-2 text-xs text-muted-foreground sm:grid-cols-3">
-                    <span><b className="text-foreground">{next ? scheduleTiming(next) : "Next"}</b><br />{next?.workItem.title ?? "none"}</span>
-                    <span><b className="text-foreground">Hard gates</b><br />{projectHealth.openHardGates}</span>
-                    <span><b className="text-foreground">Finish</b><br />{finish ? formatShortDateTime(finish) : "none"} / {projectCritical} critical</span>
+                  <div className="focusNextLine" title={next?.workItem.title ?? "No next action"}>
+                    <Timer />
+                    <span>{next ? scheduleTiming(next) : "Next"}</span>
+                    <strong>{next?.workItem.title ?? "none"}</strong>
                   </div>
                 </div>
               </a>
             );
           })}
+          <PaginationControls label="focus stack" {...focusStackPage} onPageChange={focusStackPage.setPage} />
           </CardContent>
         </Card>
 
         <Card>
-          <CardHeader className="pb-3">
-            <CardTitle className="flex items-center gap-2"><BarChart3 className="h-4 w-4" /> Momentum x Risk</CardTitle>
-            <CardDescription>Position shows project pressure; red outline means hard gate.</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <div className="matrix compactMatrix">
-          <span className="matrixZone zoneAudit">Audit gate</span>
-          <span className="matrixZone zoneNarrow">Narrow / stop</span>
-          <span className="matrixZone zoneWatch">Watch evidence</span>
-          <span className="matrixZone zoneShip">Push</span>
-          {visibleProjects.map((project) => {
-            const item = health.find((candidate) => candidate.projectId === project.id)!;
-            return (
-              <a
-                key={project.id}
-                className={`matrixNode ${item.openHardGates ? "hasGate" : ""}`}
-                style={{ left: `${Math.min(78, Math.max(22, item.momentumScore))}%`, bottom: `${Math.min(78, Math.max(14, item.riskScore))}%` }}
-                href={hashForRoute({ view: "project", selectedProjectId: project.id })}
-                title={`${project.name}: momentum ${item.momentumScore}, risk ${item.riskScore}`}
-                aria-label={`${project.name}, momentum ${item.momentumScore}, risk ${item.riskScore}, status ${projectLifecycleLabel(project)}`}
-              >
-                <span className={`statusDot ${projectLifecycleStatus(project)}`} />
-                <span className="srOnly">Status {projectLifecycleLabel(project)}</span>
-                <span className="matrixNodeName">{compactProjectLabel(project.name)}</span>
-                <span className="matrixNodeMeta">R{item.riskScore} M{item.momentumScore}</span>
-              </a>
-            );
-          })}
-          <span className="axis x">Momentum</span>
-          <span className="axis y">Risk</span>
+          <CardHeader className="compactCardHeader">
+            <div className="cardHeaderLine">
+              <CardTitle className="flex items-center gap-2"><BarChart3 className="h-4 w-4" /> Momentum x Risk</CardTitle>
+              <div className="cardHeaderBadges">
+                <Badge variant="outline" className="iconBadge" title="Higher risk is up"><AlertTriangle />R up</Badge>
+                <Badge variant="outline" className="iconBadge" title="More momentum is right"><Zap />M right</Badge>
+              </div>
             </div>
-            <div className="mt-3 flex flex-wrap gap-2 text-xs text-muted-foreground">
-              <Badge variant="outline">Position = risk / momentum</Badge>
-              <Badge variant="outline">Higher risk is up</Badge>
-              <Badge variant="outline">More momentum is right</Badge>
-              <Badge variant="outline">Red = hard gate</Badge>
-              <Badge variant="outline">Open project by clicking node</Badge>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <div className="matrixDecisionSummary">
+              <div>
+                <span className="matrixEyebrow">Current read</span>
+                <strong>{matrixHeadline}</strong>
+                <p>{matrixDetail}</p>
+              </div>
+              <div className="matrixStats" aria-label="Momentum risk project counts">
+                <span><b>{pressureMatrixItems.length}</b> pressure</span>
+                <span><b>{pushMatrixItems.length}</b> push</span>
+                <span><b>{watchMatrixItems.length}</b> watch</span>
+              </div>
+            </div>
+            <div
+              className="matrix decisionMatrix compactMatrix"
+              aria-label="Relative project decision matrix. Higher risk is up. More momentum is right."
+            >
+              <div className="matrixQuadrant zoneNarrow">
+                <strong>Narrow / stop</strong>
+                <span>Reduce scope before adding work</span>
+              </div>
+              <div className="matrixQuadrant zoneAudit">
+                <strong>Audit gate</strong>
+                <span>Check blockers before pushing</span>
+              </div>
+              <div className="matrixQuadrant zoneWatch">
+                <strong>Watch evidence</strong>
+                <span>Keep proof fresh</span>
+              </div>
+              <div className="matrixQuadrant zoneShip">
+                <strong>Push</strong>
+                <span>Execute low-pressure work</span>
+              </div>
+              {matrixItems.map((item) => (
+                <a
+                  key={item.project.id}
+                  className={cn(
+                    "matrixNode",
+                    `matrixNode-${item.decision}`,
+                    `is-${item.status}`,
+                    item.health.openHardGates && "hasGate"
+                  )}
+                  style={{ left: `${item.x}%`, bottom: `${item.y}%` }}
+                  href={hashForRoute({ view: "project", selectedProjectId: item.project.id })}
+                  title={`${item.project.name}: ${matrixDecisionLabel(item.decision)}, risk ${item.health.riskScore}, momentum ${item.health.momentumScore}, evidence ${formatFreshness(item.health.evidenceFreshnessDays)}`}
+                  aria-label={`${item.project.name}, ${matrixDecisionLabel(item.decision)}, momentum ${item.health.momentumScore}, risk ${item.health.riskScore}, status ${projectLifecycleLabel(item.project)}`}
+                >
+                  <span className="matrixNodeIndex">#{item.index + 1}</span>
+                  <span className="matrixNodeText">
+                    <span className="matrixNodeName">{compactProjectLabel(item.project.name)}</span>
+                    <span className="matrixNodeMeta">R{item.health.riskScore} · M{item.health.momentumScore}</span>
+                  </span>
+                  <span className="matrixNodeFlag">{matrixDecisionLabel(item.decision)}</span>
+                </a>
+              ))}
+              <span className="axis x">Momentum</span>
+              <span className="axis y">Risk</span>
+            </div>
+            <div className="matrixLegend">
+              <span><i className="legendLine legendRelative" /> Relative position inside this portfolio</span>
+              <span><i className="legendDot active" /> Active</span>
+              <span><i className="legendDot paused" /> Paused</span>
+              <span><i className="legendGate" /> Hard gate</span>
             </div>
           </CardContent>
         </Card>
       </div>
 
       <Card>
-        <CardHeader className="pb-3">
-          <CardTitle className="flex items-center gap-2"><ClipboardCheck className="h-4 w-4" /> Audit Signals</CardTitle>
-          <CardDescription>Current hard and warning signals across the portfolio.</CardDescription>
+        <CardHeader className="compactCardHeader">
+          <div className="cardHeaderLine">
+            <CardTitle className="flex items-center gap-2"><ClipboardCheck className="h-4 w-4" /> Audit Signals</CardTitle>
+            <Badge variant={openHardGates ? "destructive" : "success"} className="iconBadge"><ShieldAlert />{openHardGates}</Badge>
+          </div>
         </CardHeader>
         <CardContent>
-          <SignalList gates={gates.slice(0, 7)} />
+          <SignalList gates={gates.slice(0, 7)} compact />
         </CardContent>
       </Card>
     </section>
@@ -2373,6 +2637,7 @@ function CreateProjectSheet({ onCreate }: { onCreate: (values: ProjectCreateValu
 
 function ProjectWorkspace({
   project,
+  workItems,
   projects,
   baseline,
   baselineChangeSet,
@@ -2389,12 +2654,14 @@ function ProjectWorkspace({
   onShapeUpBetApprove,
   onShapeUpConvert,
   onWorkItemCreate,
+  onWorkItemRepeatRuleUpdate,
   onDependencyCreate,
   onEvidenceCreate,
   onActualRecord,
   onProjectWorkFinish,
   onProjectComplete,
   onProjectArchive,
+  onProjectDelete,
   onBaselineCapture,
   onChangeSetStatus,
   onGateClear,
@@ -2402,6 +2669,7 @@ function ProjectWorkspace({
   onDependencyRemove
 }: {
   project: Project;
+  workItems: WorkItem[];
   projects: Project[];
   baseline?: Baseline;
   baselineChangeSet?: ChangeSet;
@@ -2418,12 +2686,14 @@ function ProjectWorkspace({
   onShapeUpBetApprove: (projectId: string) => void;
   onShapeUpConvert: (projectId: string) => void;
   onWorkItemCreate: (projectId: string, values: WorkItemCreateValues) => void;
+  onWorkItemRepeatRuleUpdate: (projectId: string, workItemId: string, repeatRule?: RepeatRule) => void;
   onDependencyCreate: (projectId: string, values: DependencyCreateValues) => void;
   onEvidenceCreate: (projectId: string, values: EvidenceCreateValues) => void;
   onActualRecord: (projectId: string, workItemId: string, values: ActualRecordValues) => void;
   onProjectWorkFinish: (projectId: string) => void;
   onProjectComplete: (projectId: string) => void;
   onProjectArchive: (projectId: string) => void;
+  onProjectDelete: (projectId: string) => void;
   onBaselineCapture: () => void;
   onChangeSetStatus: (changeSetId: string, status: ChangeSet["status"]) => void;
   onGateClear: (gate: AuditGate, rationale: string) => void;
@@ -2435,12 +2705,13 @@ function ProjectWorkspace({
   const latestEvidence = [...evidence].sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
   const shapeUpLocked = isShapeUpProject(project) && !isShapeUpBet(project);
   const shapeUpGanttEmpty = isShapeUpBet(project) && schedule.items.length === 0;
+  const canDeleteProject = workItems.length === 0;
 
   return (
-    <section className="grid gap-4">
+    <section className="grid gap-3">
       <Card>
-        <CardContent className="grid gap-4 p-4 lg:grid-cols-[minmax(260px,0.7fr)_minmax(0,1.3fr)]">
-          <div className="space-y-3">
+        <CardContent className="grid gap-3 p-3 lg:grid-cols-[minmax(260px,0.7fr)_minmax(0,1.3fr)]">
+          <div className="space-y-2">
             <NativeSelectField
               label="Project"
               value={project.id}
@@ -2456,13 +2727,18 @@ function ProjectWorkspace({
               testId="project-status-selector"
             />
             <div className="flex flex-wrap gap-2">
-              <Badge variant="secondary">{project.mode}</Badge>
-              {isProjectArchived(project) && <Badge variant="outline">Archived</Badge>}
-              <Badge variant="outline">Horizon {project.horizon.slice(0, 10)}</Badge>
-              <Badge variant={blockingGate ? "destructive" : "success"}>{blockingGate ? "Hard gate" : "No blocker"}</Badge>
+              <Badge variant="secondary" className="iconBadge" title="Project mode"><Workflow />{project.mode}</Badge>
+              {isProjectArchived(project) && <Badge variant="outline" className="iconBadge" title="Archived"><Archive />archived</Badge>}
+              <Badge variant="outline" className="iconBadge" title="Horizon"><CalendarClock />{project.horizon.slice(5, 10)}</Badge>
+              <Badge variant={blockingGate ? "destructive" : "success"} className="iconBadge" title={blockingGate?.reason ?? "No blocker"}>{blockingGate ? <Lock /> : <CheckCircle2 />}{blockingGate ? "gate" : "clear"}</Badge>
             </div>
+            {canDeleteProject && (
+              <Button type="button" variant="destructive" size="icon" onClick={() => onProjectDelete(project.id)} aria-label="Delete empty project" title="Delete empty project" data-testid="project-delete-empty">
+                <Trash2 />
+              </Button>
+            )}
           </div>
-          <div className="grid gap-3 md:grid-cols-3">
+          <div className="grid gap-2 md:grid-cols-3">
             <SummaryTile label={next ? `${scheduleTiming(next)} action` : "Next action"} value={next?.workItem.title ?? "No open scheduled work"} detail={next ? `${formatScheduleRange(next)} / ${next.isCritical ? "critical path" : "non-critical"}` : "Review baselines before adding more work."} />
             <SummaryTile label="Audit state" value={blockingGate ? "Blocked by hard gate" : "No hard blocker"} detail={blockingGate?.reason ?? "Warnings still need review before milestone closure."} tone={blockingGate ? "danger" : "default"} />
             <SummaryTile label="Evidence" value={formatFreshness(health?.evidenceFreshnessDays)} detail={latestEvidence?.summary ?? "Attach evidence before marking the next milestone complete."} />
@@ -2473,7 +2749,10 @@ function ProjectWorkspace({
       <Card>
         <CardHeader>
           <CardTitle>{project.northStar}</CardTitle>
-          <CardDescription>{project.currentOutcome}</CardDescription>
+          <div className="compactBadgeRow">
+            <Badge variant="outline" className="iconBadge" title={project.currentOutcome}><Target />outcome</Badge>
+            <Badge variant="secondary" className="iconBadge" title={project.directionCard?.userProblem ?? project.currentOutcome}><FileText />brief</Badge>
+          </div>
         </CardHeader>
         <CardContent>
           <DirectionCardPanel project={project} onSave={(directionCard) => onDirectionCardUpdate(project.id, directionCard)} />
@@ -2488,8 +2767,9 @@ function ProjectWorkspace({
       />
 
       <Tabs defaultValue="plan" className="w-full">
-        <TabsList className="grid w-full grid-cols-5 lg:w-auto">
+        <TabsList className="grid w-full grid-cols-3 sm:grid-cols-6 lg:w-auto">
           <TabsTrigger value="plan">Plan</TabsTrigger>
+          <TabsTrigger value="recurring">Recurring</TabsTrigger>
           <TabsTrigger value="evidence">Evidence</TabsTrigger>
           <TabsTrigger value="audit">Audit</TabsTrigger>
           <TabsTrigger value="baselines">Baselines</TabsTrigger>
@@ -2497,9 +2777,14 @@ function ProjectWorkspace({
         </TabsList>
         <TabsContent value="plan" className="grid gap-4 xl:grid-cols-[minmax(320px,0.78fr)_minmax(0,1.22fr)]">
           <Card>
-            <CardHeader className="pb-3">
-              <CardTitle className="flex items-center gap-2"><Workflow className="h-4 w-4" /> Outline</CardTitle>
-              <CardDescription>WBS, status, evidence, and float.</CardDescription>
+            <CardHeader className="compactCardHeader">
+              <div className="cardHeaderLine">
+                <CardTitle className="flex items-center gap-2"><Workflow className="h-4 w-4" /> Outline</CardTitle>
+                <div className="cardHeaderBadges">
+                  <Badge variant="outline" className="iconBadge" title="Work items"><Layers3 />{schedule.items.length}</Badge>
+                  <Badge variant={gates.length ? "warning" : "success"} className="iconBadge" title="Open gates"><Lock />{gates.length}</Badge>
+                </div>
+              </div>
             </CardHeader>
             <CardContent className="space-y-4">
               <WorkItemComposer
@@ -2526,19 +2811,23 @@ function ProjectWorkspace({
           </Card>
           <div className="grid gap-4">
             <Card id="project-gantt">
-              <CardHeader className="flex-row items-start justify-between gap-3 pb-2">
+              <CardHeader className="flex-row items-start justify-between gap-3 pb-2 compactCardHeader">
                 <div>
                   <CardTitle className="flex items-center gap-2"><CalendarClock className="h-4 w-4" /> Gantt</CardTitle>
-                  <CardDescription>Dependencies, baseline, critical path, and minimap.</CardDescription>
+                  <div className="compactBadgeRow">
+                    <Badge variant="outline" className="iconBadge" title="Dependencies"><Network />{dependencies.length}</Badge>
+                    <Badge variant={baseline ? baselineApproved ? "success" : "warning" : "outline"} className="iconBadge" title={baseline ? `Baseline: ${baselineApproved ? "approved" : "pending"}` : "No baseline"}>{baseline ? <CheckCircle2 /> : <Archive />}{baseline ? baselineApproved ? "B" : "!" : "-"}</Badge>
+                    <Badge variant="outline" className="iconBadge" title="Critical path"><AlertTriangle />{schedule.items.filter((item) => item.isCritical).length}</Badge>
+                  </div>
                 </div>
                 <Sheet>
                   <SheetTrigger asChild>
-                    <Button variant="outline" size="sm"><Network /> Network</Button>
+                    <Button variant="outline" size="icon" title="Network graph" aria-label="Network graph"><Network /></Button>
                   </SheetTrigger>
                   <SheetContent className="w-[92vw] sm:max-w-3xl">
                     <SheetHeader>
                       <SheetTitle>Network Graph</SheetTitle>
-                      <SheetDescription>Secondary dependency view for {project.name}.</SheetDescription>
+                      <SheetDescription>{project.name}</SheetDescription>
                     </SheetHeader>
                     <div className="mt-4">
                       <NetworkGraph items={schedule.items} dependencies={dependencies} />
@@ -2577,13 +2866,13 @@ function ProjectWorkspace({
               </CardContent>
             </Card>
             <Card>
-              <CardHeader className="pb-3">
+              <CardHeader className="compactCardHeader">
                 <CardTitle className="flex items-center gap-2"><PanelRight className="h-4 w-4" /> Inspector</CardTitle>
               </CardHeader>
-            <CardContent className="grid gap-3 md:grid-cols-3">
-                <SummaryTile label="Critical path" value={`${schedule.items.filter((item) => item.isCritical).length} items`} detail="Current scheduled critical chain" />
-                <SummaryTile label="Diagnostics" value={String(schedule.diagnostics.length)} detail="Scheduler messages" />
-                <SummaryTile label="Open gates" value={String(gates.length)} detail="Audit pressure on this project" tone={gates.length ? "danger" : "default"} />
+            <CardContent className="grid gap-2 md:grid-cols-3">
+                <SummaryTile label="CP" value={String(schedule.items.filter((item) => item.isCritical).length)} detail="" />
+                <SummaryTile label="Diag" value={String(schedule.diagnostics.length)} detail="" />
+                <SummaryTile label="Gates" value={String(gates.length)} detail="" tone={gates.length ? "danger" : "default"} />
                 <TaskProgressPanel projectId={project.id} items={schedule.items.map((item) => item.workItem)} onRecord={onActualRecord} />
             </CardContent>
           </Card>
@@ -2598,11 +2887,30 @@ function ProjectWorkspace({
           />
         </div>
       </TabsContent>
+        <TabsContent id="recurring" value="recurring">
+          <Card>
+            <CardHeader className="compactCardHeader">
+              <div className="cardHeaderLine">
+                <CardTitle className="flex items-center gap-2"><RefreshCw className="h-4 w-4" /> Recurring Work</CardTitle>
+                <Badge variant="outline" className="iconBadge" title="Recurring rules"><RefreshCw />{workItems.filter((item) => item.repeatRule).length}</Badge>
+              </div>
+            </CardHeader>
+            <CardContent>
+              <RecurringTasksPanel
+                project={project}
+                items={workItems}
+                onRepeatRuleUpdate={(workItemId, repeatRule) => onWorkItemRepeatRuleUpdate(project.id, workItemId, repeatRule)}
+              />
+            </CardContent>
+          </Card>
+        </TabsContent>
         <TabsContent value="evidence">
           <Card>
-            <CardHeader>
-              <CardTitle>Evidence</CardTitle>
-              <CardDescription>Manual and imported evidence linked to this project.</CardDescription>
+            <CardHeader className="compactCardHeader">
+              <div className="cardHeaderLine">
+                <CardTitle className="flex items-center gap-2"><FileText className="h-4 w-4" /> Evidence</CardTitle>
+                <Badge variant="outline" className="iconBadge" title="Linked evidence"><FileText />{evidence.length}</Badge>
+              </div>
             </CardHeader>
             <CardContent className="space-y-4">
               <EvidenceComposer projectId={project.id} items={schedule.items.map((item) => item.workItem)} onCreate={onEvidenceCreate} />
@@ -2612,12 +2920,14 @@ function ProjectWorkspace({
         </TabsContent>
         <TabsContent value="audit">
           <Card>
-            <CardHeader>
-              <CardTitle>Audit Gates</CardTitle>
-              <CardDescription>Hard gates block only key decisions.</CardDescription>
+            <CardHeader className="compactCardHeader">
+              <div className="cardHeaderLine">
+                <CardTitle className="flex items-center gap-2"><ShieldAlert className="h-4 w-4" /> Audit Gates</CardTitle>
+                <Badge variant={gates.some((gate) => gate.severity === "hard" && gate.status !== "cleared") ? "destructive" : "success"} className="iconBadge" title="Hard gates"><Lock />{gates.filter((gate) => gate.severity === "hard" && gate.status !== "cleared").length}</Badge>
+              </div>
             </CardHeader>
             <CardContent>
-              <SignalList gates={gates} onClear={onGateClear} />
+              <SignalList gates={gates} onClear={onGateClear} compact />
             </CardContent>
           </Card>
         </TabsContent>
@@ -2627,7 +2937,10 @@ function ProjectWorkspace({
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div>
                   <CardTitle>Baseline</CardTitle>
-                  <CardDescription>{baseline ? `${baselineApproved ? "Approved" : "Pending approval"}: ${baseline.name}, captured ${baseline.capturedAt.slice(0, 10)}` : "No baseline captured."}</CardDescription>
+                  <div className="compactBadgeRow">
+                    <Badge variant={baseline ? baselineApproved ? "success" : "warning" : "outline"} className="iconBadge" title={baseline?.name ?? "No baseline"}>{baseline ? <CheckCircle2 /> : <Archive />}{baseline ? baselineApproved ? "approved" : "pending" : "none"}</Badge>
+                    {baseline && <Badge variant="outline" className="iconBadge" title="Captured"><CalendarClock />{baseline.capturedAt.slice(5, 10)}</Badge>}
+                  </div>
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
                   {baseline && <Badge variant={baselineApproved ? "success" : "warning"}>{baselineApproved ? "approved" : "pending"}</Badge>}
@@ -2648,9 +2961,11 @@ function ProjectWorkspace({
         </TabsContent>
         <TabsContent value="reports">
           <Card>
-            <CardHeader>
-              <CardTitle>Project Report Snapshot</CardTitle>
-              <CardDescription>Use Reports for export; this tab keeps key values in project context.</CardDescription>
+            <CardHeader className="compactCardHeader">
+              <div className="cardHeaderLine">
+                <CardTitle>Project Report Snapshot</CardTitle>
+                <Badge variant="outline" className="iconBadge" title="Project report"><FileDown />local</Badge>
+              </div>
             </CardHeader>
             <CardContent className="grid gap-3 md:grid-cols-3">
               <SummaryTile label="Finish p50" value={runMonteCarlo(project, schedule.items.map((item) => item.workItem), dependencies, 120, 3).p50Finish.slice(0, 10)} detail="Seeded local simulation" />
@@ -2681,33 +2996,61 @@ function DirectionCardPanel({ project, onSave }: { project: Project; onSave: (di
   const update = (patch: Partial<DirectionCard>) => setDraft((current) => ({ ...current, ...patch }));
   return (
     <form
-      className="grid gap-3"
+      className="directionCompactForm"
       onSubmit={(event) => {
         event.preventDefault();
         onSave(draft);
       }}
     >
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div>
-          <h3 className="text-sm font-semibold">Direction Card</h3>
-          <p className="text-xs text-muted-foreground">Project-level audit gates depend on these fields.</p>
+      <div className="directionToolbar">
+        <div className="min-w-0">
+          <h3><FileText size={15} />Direction Card</h3>
+          <div className="directionBadges">
+            <Badge variant="outline" className="iconBadge" title="Target user"><Target />{draft.targetUser || "user"}</Badge>
+            <Badge variant="outline" className="iconBadge" title="Timebox"><Timer />{draft.timeboxDays}d</Badge>
+            <Badge variant={draft.successMetric ? "success" : "warning"} className="iconBadge" title="Success metric"><CheckCircle2 />metric</Badge>
+          </div>
         </div>
-        <Button type="submit" size="sm">Save direction</Button>
+        <Button type="submit" size="icon" title="Save direction" aria-label="Save direction"><Save /></Button>
       </div>
-      <div className="grid gap-3 md:grid-cols-2">
-        <SettingsInput label="Target user" name={`target-user-${project.id}`} value={draft.targetUser} onChange={(value) => update({ targetUser: value })} placeholder="Who is this for?" autoComplete="off" />
-        <SettingsInput label="Business goal" name={`business-goal-${project.id}`} value={draft.businessGoal} onChange={(value) => update({ businessGoal: value })} placeholder="Why does it matter?" autoComplete="off" />
-        <SettingsInput label="Core hypothesis" name={`hypothesis-${project.id}`} value={draft.coreHypothesis} onChange={(value) => update({ coreHypothesis: value })} placeholder="What must be proven?" autoComplete="off" />
-        <SettingsInput label="Success metric" name={`success-${project.id}`} value={draft.successMetric} onChange={(value) => update({ successMetric: value })} placeholder="What evidence means continue?" autoComplete="off" />
-        <SettingsInput label="Failure condition" name={`failure-${project.id}`} value={draft.failureCondition} onChange={(value) => update({ failureCondition: value })} placeholder="What means narrow/pivot/stop?" autoComplete="off" />
-        <SettingsInput label="Validation method" name={`validation-${project.id}`} value={draft.validationMethod} onChange={(value) => update({ validationMethod: value })} placeholder="How will evidence be checked?" autoComplete="off" />
-        <SettingsInput label="Opportunity cost" name={`opportunity-${project.id}`} value={draft.opportunityCost} onChange={(value) => update({ opportunityCost: value })} placeholder="What else is not being done?" autoComplete="off" />
-        <label className="block">
-          <span className="text-sm font-medium">Timebox days</span>
-          <Input className="mt-2" type="number" min={1} max={365} value={draft.timeboxDays} onChange={(event) => update({ timeboxDays: Number(event.target.value) || 1 })} />
+      <div className="directionGrid">
+        <label className="directionField">
+          <span><Target size={13} />User</span>
+          <Input name={`target-user-${project.id}`} value={draft.targetUser} onChange={(event) => update({ targetUser: event.target.value })} placeholder="Who" autoComplete="off" aria-label="Target user" />
+        </label>
+        <label className="directionField">
+          <span><Workflow size={13} />Goal</span>
+          <Input name={`business-goal-${project.id}`} value={draft.businessGoal} onChange={(event) => update({ businessGoal: event.target.value })} placeholder="Why" autoComplete="off" aria-label="Business goal" />
+        </label>
+        <label className="directionField">
+          <span><Zap size={13} />Hypothesis</span>
+          <Input name={`hypothesis-${project.id}`} value={draft.coreHypothesis} onChange={(event) => update({ coreHypothesis: event.target.value })} placeholder="Must be true" autoComplete="off" aria-label="Core hypothesis" />
+        </label>
+        <label className="directionField">
+          <span><CheckCircle2 size={13} />Metric</span>
+          <Input name={`success-${project.id}`} value={draft.successMetric} onChange={(event) => update({ successMetric: event.target.value })} placeholder="Continue signal" autoComplete="off" aria-label="Success metric" />
+        </label>
+        <label className="directionField">
+          <span><AlertTriangle size={13} />Failure</span>
+          <Input name={`failure-${project.id}`} value={draft.failureCondition} onChange={(event) => update({ failureCondition: event.target.value })} placeholder="Stop signal" autoComplete="off" aria-label="Failure condition" />
+        </label>
+        <label className="directionField">
+          <span><ClipboardCheck size={13} />Validate</span>
+          <Input name={`validation-${project.id}`} value={draft.validationMethod} onChange={(event) => update({ validationMethod: event.target.value })} placeholder="How checked" autoComplete="off" aria-label="Validation method" />
+        </label>
+        <label className="directionField">
+          <span><Timer size={13} />Timebox</span>
+          <Input type="number" min={1} max={365} value={draft.timeboxDays} onChange={(event) => update({ timeboxDays: Number(event.target.value) || 1 })} aria-label="Timebox days" />
+        </label>
+        <label className="directionField">
+          <span><Archive size={13} />Cost</span>
+          <Input name={`opportunity-${project.id}`} value={draft.opportunityCost} onChange={(event) => update({ opportunityCost: event.target.value })} placeholder="Tradeoff" autoComplete="off" aria-label="Opportunity cost" />
+        </label>
+        <label className="directionField directionFieldWide">
+          <span><FileText size={13} />Problem</span>
+          <textarea value={draft.userProblem} onChange={(event) => update({ userProblem: event.target.value })} placeholder="User problem" aria-label="User problem" />
         </label>
       </div>
-      <FormTextarea label="User problem" value={draft.userProblem} onChange={(value) => update({ userProblem: value })} placeholder="Describe the problem in plain language." />
     </form>
   );
 }
@@ -2926,9 +3269,9 @@ function ProjectCompletionPanel({
   ));
   const readyToComplete = incompleteItems.length === 0 && openHardGates.length === 0 && keyItemsMissingEvidence.length === 0;
   const completionBlockers = [
-    incompleteItems.length ? `${incompleteItems.length} open work item${incompleteItems.length === 1 ? "" : "s"} still below 100%. First: ${incompleteItems[0]?.title}.` : undefined,
-    keyItemsMissingEvidence.length ? `${keyItemsMissingEvidence.length} key/evidence-required item${keyItemsMissingEvidence.length === 1 ? "" : "s"} need linked evidence. First: ${keyItemsMissingEvidence[0]?.title}.` : undefined,
-    openHardGates.length ? `${openHardGates.length} hard gate${openHardGates.length === 1 ? "" : "s"} still need review. First: ${openHardGates[0]?.reason}` : undefined
+    incompleteItems.length ? `${incompleteItems.length} open / first: ${incompleteItems[0]?.title}` : undefined,
+    keyItemsMissingEvidence.length ? `${keyItemsMissingEvidence.length} evidence / first: ${keyItemsMissingEvidence[0]?.title}` : undefined,
+    openHardGates.length ? `${openHardGates.length} gates / first: ${openHardGates[0]?.reason}` : undefined
   ].filter(Boolean);
   const archived = isProjectArchived(project);
   const lifecycleStatus = projectLifecycleStatus(project);
@@ -2941,44 +3284,233 @@ function ProjectCompletionPanel({
 
   return (
     <Card id="project-completion">
-      <CardHeader className="pb-3">
+      <CardHeader className="compactCardHeader">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <CardTitle className="flex items-center gap-2"><CheckCircle2 className="h-4 w-4" /> Completion Gate</CardTitle>
-            <CardDescription>Done records verified completion. Archive removes the project from active planning without changing completion status.</CardDescription>
           </div>
           <Badge variant={badgeVariant}>{badgeLabel}</Badge>
         </div>
       </CardHeader>
       <CardContent className="grid gap-3">
         <div className="grid gap-2 md:grid-cols-3">
-          <SummaryTile label="Open work" value={String(incompleteItems.length)} detail={incompleteItems[0]?.title ?? "All non-phase work is complete."} tone={incompleteItems.length ? "warning" : "default"} />
-          <SummaryTile label="Missing evidence" value={String(keyItemsMissingEvidence.length)} detail={keyItemsMissingEvidence[0]?.title ?? "Key and evidence-required work is linked."} tone={keyItemsMissingEvidence.length ? "danger" : "default"} />
-          <SummaryTile label="Hard gates" value={String(openHardGates.length)} detail={openHardGates[0]?.reason ?? "No hard gate is open."} tone={openHardGates.length ? "danger" : "default"} />
+          <SummaryTile label="Open" value={String(incompleteItems.length)} detail={incompleteItems[0]?.title ?? ""} tone={incompleteItems.length ? "warning" : "default"} />
+          <SummaryTile label="Evidence" value={String(keyItemsMissingEvidence.length)} detail={keyItemsMissingEvidence[0]?.title ?? ""} tone={keyItemsMissingEvidence.length ? "danger" : "default"} />
+          <SummaryTile label="Gates" value={String(openHardGates.length)} detail={openHardGates[0]?.reason ?? ""} tone={openHardGates.length ? "danger" : "default"} />
         </div>
         {completionBlockers.length > 0 && (
-          <div className="rounded-lg border bg-muted/25 p-3 text-sm">
-            <div className="font-medium">Set project done is blocked by:</div>
-            <ul className="mt-2 grid gap-1 text-muted-foreground">
-              {completionBlockers.map((blocker) => <li key={blocker}>- {blocker}</li>)}
+          <div className="completionBlockers">
+            <Badge variant="warning" className="iconBadge"><Lock />Blocked</Badge>
+            <ul>
+              {completionBlockers.map((blocker) => <li key={blocker}>{blocker}</li>)}
             </ul>
           </div>
         )}
         <div className="flex flex-wrap gap-2">
           <Button type="button" variant="outline" onClick={onFinishWork} disabled={!incompleteItems.length} title={incompleteItems.length ? `Mark ${incompleteItems.length} open work item${incompleteItems.length === 1 ? "" : "s"} complete.` : "No open work remains."} data-testid="lifecycle-finish-open-work">
             <CheckCircle2 />
-            Finish all open work
+            Finish open
           </Button>
           <Button type="button" onClick={onComplete} disabled={setDoneDisabled} title={setDoneDisabled ? doneDisabledReason : "Mark this project as verified done."} data-testid="lifecycle-set-done">
-            Set project done
+            Done
           </Button>
           <Button type="button" variant="outline" onClick={onArchive} disabled={archived} title={archived ? "Project is already archived." : "Close this project and remove it from active planning."} data-testid="lifecycle-archive-project">
             <Archive />
-            Archive / close
+            Archive
           </Button>
         </div>
       </CardContent>
     </Card>
+  );
+}
+
+function RecurringTasksPanel({
+  project,
+  items,
+  onRepeatRuleUpdate
+}: {
+  project: Project;
+  items: WorkItem[];
+  onRepeatRuleUpdate: (workItemId: string, repeatRule?: RepeatRule) => void;
+}) {
+  const eligibleItems = items.filter((item) => item.kind !== "phase");
+  const recurringItems = eligibleItems.filter((item) => item.repeatRule);
+  const [selectedId, setSelectedId] = useState(eligibleItems[0]?.id ?? "");
+  const selected = eligibleItems.find((item) => item.id === selectedId) ?? eligibleItems[0];
+  const [draft, setDraft] = useState<RepeatRuleDraft>(() => draftFromRepeatRule(selected, project.start));
+
+  useEffect(() => {
+    if (!eligibleItems.length) {
+      setSelectedId("");
+      return;
+    }
+    setSelectedId((current) => eligibleItems.some((item) => item.id === current) ? current : eligibleItems[0].id);
+  }, [project.id, eligibleItems.length]);
+
+  useEffect(() => {
+    setDraft(draftFromRepeatRule(selected, project.start));
+  }, [project.id, selected?.id, selected?.repeatRule]);
+
+  const update = (patch: Partial<RepeatRuleDraft>) => setDraft((current) => ({ ...current, ...patch }));
+  const previewRule = repeatRuleFromDraft(draft);
+  const previewItem = selected && previewRule ? { ...selected, repeatRule: previewRule } : undefined;
+  const preview = previewItem ? generateRecurringOccurrences(previewItem, project.start, Math.min(10, Math.max(1, draft.count))) : [];
+
+  if (!eligibleItems.length) {
+    return (
+      <div className="emptyState">
+        <RefreshCw />
+        <span>No work items yet.</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="recurringGrid">
+      <div className="recurringPanel">
+        <div className="recurringPanelHeader">
+          <div>
+            <strong>{recurringItems.length} recurring</strong>
+            <span>{eligibleItems.length} eligible work items</span>
+          </div>
+          <Badge variant={recurringItems.length ? "success" : "outline"}><RefreshCw />{recurringItems.length}</Badge>
+        </div>
+        <div className="recurringTaskList">
+          {recurringItems.length ? recurringItems.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              className={cn("recurringTaskButton", selected?.id === item.id && "active")}
+              onClick={() => setSelectedId(item.id)}
+            >
+              <span>
+                <strong>{item.title}</strong>
+                <em>{item.outline} / {item.kind}</em>
+              </span>
+              <span className="recurringTaskBadges">
+                <Badge variant="secondary">{repeatCadenceLabel(item.repeatRule)}</Badge>
+                <Badge variant="outline">{repeatStartModeLabel(item.repeatRule)}</Badge>
+              </span>
+            </button>
+          )) : (
+            <div className="recurringEmpty">No recurring rules configured.</div>
+          )}
+        </div>
+      </div>
+
+      <form
+        className="recurringPanel"
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (!selected) return;
+          onRepeatRuleUpdate(selected.id, repeatRuleFromDraft(draft));
+        }}
+      >
+        <div className="recurringPanelHeader">
+          <div>
+            <strong>Rule</strong>
+            <span>{selected?.title}</span>
+          </div>
+          <ToggleField label="Recurring" checked={draft.enabled} onChange={(checked) => update({ enabled: checked })} />
+        </div>
+        <div className="recurringFormGrid">
+          <NativeSelectField
+            label="Work item"
+            value={selected?.id ?? ""}
+            onChange={setSelectedId}
+            options={eligibleItems.map((item) => ({ value: item.id, label: `${item.outline} ${item.title}` }))}
+            testId="recurring-work-item"
+          />
+          <NativeSelectField
+            label="Cadence"
+            value={draft.cadence}
+            onChange={(value) => update({ cadence: value as RepeatCadenceKind })}
+            options={[
+              { value: "every-n-days", label: "Every n days" },
+              { value: "weekly", label: "Weekly" },
+              { value: "monthly", label: "Monthly" }
+            ]}
+            testId="recurring-cadence"
+          />
+          {draft.cadence === "every-n-days" && (
+            <label className="block">
+              <span className="text-sm font-medium">Days</span>
+              <Input className="mt-2" type="number" min={1} step={1} value={draft.everyDays} onChange={(event) => update({ everyDays: Math.max(1, Math.round(Number(event.target.value) || 1)) })} />
+            </label>
+          )}
+          <NativeSelectField
+            label="Start mode"
+            value={draft.startMode}
+            onChange={(value) => update({ startMode: value as RepeatStartMode })}
+            options={[
+              { value: "fixed-time", label: "Fixed time" },
+              { value: "after-previous-finish", label: "After previous finish" }
+            ]}
+            testId="recurring-start-mode"
+          />
+          <SettingsInput
+            label={draft.startMode === "after-previous-finish" ? "First start date" : "Start date"}
+            name={`recurring-start-date-${project.id}`}
+            value={draft.startDate}
+            onChange={(value) => update({ startDate: value })}
+            placeholder="2026-07-06"
+            autoComplete="off"
+            testId="recurring-start-date"
+          />
+          <SettingsInput
+            label="Start time"
+            name={`recurring-start-time-${project.id}`}
+            value={draft.startTime}
+            onChange={(value) => update({ startTime: value })}
+            placeholder="09:00"
+            autoComplete="off"
+            testId="recurring-start-time"
+          />
+          <label className="block">
+            <span className="text-sm font-medium">Cycles</span>
+            <Input className="mt-2" type="number" min={1} step={1} value={draft.count} onChange={(event) => update({ count: Math.max(1, Math.round(Number(event.target.value) || 1)) })} />
+          </label>
+        </div>
+        <div className="recurringActions">
+          <Button type="submit" disabled={!selected}>
+            <Save />
+            Save rule
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            disabled={!selected?.repeatRule}
+            onClick={() => {
+              if (!selected) return;
+              onRepeatRuleUpdate(selected.id, undefined);
+              setDraft(draftFromRepeatRule({ ...selected, repeatRule: undefined }, project.start));
+            }}
+          >
+            Clear rule
+          </Button>
+          <Badge variant="outline">{draft.enabled ? (draft.startMode === "after-previous-finish" ? "rolling" : repeatCadenceLabel(previewRule)) : "off"}</Badge>
+        </div>
+        <div className="recurringPreview">
+          <div className="recurringPreviewHeader">
+            <strong>Preview</strong>
+            <span>{previewRule ? `${repeatCadenceLabel(previewRule)} / ${repeatStartModeLabel(previewRule)}` : "disabled"}</span>
+          </div>
+          {preview.length ? (
+            <div className="recurringOccurrenceList">
+              {preview.map((occurrence) => (
+                <div key={occurrence.index} className="recurringOccurrence">
+                  <Badge variant="secondary">#{occurrence.index}</Badge>
+                  <span>{formatShortDateTime(occurrence.start)}</span>
+                  <span>{formatShortDateTime(occurrence.finish)}</span>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="recurringEmpty">Enable recurring to preview cycles.</div>
+          )}
+        </div>
+      </form>
+    </div>
   );
 }
 
@@ -2991,6 +3523,7 @@ function WorkItemComposer({
   items: WorkItem[];
   onCreate: (projectId: string, values: WorkItemCreateValues) => void;
 }) {
+  const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState<WorkItemCreateValues>({
     title: "",
     kind: "task",
@@ -3008,89 +3541,100 @@ function WorkItemComposer({
   });
   const update = (patch: Partial<WorkItemCreateValues>) => setDraft((current) => ({ ...current, ...patch }));
   const parentOptions = items.filter((item) => item.kind === "phase");
+  const submitWorkItem = () => {
+    if (!draft.title.trim()) return;
+    onCreate(projectId, draft);
+    setDraft((current) => ({
+      ...current,
+      title: "",
+      kind: "task",
+      durationDays: 1,
+      effortHours: 2,
+      percentComplete: 0,
+      evidenceRequired: false,
+      isKeyTask: false,
+      isScopeExpansion: false,
+      isFastDelivery: false
+    }));
+    setOpen(false);
+  };
   return (
-    <form
-      className="rounded-lg border bg-muted/25 p-3"
-      onSubmit={(event) => {
-        event.preventDefault();
-        if (!draft.title.trim()) return;
-        onCreate(projectId, draft);
-        setDraft((current) => ({
-          ...current,
-          title: "",
-          kind: "task",
-          durationDays: 1,
-          effortHours: 2,
-          percentComplete: 0,
-          evidenceRequired: false,
-          isKeyTask: false,
-          isScopeExpansion: false,
-          isFastDelivery: false
-        }));
-      }}
-    >
-      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-        <div>
-          <strong className="text-sm">Add work item</strong>
-          <p className="text-xs text-muted-foreground">Create phases, tasks, milestones, or evidence-gated work.</p>
-        </div>
-        <Button type="submit" size="sm" disabled={!draft.title.trim()}><Plus />Add</Button>
-      </div>
-      <div className="grid gap-3 md:grid-cols-3">
-        <SettingsInput label="Title" name={`work-title-${projectId}`} value={draft.title} onChange={(value) => update({ title: value })} placeholder="Task or milestone title" autoComplete="off" />
-        <NativeSelectField
-          label="Kind"
-          value={draft.kind}
-          onChange={(value) => update({ kind: value as WorkItemKind })}
-          options={workItemKinds.map((kind) => ({ value: kind, label: kind }))}
-          testId="work-item-kind"
-        />
-        <NativeSelectField
-          label="Parent phase"
-          value={draft.parentId ?? "none"}
-          onChange={(value) => update({ parentId: value === "none" ? undefined : value })}
-          options={[{ value: "none", label: "No parent" }, ...parentOptions.map((item) => ({ value: item.id, label: `${item.outline} ${item.title}` }))]}
-          testId="work-item-parent"
-        />
-        <label className="block">
-          <span className="text-sm font-medium">Duration days</span>
-          <Input className="mt-2" type="number" min={0} step={0.25} value={draft.durationDays} onChange={(event) => update({ durationDays: Number(event.target.value) || 0 })} disabled={draft.kind === "milestone"} />
-        </label>
-        <label className="block">
-          <span className="text-sm font-medium">Effort hours</span>
-          <Input className="mt-2" type="number" min={0} step={0.25} value={draft.effortHours} onChange={(event) => update({ effortHours: Number(event.target.value) || 0 })} />
-        </label>
-        <NativeSelectField
-          label="Attention"
-          value={draft.attention}
-          onChange={(value) => update({ attention: value as WorkItemCreateValues["attention"] })}
-          options={[
-            { value: "deep", label: "deep" },
-            { value: "medium", label: "medium" },
-            { value: "shallow", label: "shallow" }
-          ]}
-          testId="work-item-attention"
-        />
-        <NativeSelectField
-          label="Date constraint"
-          value={draft.constraintMode}
-          onChange={(value) => update({ constraintMode: value as WorkItemCreateValues["constraintMode"] })}
-          options={[
-            { value: "none", label: "None" },
-            { value: "noEarlierThan", label: "No earlier than" },
-            { value: "fixedStart", label: "Fixed start" }
-          ]}
-          testId="work-item-constraint-mode"
-        />
-        <SettingsInput label="Constraint date" name={`constraint-date-${projectId}`} value={draft.constraintDate} onChange={(value) => update({ constraintDate: value })} placeholder="2026-07-01" autoComplete="off" />
-      </div>
-      <div className="mt-3 flex flex-wrap gap-3 text-sm">
-        <ToggleField label="Evidence required" checked={draft.evidenceRequired} onChange={(checked) => update({ evidenceRequired: checked })} />
-        <ToggleField label="Key task" checked={draft.isKeyTask} onChange={(checked) => update({ isKeyTask: checked })} />
-        <ToggleField label="Scope expansion" checked={draft.isScopeExpansion} onChange={(checked) => update({ isScopeExpansion: checked })} />
-        <ToggleField label="Fast delivery" checked={draft.isFastDelivery} onChange={(checked) => update({ isFastDelivery: checked })} />
-      </div>
-    </form>
+    <Sheet open={open} onOpenChange={setOpen}>
+      <SheetTrigger asChild>
+        <Button type="button" size="sm" className="outlineAddButton"><Plus />Add</Button>
+      </SheetTrigger>
+      <SheetContent className="w-[92vw] overflow-y-auto sm:max-w-2xl">
+        <SheetHeader>
+          <SheetTitle>Add work item</SheetTitle>
+          <SheetDescription>{items.length} items in this project</SheetDescription>
+        </SheetHeader>
+        <form
+          className="workItemSheetForm"
+          onSubmit={(event) => {
+            event.preventDefault();
+            submitWorkItem();
+          }}
+        >
+          <div className="grid gap-3 md:grid-cols-3">
+            <SettingsInput label="Title" name={`work-title-${projectId}`} value={draft.title} onChange={(value) => update({ title: value })} placeholder="Task or milestone title" autoComplete="off" />
+            <NativeSelectField
+              label="Kind"
+              value={draft.kind}
+              onChange={(value) => update({ kind: value as WorkItemKind })}
+              options={workItemKinds.map((kind) => ({ value: kind, label: kind }))}
+              testId="work-item-kind"
+            />
+            <NativeSelectField
+              label="Parent phase"
+              value={draft.parentId ?? "none"}
+              onChange={(value) => update({ parentId: value === "none" ? undefined : value })}
+              options={[{ value: "none", label: "No parent" }, ...parentOptions.map((item) => ({ value: item.id, label: `${item.outline} ${item.title}` }))]}
+              testId="work-item-parent"
+            />
+            <label className="block">
+              <span className="text-sm font-medium">Duration days</span>
+              <Input className="mt-2" type="number" min={0} step={0.25} value={draft.durationDays} onChange={(event) => update({ durationDays: Number(event.target.value) || 0 })} disabled={draft.kind === "milestone"} />
+            </label>
+            <label className="block">
+              <span className="text-sm font-medium">Effort hours</span>
+              <Input className="mt-2" type="number" min={0} step={0.25} value={draft.effortHours} onChange={(event) => update({ effortHours: Number(event.target.value) || 0 })} />
+            </label>
+            <NativeSelectField
+              label="Attention"
+              value={draft.attention}
+              onChange={(value) => update({ attention: value as WorkItemCreateValues["attention"] })}
+              options={[
+                { value: "deep", label: "deep" },
+                { value: "medium", label: "medium" },
+                { value: "shallow", label: "shallow" }
+              ]}
+              testId="work-item-attention"
+            />
+            <NativeSelectField
+              label="Date constraint"
+              value={draft.constraintMode}
+              onChange={(value) => update({ constraintMode: value as WorkItemCreateValues["constraintMode"] })}
+              options={[
+                { value: "none", label: "None" },
+                { value: "noEarlierThan", label: "No earlier than" },
+                { value: "fixedStart", label: "Fixed start" }
+              ]}
+              testId="work-item-constraint-mode"
+            />
+            <SettingsInput label="Constraint date" name={`constraint-date-${projectId}`} value={draft.constraintDate} onChange={(value) => update({ constraintDate: value })} placeholder="2026-07-01" autoComplete="off" />
+          </div>
+          <div className="mt-3 flex flex-wrap gap-3 text-sm">
+            <ToggleField label="Evidence required" checked={draft.evidenceRequired} onChange={(checked) => update({ evidenceRequired: checked })} />
+            <ToggleField label="Key task" checked={draft.isKeyTask} onChange={(checked) => update({ isKeyTask: checked })} />
+            <ToggleField label="Scope expansion" checked={draft.isScopeExpansion} onChange={(checked) => update({ isScopeExpansion: checked })} />
+            <ToggleField label="Fast delivery" checked={draft.isFastDelivery} onChange={(checked) => update({ isFastDelivery: checked })} />
+          </div>
+          <div className="mt-4 flex justify-end">
+            <Button type="submit" disabled={!draft.title.trim()}><Plus />Add</Button>
+          </div>
+        </form>
+      </SheetContent>
+    </Sheet>
   );
 }
 
@@ -3294,6 +3838,230 @@ function TaskProgressPanel({
   );
 }
 
+function CalendarView({
+  projects,
+  workItems,
+  schedules
+}: {
+  projects: Project[];
+  workItems: WorkItem[];
+  schedules: ScheduleResult[];
+}) {
+  const [monthStart, setMonthStart] = useState(() => monthStartIso(now));
+  const [selectedDay, setSelectedDay] = useState(now.slice(0, 10));
+  const [monthEventsOpen, setMonthEventsOpen] = useState(false);
+  const days = buildCalendarDays(monthStart);
+  const gridStart = `${days[0]}T00:00:00.000Z`;
+  const gridEnd = addSeconds(`${days[days.length - 1]}T00:00:00.000Z`, daySeconds);
+  const events = buildCalendarEvents(projects, workItems, schedules, gridStart, gridEnd);
+  const eventsByDay = new Map<string, CalendarEvent[]>();
+  for (const event of events) {
+    const day = event.start.slice(0, 10);
+    eventsByDay.set(day, [...(eventsByDay.get(day) ?? []), event]);
+  }
+  const monthEvents = events.filter((event) => isSameUtcMonth(event.start.slice(0, 10), monthStart));
+  const selectedEvents = eventsByDay.get(selectedDay) ?? [];
+  const monthEventPage = usePagedItems(monthEvents, 10);
+  const activeProjectCount = projects.filter((project) => !isProjectArchived(project)).length;
+  const selectedLabel = new Intl.DateTimeFormat("en", { day: "2-digit", month: "short", timeZone: "UTC", weekday: "short" }).format(new Date(`${selectedDay}T00:00:00.000Z`));
+
+  const changeMonth = (offset: number) => {
+    const nextMonth = addUtcMonths(monthStart, offset);
+    setMonthStart(nextMonth);
+    setSelectedDay(nextMonth.slice(0, 10));
+  };
+
+  const jumpToday = () => {
+    setMonthStart(monthStartIso(now));
+    setSelectedDay(now.slice(0, 10));
+  };
+
+  return (
+    <section className="grid gap-4">
+      <div className="calendarPageHeader">
+        <div>
+          <CardTitle className="flex items-center gap-2"><CalendarClock className="h-4 w-4" /> {monthLabel(monthStart)}</CardTitle>
+          <CardDescription>Scheduled work and recurring cycles across active projects.</CardDescription>
+        </div>
+        <div className="calendarControls">
+          <Button type="button" variant="outline" size="icon" aria-label="Previous month" title="Previous month" onClick={() => changeMonth(-1)}><ChevronLeft /></Button>
+          <Button type="button" variant="outline" onClick={jumpToday}>Today</Button>
+          <Button type="button" variant="outline" size="icon" aria-label="Next month" title="Next month" onClick={() => changeMonth(1)}><ChevronRight /></Button>
+        </div>
+      </div>
+
+      <div className="grid gap-3 md:grid-cols-4">
+        <SummaryTile
+          label="Month events"
+          value={String(monthEvents.length)}
+          detail={`${activeProjectCount} active projects visible`}
+          onClick={() => setMonthEventsOpen(true)}
+          ariaLabel={`Open ${monthEvents.length} month events`}
+        />
+        <SummaryTile label="Recurring" value={String(monthEvents.filter((event) => event.kind === "recurring").length)} detail="Generated from repeat rules" />
+        <SummaryTile label="Critical" value={String(monthEvents.filter((event) => event.critical).length)} detail="Scheduled critical path starts" tone={monthEvents.some((event) => event.critical) ? "warning" : "default"} />
+        <SummaryTile label="Selected day" value={String(selectedEvents.length)} detail={selectedLabel} />
+      </div>
+      <Sheet open={monthEventsOpen} onOpenChange={setMonthEventsOpen}>
+        <SheetContent className="w-[92vw] overflow-y-auto sm:max-w-xl">
+          <SheetHeader>
+            <SheetTitle>{monthLabel(monthStart)} events</SheetTitle>
+            <SheetDescription>{monthEvents.length} items across {activeProjectCount} active projects</SheetDescription>
+          </SheetHeader>
+          <div className="calendarAgenda monthEventSheetList">
+            {monthEvents.length ? monthEventPage.items.map((event) => (
+              <CalendarAgendaEvent key={event.id} event={event} />
+            )) : (
+              <div className="emptyState">
+                <CalendarClock />
+                <span>No calendar events this month.</span>
+              </div>
+            )}
+            <PaginationControls label="month events" {...monthEventPage} onPageChange={monthEventPage.setPage} />
+          </div>
+        </SheetContent>
+      </Sheet>
+
+      <div className="calendarWorkspace">
+        <Card>
+          <CardContent className="calendarMonthShell">
+            <div className="calendarWeekdays" aria-hidden="true">
+              {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((day) => <span key={day}>{day}</span>)}
+            </div>
+            <div className="calendarGrid" role="grid" aria-label={`${monthLabel(monthStart)} calendar`}>
+              {days.map((day) => {
+                const dayEvents = eventsByDay.get(day) ?? [];
+                const inMonth = isSameUtcMonth(day, monthStart);
+                const isSelected = day === selectedDay;
+                const isToday = day === now.slice(0, 10);
+                return (
+                  <button
+                    key={day}
+                    type="button"
+                    className={cn("calendarDay", !inMonth && "outsideMonth", isSelected && "selected", isToday && "today")}
+                    onClick={() => setSelectedDay(day)}
+                    aria-label={`${day}, ${dayEvents.length} event${dayEvents.length === 1 ? "" : "s"}`}
+                  >
+                    <span className="calendarDayTop">
+                      <strong>{Number(day.slice(8, 10))}</strong>
+                      {dayEvents.length > 0 && <Badge variant={dayEvents.some((event) => event.critical) ? "warning" : "secondary"}>{dayEvents.length}</Badge>}
+                    </span>
+                    <span className="calendarDayEvents">
+                      {dayEvents.slice(0, 3).map((event) => (
+                        <span key={event.id} className={cn("calendarEventChip", event.kind, event.critical && "critical")} title={`${event.projectName}: ${event.title}`}>
+                          {event.kind === "recurring" ? <RefreshCw /> : <CalendarClock />}
+                          <span>{event.title}</span>
+                        </span>
+                      ))}
+                      {dayEvents.length > 3 && <span className="calendarMore">+{dayEvents.length - 3}</span>}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="flex items-center gap-2"><PanelRight className="h-4 w-4" /> {selectedLabel}</CardTitle>
+            <CardDescription>{selectedEvents.length ? `${selectedEvents.length} scheduled item${selectedEvents.length === 1 ? "" : "s"}` : "No work starts on this day."}</CardDescription>
+          </CardHeader>
+          <CardContent className="calendarAgenda">
+            {selectedEvents.length ? selectedEvents.map((event) => (
+              <CalendarAgendaEvent key={event.id} event={event} />
+            )) : (
+              <div className="emptyState">
+                <CalendarClock />
+                <span>No calendar event starts here.</span>
+              </div>
+            )}
+            {selectedEvents.length === 0 && activeProjectCount > 0 && (
+              <div className="calendarQuietHint">
+                Pick another day or add scheduled / recurring work from a project.
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      </div>
+    </section>
+  );
+}
+
+function buildCalendarEvents(
+  projects: Project[],
+  workItems: WorkItem[],
+  schedules: ScheduleResult[],
+  windowStart: string,
+  windowEnd: string
+): CalendarEvent[] {
+  const projectById = new Map(projects.map((project) => [project.id, project]));
+  const events: CalendarEvent[] = [];
+
+  for (const schedule of schedules) {
+    const project = projectById.get(schedule.projectId);
+    if (!project || isProjectArchived(project)) continue;
+    for (const item of schedule.items) {
+      if (item.workItem.kind === "phase" || item.workItem.repeatRule) continue;
+      if (item.start < windowStart || item.start >= windowEnd) continue;
+      events.push({
+        id: `scheduled-${item.workItem.id}`,
+        kind: "scheduled",
+        projectId: project.id,
+        projectName: project.name,
+        title: item.workItem.title,
+        start: item.start,
+        finish: item.finish,
+        href: hashForRoute({ view: "project", selectedProjectId: project.id, target: "project-gantt" }),
+        critical: item.isCritical
+      });
+    }
+  }
+
+  for (const item of workItems) {
+    if (!item.repeatRule || item.kind === "phase") continue;
+    const project = projectById.get(item.projectId);
+    if (!project || isProjectArchived(project)) continue;
+    const occurrenceLimit = Math.min(90, Math.max(1, Math.round(item.repeatRule.count || 1)));
+    for (const occurrence of generateRecurringOccurrences(item, project.start, occurrenceLimit)) {
+      if (occurrence.start < windowStart || occurrence.start >= windowEnd) continue;
+      events.push({
+        id: `recurring-${item.id}-${occurrence.index}`,
+        kind: "recurring",
+        projectId: project.id,
+        projectName: project.name,
+        title: item.title,
+        start: occurrence.start,
+        finish: occurrence.finish,
+        href: hashForRoute({ view: "project", selectedProjectId: project.id, target: "recurring" }),
+        repeatLabel: repeatCadenceLabel(item.repeatRule)
+      });
+    }
+  }
+
+  return events.sort((a, b) => a.start.localeCompare(b.start) || a.projectName.localeCompare(b.projectName) || a.title.localeCompare(b.title));
+}
+
+function CalendarAgendaEvent({ event }: { event: CalendarEvent }) {
+  return (
+    <a className={cn("calendarAgendaItem", event.kind, event.critical && "critical")} href={event.href}>
+      <div className="calendarAgendaIcon">
+        {event.kind === "recurring" ? <RefreshCw /> : <CalendarClock />}
+      </div>
+      <div className="calendarAgendaBody">
+        <div className="calendarAgendaTitle">
+          <strong>{event.title}</strong>
+          <Badge variant={event.kind === "recurring" ? "outline" : event.critical ? "warning" : "secondary"}>
+            {event.kind === "recurring" ? event.repeatLabel ?? "repeat" : event.critical ? "critical" : "scheduled"}
+          </Badge>
+        </div>
+        <span>{event.projectName}</span>
+        <em>{formatShortDateTime(event.start)} / {formatShortDateTime(event.finish)}</em>
+      </div>
+    </a>
+  );
+}
+
 function TodayExecution({
   projects,
   schedules,
@@ -3335,65 +4103,85 @@ function TodayExecution({
         a.item.start.localeCompare(b.item.start)
       );
     });
-  const activeRows = rows.filter((row) => row.timing !== "Upcoming").slice(0, 8);
-  const upcomingRows = rows.filter((row) => row.timing === "Upcoming").slice(0, 4);
+  const activeRows = rows.filter((row) => row.timing !== "Upcoming");
+  const upcomingRows = rows.filter((row) => row.timing === "Upcoming");
+  const activeRowsPage = usePagedItems(activeRows, 8);
+  const upcomingRowsPage = usePagedItems(upcomingRows, 4);
 
   return (
-    <section className="grid gap-4 lg:grid-cols-2">
+    <section className="grid gap-3 lg:grid-cols-2">
       <Card id="critical-items">
-        <CardHeader className="pb-3">
-          <CardTitle className="flex items-center gap-2"><Timer className="h-4 w-4" /> Due or Overdue</CardTitle>
-          <CardDescription>Execution queue. Hard gates lock only key decisions.</CardDescription>
+        <CardHeader className="compactCardHeader">
+          <div className="cardHeaderLine">
+            <CardTitle className="flex items-center gap-2"><Timer className="h-4 w-4" /> Due or Overdue</CardTitle>
+            <div className="cardHeaderBadges">
+              <Badge variant={activeRows.length ? "warning" : "success"} className="iconBadge" title="Due or overdue work"><Timer />{activeRows.length}</Badge>
+              <Badge variant={activeRows.some((row) => row.gate) ? "destructive" : "outline"} className="iconBadge" title="Locked by hard gate"><Lock />{activeRows.filter((row) => row.gate).length}</Badge>
+            </div>
+          </div>
         </CardHeader>
-        <CardContent className="space-y-2">
-          {activeRows.length ? activeRows.map(({ item, project, gate, warningGate, timing }) => (
-            <article className={cn("grid gap-3 rounded-lg border bg-background p-3", gate && "border-destructive/35 bg-destructive/5")} key={item.workItem.id}>
-              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-              <div>
-                <strong className="block text-sm">{item.workItem.title}</strong>
-                <span className="text-xs text-muted-foreground">{project.name} / {timing}</span>
-                {gate && <span className="mt-1 flex items-center gap-1 text-xs font-medium text-destructive"><Lock size={13} />Locked: {gate.reason}</span>}
-                {!gate && warningGate && <span className="mt-1 flex items-center gap-1 text-xs font-medium text-amber-700"><AlertTriangle size={13} />Warning: {warningGate.reason}</span>}
+        <CardContent className="space-y-1.5">
+          {activeRows.length ? activeRowsPage.items.map(({ item, project, gate, warningGate, timing }) => (
+            <article className={cn("todayItem", gate && "isLocked")} key={item.workItem.id}>
+              <div className="todayItemMain">
+                <div className="min-w-0">
+                  <strong className="todayItemTitle">{item.workItem.title}</strong>
+                  <div className="todayItemMeta">
+                    <Badge variant="secondary" className="todayIconBadge todayProjectBadge" title={project.name}><Layers3 />{compactProjectCode(project.name)}</Badge>
+                    <Badge variant={timing === "Overdue" ? "destructive" : "outline"} className="todayIconBadge" title={timing}><Timer />{timing}</Badge>
+                    {item.isCritical && <Badge variant="destructive" className="todayIconBadge" title="Critical path"><AlertTriangle />CP</Badge>}
+                    <Badge variant="outline" className="todayIconBadge" title={formatScheduleRange(item)}><CalendarClock />{formatCompactScheduleRange(item)}</Badge>
+                    <Badge variant="secondary" className="todayIconBadge" title="Assigned work"><Timer />{formatAssignmentHours(item)}h</Badge>
+                  </div>
+                  {gate && <span className="todayInlineAlert dangerText"><Lock size={13} />{gate.reason}</span>}
+                  {!gate && warningGate && <span className="todayInlineAlert warnReason"><AlertTriangle size={13} />{warningGate.reason}</span>}
+                </div>
+                {!gate && <InlineActualForm projectId={project.id} item={item.workItem} onRecord={onActualRecord} />}
               </div>
-              <div className="flex flex-wrap items-center gap-2 text-xs">
-                {item.isCritical && <Badge variant="destructive">critical</Badge>}
-                <Badge variant="outline">{formatScheduleRange(item)}</Badge>
-                <Badge variant="secondary">{formatAssignmentHours(item)}h</Badge>
-              </div>
-              </div>
-              {!gate && <InlineActualForm projectId={project.id} item={item.workItem} onRecord={onActualRecord} />}
             </article>
-          )) : <div className="rounded-lg border border-dashed p-6 text-sm text-muted-foreground">No overdue or due-today work.</div>}
+          )) : <div className="compactEmptyState"><CheckCircle2 />Clear</div>}
+          <PaginationControls label="due work" {...activeRowsPage} onPageChange={activeRowsPage.setPage} />
         </CardContent>
       </Card>
       <Card id="today-upcoming">
-        <CardHeader className="pb-3">
-          <CardTitle className="flex items-center gap-2"><CalendarClock className="h-4 w-4" /> Upcoming Watchlist</CardTitle>
-          <CardDescription>Near-term work to protect from direction drift.</CardDescription>
+        <CardHeader className="compactCardHeader">
+          <div className="cardHeaderLine">
+            <CardTitle className="flex items-center gap-2"><CalendarClock className="h-4 w-4" /> Upcoming Watchlist</CardTitle>
+            <div className="cardHeaderBadges">
+              <Badge variant="secondary" className="iconBadge" title="Upcoming work"><CalendarClock />{upcomingRows.length}</Badge>
+              <Badge variant={upcomingRows.some((row) => row.item.isCritical) ? "destructive" : "outline"} className="iconBadge" title="Critical path"><AlertTriangle />{upcomingRows.filter((row) => row.item.isCritical).length} CP</Badge>
+            </div>
+          </div>
         </CardHeader>
-        <CardContent className="space-y-2">
-          {upcomingRows.length ? upcomingRows.map(({ item, project, gate, warningGate }) => (
-            <article className={cn("grid gap-3 rounded-lg border bg-muted/30 p-3", gate && "border-destructive/35 bg-destructive/5")} key={item.workItem.id}>
-              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-              <div>
-                <strong className="block text-sm">{item.workItem.title}</strong>
-                <span className="text-xs text-muted-foreground">{project.name}</span>
-                {gate && <span className="mt-1 flex items-center gap-1 text-xs font-medium text-destructive"><Lock size={13} />Locked: {gate.reason}</span>}
-                {!gate && warningGate && <span className="mt-1 flex items-center gap-1 text-xs font-medium text-amber-700"><AlertTriangle size={13} />Warning: {warningGate.reason}</span>}
+        <CardContent className="space-y-1.5">
+          {upcomingRows.length ? upcomingRowsPage.items.map(({ item, project, gate, warningGate }) => (
+            <article className={cn("todayItem mutedRow", gate && "isLocked")} key={item.workItem.id}>
+              <div className="todayItemMain">
+                <div className="min-w-0">
+                  <strong className="todayItemTitle">{item.workItem.title}</strong>
+                  <div className="todayItemMeta">
+                    <Badge variant="secondary" className="todayIconBadge todayProjectBadge" title={project.name}><Layers3 />{compactProjectCode(project.name)}</Badge>
+                    {item.isCritical && <Badge variant="destructive" className="todayIconBadge" title="Critical path"><AlertTriangle />CP</Badge>}
+                    <Badge variant="outline" className="todayIconBadge" title={formatScheduleRange(item)}><CalendarClock />{formatCompactScheduleRange(item)}</Badge>
+                  </div>
+                  {gate && <span className="todayInlineAlert dangerText"><Lock size={13} />{gate.reason}</span>}
+                  {!gate && warningGate && <span className="todayInlineAlert warnReason"><AlertTriangle size={13} />{warningGate.reason}</span>}
+                </div>
+                {!gate && <InlineActualForm projectId={project.id} item={item.workItem} onRecord={onActualRecord} compact />}
               </div>
-              <div className="flex flex-wrap items-center gap-2 text-xs">
-                {item.isCritical && <Badge variant="destructive">critical</Badge>}
-                <Badge variant="outline">{formatScheduleRange(item)}</Badge>
-              </div>
-              </div>
-              {!gate && <InlineActualForm projectId={project.id} item={item.workItem} onRecord={onActualRecord} compact />}
             </article>
-          )) : <div className="rounded-lg border border-dashed p-6 text-sm text-muted-foreground">No upcoming work in the reviewed queue.</div>}
+          )) : <div className="compactEmptyState"><CheckCircle2 />Clear</div>}
+          <PaginationControls label="upcoming work" {...upcomingRowsPage} onPageChange={upcomingRowsPage.setPage} />
         </CardContent>
       </Card>
       <Card id="today-blocking-gates" className="lg:col-span-2">
-        <CardHeader className="pb-3">
-          <CardTitle className="flex items-center gap-2"><ShieldAlert className="h-4 w-4" /> Blocking Gates</CardTitle>
+        <CardHeader className="compactCardHeader">
+          <div className="cardHeaderLine">
+            <CardTitle className="flex items-center gap-2"><ShieldAlert className="h-4 w-4" /> Blocking Gates</CardTitle>
+            <Badge variant={gates.some((gate) => activeProjectIds.has(gate.projectId) && gate.severity === "hard" && gate.status !== "cleared") ? "destructive" : "success"} className="iconBadge">
+              <Lock />{gates.filter((gate) => activeProjectIds.has(gate.projectId) && gate.severity === "hard" && gate.status !== "cleared").length}
+            </Badge>
+          </div>
         </CardHeader>
         <CardContent>
           <SignalList gates={sortGates(gates.filter((gate) => activeProjectIds.has(gate.projectId) && gate.severity === "hard" && gate.status !== "cleared")).slice(0, 8)} />
@@ -3419,7 +4207,7 @@ function InlineActualForm({
   useEffect(() => setPercentComplete(item.percentComplete), [item.id, item.percentComplete]);
   return (
     <form
-      className="grid gap-2 rounded-md border bg-background/80 p-2 sm:grid-cols-[1fr_1fr_auto_auto]"
+      className={cn("actualQuickForm", compact && "compact")}
       onSubmit={(event) => {
         event.preventDefault();
         onRecord(projectId, item.id, {
@@ -3431,19 +4219,23 @@ function InlineActualForm({
         });
       }}
     >
-      <label className="block">
-        <span className="text-xs font-medium text-muted-foreground">Percent</span>
-        <Input className="mt-1 h-8" type="number" min={0} max={100} value={percentComplete} onChange={(event) => setPercentComplete(Number(event.target.value) || 0)} />
+      <label className="actualMiniField" title="Percent complete">
+        <span aria-hidden="true">%</span>
+        <Input aria-label="Percent complete" type="number" min={0} max={100} value={percentComplete} onChange={(event) => setPercentComplete(Number(event.target.value) || 0)} />
       </label>
-      <label className={cn("block", compact && "hidden sm:block")}>
-        <span className="text-xs font-medium text-muted-foreground">Actual h</span>
-        <Input className="mt-1 h-8" type="number" min={0} step={0.25} value={actualWorkHours} onChange={(event) => setActualWorkHours(Number(event.target.value) || 0)} />
+      <label className="actualMiniField" title="Actual hours">
+        <Timer aria-hidden="true" />
+        <Input aria-label="Actual hours" type="number" min={0} step={0.25} value={actualWorkHours} onChange={(event) => setActualWorkHours(Number(event.target.value) || 0)} />
       </label>
-      <Button type="submit" size="sm" variant="outline" className="self-end">Save</Button>
+      <Button type="submit" size="icon" variant="outline" aria-label="Save actual" title="Save actual" className="actualIconButton">
+        <Save />
+      </Button>
       <Button
         type="button"
-        size="sm"
-        className="self-end"
+        size="icon"
+        aria-label="Mark done"
+        title="Mark done"
+        className="actualIconButton"
         onClick={() => onRecord(projectId, item.id, {
           percentComplete: 100,
           actualWorkHours,
@@ -3452,7 +4244,7 @@ function InlineActualForm({
           markFinished: true
         })}
       >
-        Done
+        <CheckCircle2 />
       </Button>
     </form>
   );
@@ -3487,29 +4279,43 @@ function AuditQueue({
   const activeDecisions = decisions.filter((decision) => activeProjectIds.has(decision.projectId));
   const activeLeveling = leveling.filter((proposal) => activeProjectIds.has(proposal.projectId));
   const workById = new Map(schedules.filter((schedule) => activeProjectIds.has(schedule.projectId)).flatMap((schedule) => schedule.items.map((item) => [item.workItem.id, { item, projectId: schedule.projectId }])));
+  const hardGatePage = usePagedItems(hardGates, 6);
+  const warningGatePage = usePagedItems(warningGates, 6);
+  const decisionPage = usePagedItems(activeDecisions, 6);
+  const changeSetPage = usePagedItems(changeSets, 8);
+  const levelingPage = usePagedItems(activeLeveling, 8);
   return (
-    <section className="grid gap-4 lg:grid-cols-2">
+    <section className="grid gap-3 lg:grid-cols-2">
       <Card id="hard-gates">
-        <CardHeader className="pb-3">
-          <CardTitle className="flex items-center gap-2"><ShieldAlert className="h-4 w-4" /> Hard Gates</CardTitle>
-          <CardDescription>Only key decisions are blocked.</CardDescription>
+        <CardHeader className="compactCardHeader">
+          <div className="cardHeaderLine">
+            <CardTitle className="flex items-center gap-2"><ShieldAlert className="h-4 w-4" /> Hard Gates</CardTitle>
+            <Badge variant={hardGates.length ? "destructive" : "success"} className="iconBadge" title="Open hard gates"><Lock />{hardGates.length}</Badge>
+          </div>
         </CardHeader>
         <CardContent>
-          <SignalList gates={hardGates} onClear={onGateClear} />
+          <SignalList gates={hardGatePage.items} onClear={onGateClear} compact />
+          <PaginationControls label="hard gates" {...hardGatePage} onPageChange={hardGatePage.setPage} />
         </CardContent>
       </Card>
       <Card id="audit-decisions">
-        <CardHeader className="pb-3">
-          <CardTitle className="flex items-center gap-2"><Zap className="h-4 w-4" /> Contrarian Decisions</CardTitle>
-          <CardDescription>Default operator stance is skeptical until evidence clears risk.</CardDescription>
+        <CardHeader className="compactCardHeader">
+          <div className="cardHeaderLine">
+            <CardTitle className="flex items-center gap-2"><Zap className="h-4 w-4" /> Contrarian Decisions</CardTitle>
+            <Badge variant="outline" className="iconBadge" title="Decisions"><Target />{activeDecisions.length}</Badge>
+          </div>
         </CardHeader>
-        <CardContent className="space-y-2">
-          {activeDecisions.map((decision) => (
-            <article className="grid gap-3 rounded-lg border bg-background p-3 sm:grid-cols-[96px_minmax(0,1fr)_auto]" key={decision.id}>
-              <Badge variant={decision.action === "Stop" || decision.action === "Pivot" || decision.action === "Narrow" ? "destructive" : "secondary"} className="h-fit justify-center">{decision.action}</Badge>
-              <div>
-                <strong className="text-sm">{projects.find((project) => project.id === decision.projectId)?.name}</strong>
-                <p className="mt-1 text-xs text-muted-foreground">{decision.strongestStopReason}</p>
+        <CardContent className="space-y-1.5">
+          {decisionPage.items.map((decision) => (
+            <article className="decisionCompactRow" key={decision.id}>
+              <Badge variant={decision.action === "Stop" || decision.action === "Pivot" || decision.action === "Narrow" ? "destructive" : "secondary"}>{decision.action}</Badge>
+              <div className="min-w-0">
+                <div className="decisionCompactTitle">
+                  <strong className="text-sm">{projects.find((project) => project.id === decision.projectId)?.name}</strong>
+                  <span className="decisionReasonIcon" title={decision.strongestStopReason} aria-label={decision.strongestStopReason}>
+                    <AlertTriangle size={13} />
+                  </span>
+                </div>
               </div>
               <AuditDecisionRecorder
                 projectId={decision.projectId}
@@ -3519,41 +4325,55 @@ function AuditQueue({
               />
             </article>
           ))}
+          <PaginationControls label="decisions" {...decisionPage} onPageChange={decisionPage.setPage} />
         </CardContent>
       </Card>
       <Card id="audit-warnings">
-        <CardHeader className="pb-3">
-          <CardTitle className="flex items-center gap-2"><AlertTriangle className="h-4 w-4" /> Warnings</CardTitle>
+        <CardHeader className="compactCardHeader">
+          <div className="cardHeaderLine">
+            <CardTitle className="flex items-center gap-2"><AlertTriangle className="h-4 w-4" /> Warnings</CardTitle>
+            <Badge variant={warningGates.length ? "warning" : "success"} className="iconBadge" title="Warnings"><AlertTriangle />{warningGates.length}</Badge>
+          </div>
         </CardHeader>
         <CardContent>
-          <SignalList gates={warningGates.slice(0, 8)} onClear={onGateClear} />
+          <SignalList gates={warningGatePage.items} onClear={onGateClear} compact />
+          <PaginationControls label="warnings" {...warningGatePage} onPageChange={warningGatePage.setPage} />
         </CardContent>
       </Card>
       <Card id="baseline-change-sets">
-        <CardHeader className="pb-3">
-          <CardTitle className="flex items-center gap-2"><Archive className="h-4 w-4" /> Change Sets</CardTitle>
-          <CardDescription>Review local structural edits before syncing; blocked changes are excluded from outgoing sync.</CardDescription>
+        <CardHeader className="compactCardHeader">
+          <div className="cardHeaderLine">
+            <CardTitle className="flex items-center gap-2"><Archive className="h-4 w-4" /> Change Sets</CardTitle>
+            <div className="cardHeaderBadges">
+              <Badge variant="outline" className="iconBadge" title="Total changes"><GitPullRequest />{changeSets.length}</Badge>
+              <Badge variant={changeSets.some((item) => item.status === "blocked") ? "destructive" : "success"} className="iconBadge" title="Blocked changes"><Lock />{changeSets.filter((item) => item.status === "blocked").length}</Badge>
+            </div>
+          </div>
         </CardHeader>
-        <CardContent className="space-y-2">
-          {changeSets.length ? changeSets.map((changeSet) => (
-            <article className="grid gap-2 rounded-lg border bg-background p-3 sm:grid-cols-[18px_minmax(0,1fr)_auto]" key={changeSet.id}>
-              <GitPullRequest size={15} className="mt-0.5 text-muted-foreground" />
-              <div>
+        <CardContent className="space-y-1.5">
+          {changeSets.length ? changeSetPage.items.map((changeSet) => (
+            <article className="compactSignalRow" key={changeSet.id}>
+              <GitPullRequest size={14} className="text-muted-foreground" />
+              <div className="compactSignalBody">
                 <strong className="text-sm">{changeSet.title}</strong>
-                <p className="mt-1 text-xs text-muted-foreground">{changeSet.status} / {changeSet.reason}</p>
+                <span className="compactSignalText">{changeSet.reason}</span>
+                <Badge variant={changeSet.status === "blocked" ? "destructive" : changeSet.status === "approved" ? "success" : "warning"}>{changeSet.status}</Badge>
               </div>
               <div className="flex flex-wrap items-center gap-2">
-                <Button type="button" size="sm" variant="outline" onClick={() => onChangeSetStatus(changeSet.id, "approved")} disabled={changeSet.status === "approved"}>Approve</Button>
-                <Button type="button" size="sm" variant="outline" onClick={() => onChangeSetStatus(changeSet.id, "blocked")} disabled={changeSet.status === "blocked"}>Block</Button>
+                <Button type="button" size="icon" variant="outline" aria-label="Approve change set" title="Approve" onClick={() => onChangeSetStatus(changeSet.id, "approved")} disabled={changeSet.status === "approved"}><CheckCircle2 /></Button>
+                <Button type="button" size="icon" variant="outline" aria-label="Block change set" title="Block" onClick={() => onChangeSetStatus(changeSet.id, "blocked")} disabled={changeSet.status === "blocked"}><Lock /></Button>
               </div>
             </article>
           )) : <div className="flex items-center gap-2 rounded-lg border border-dashed p-4 text-sm text-muted-foreground"><CheckCircle2 size={16} />No baseline changes</div>}
+          <PaginationControls label="change sets" {...changeSetPage} onPageChange={changeSetPage.setPage} />
         </CardContent>
       </Card>
       <Card className="lg:col-span-2" id="leveling-proposals">
-        <CardHeader className="pb-3">
-          <CardTitle className="flex items-center gap-2"><CalendarClock className="h-4 w-4" /> Leveling Proposals</CardTitle>
-          <CardDescription>Local optimizer suggestions for attention overload.</CardDescription>
+        <CardHeader className="compactCardHeader">
+          <div className="cardHeaderLine">
+            <CardTitle className="flex items-center gap-2"><CalendarClock className="h-4 w-4" /> Leveling Proposals</CardTitle>
+            <Badge variant={activeLeveling.length ? "warning" : "success"} className="iconBadge" title="Leveling proposals"><CalendarClock />{activeLeveling.length}</Badge>
+          </div>
         </CardHeader>
         <CardContent>
           <Table>
@@ -3567,7 +4387,7 @@ function AuditQueue({
               </TableRow>
             </TableHeader>
             <TableBody>
-              {activeLeveling.map((proposal) => {
+              {levelingPage.items.map((proposal) => {
                 const row = workById.get(proposal.workItemId);
                 const project = projects.find((candidate) => candidate.id === proposal.projectId);
                 return (
@@ -3589,6 +4409,7 @@ function AuditQueue({
               })}
             </TableBody>
           </Table>
+          <PaginationControls label="leveling proposals" {...levelingPage} onPageChange={levelingPage.setPage} />
         </CardContent>
       </Card>
     </section>
@@ -3610,22 +4431,28 @@ function AuditDecisionRecorder({
   const [rationale, setRationale] = useState("");
   return (
     <form
-      className="grid min-w-56 gap-2"
+      className="auditDecisionForm"
       onSubmit={(event) => {
         event.preventDefault();
         onRecord(projectId, action, gates, rationale);
         setRationale("");
       }}
     >
-      <NativeSelectField
-        label="Audit action"
+      <select
+        aria-label="Audit action"
+        data-testid="audit-action"
+        name="audit-action"
         value={action}
-        onChange={(value) => setAction(value as AuditAction)}
-        options={auditActions.map((item) => ({ value: item, label: item }))}
-        testId="audit-action"
-      />
-      <Input value={rationale} onChange={(event) => setRationale(event.target.value)} placeholder="Decision rationale" />
-      <Button type="submit" size="sm">Record decision</Button>
+        onChange={(event) => setAction(event.target.value as AuditAction)}
+      >
+        {auditActions.map((item) => (
+          <option key={item} value={item}>{item}</option>
+        ))}
+      </select>
+      <Input value={rationale} onChange={(event) => setRationale(event.target.value)} placeholder="Why" aria-label="Decision rationale" />
+      <Button type="submit" size="icon" title="Record decision" aria-label="Record decision">
+        <Save />
+      </Button>
     </form>
   );
 }
@@ -3652,22 +4479,26 @@ function Reports({
   baseline?: Baseline;
 }) {
   const openHardGates = gates.filter((gate) => gate.severity === "hard" && gate.status !== "cleared");
+  const reportRowsPage = usePagedItems(schedule.items, 10);
   return (
-    <section className="grid gap-4">
-      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-        <Metric icon={<BarChart3 />} label="SPI" value={evm ? evm.schedulePerformanceIndex.toFixed(2) : "No baseline"} tone={evm ? undefined : "warn"} />
-        <Metric icon={<BarChart3 />} label="CPI" value={evm ? evm.costPerformanceIndex.toFixed(2) : "No baseline"} tone={evm ? undefined : "warn"} />
-        <Metric icon={<Timer />} label="P50" value={p50.slice(5, 10)} />
-        <Metric icon={<AlertTriangle />} label="Hard gates" value={openHardGates.length} tone={openHardGates.length ? "danger" : "ok"} />
+    <section className="grid gap-3">
+      <div className="portfolioHeader">
+        <div className="min-w-0">
+          <h2 className="text-lg font-semibold tracking-tight">Reports</h2>
+          <div className="compactBadgeRow">
+            <Badge variant={evm ? "secondary" : "warning"} className="iconBadge" title="Schedule performance index"><BarChart3 />SPI {evm ? evm.schedulePerformanceIndex.toFixed(2) : "-"}</Badge>
+            <Badge variant={evm ? "secondary" : "warning"} className="iconBadge" title="Cost performance index"><BarChart3 />CPI {evm ? evm.costPerformanceIndex.toFixed(2) : "-"}</Badge>
+            <Badge variant="outline" className="iconBadge" title="Monte Carlo p50"><Timer />P50 {p50.slice(5, 10)}</Badge>
+            <Badge variant={openHardGates.length ? "destructive" : "success"} className="iconBadge" title="Open hard gates"><Lock />{openHardGates.length}</Badge>
+          </div>
+        </div>
       </div>
       <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2"><ShieldAlert className="h-4 w-4" /> Report Gate Status</CardTitle>
-          <CardDescription>
-            {openHardGates.length
-              ? `${openHardGates.length} hard gate${openHardGates.length === 1 ? "" : "s"} must be cleared before this report can be treated as approved.`
-              : "No hard gates are open for this project."}
-          </CardDescription>
+        <CardHeader className="compactCardHeader">
+          <div className="cardHeaderLine">
+            <CardTitle className="flex items-center gap-2"><ShieldAlert className="h-4 w-4" /> Report Gate Status</CardTitle>
+            <Badge variant={openHardGates.length ? "destructive" : "success"} className="iconBadge" title={openHardGates[0]?.reason ?? "No hard gates"}>{openHardGates.length ? <Lock /> : <CheckCircle2 />}{openHardGates.length ? "blocked" : "clear"}</Badge>
+          </div>
         </CardHeader>
         <CardContent className="grid gap-3 md:grid-cols-2">
           <SummaryTile label="Baseline" value={baseline ? baseline.name : "No baseline"} detail={baseline ? `Captured ${baseline.capturedAt.slice(0, 10)}` : "EVM is blocked."} />
@@ -3675,20 +4506,22 @@ function Reports({
         </CardContent>
       </Card>
       <Card id="scheduler-diagnostics">
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2"><AlertTriangle className="h-4 w-4" /> Scheduler Diagnostics</CardTitle>
-          <CardDescription>Explicit schedule warnings and unsupported cases. The engine must report rather than silently hide unsafe plans.</CardDescription>
+        <CardHeader className="compactCardHeader">
+          <div className="cardHeaderLine">
+            <CardTitle className="flex items-center gap-2"><AlertTriangle className="h-4 w-4" /> Scheduler Diagnostics</CardTitle>
+            <Badge variant={schedule.diagnostics.length ? "warning" : "success"} className="iconBadge" title="Scheduler diagnostics"><AlertTriangle />{schedule.diagnostics.length}</Badge>
+          </div>
         </CardHeader>
         <CardContent>
           {schedule.diagnostics.length ? (
-            <div className="grid gap-2">
+            <div className="grid gap-1.5">
               {schedule.diagnostics.map((diagnostic, index) => (
-                <article className={cn("rounded-lg border bg-background p-3", diagnostic.severity === "error" && "border-destructive/35 bg-destructive/5", diagnostic.severity === "warning" && "border-amber-300 bg-amber-50/60")} key={`${diagnostic.itemId ?? "portfolio"}-${diagnostic.message}-${index}`}>
-                  <div className="flex flex-wrap items-center gap-2">
+                <article className={cn("diagnosticCompactRow", diagnostic.severity === "error" && "danger", diagnostic.severity === "warning" && "warning")} key={`${diagnostic.itemId ?? "portfolio"}-${diagnostic.message}-${index}`}>
+                  <div className="diagnosticMeta">
                     <Badge variant={diagnostic.severity === "error" ? "destructive" : diagnostic.severity === "warning" ? "warning" : "secondary"}>{diagnostic.severity}</Badge>
-                    {diagnostic.itemId && <Badge variant="outline">{diagnostic.itemId}</Badge>}
+                    {diagnostic.itemId && <Badge variant="outline" title={diagnostic.itemId}>item</Badge>}
                   </div>
-                  <p className="mt-2 text-sm">{diagnostic.message}</p>
+                  <p>{diagnostic.message}</p>
                 </article>
               ))}
             </div>
@@ -3744,28 +4577,29 @@ function Reports({
         </CardHeader>
         <CardContent>
           <Table>
-          <caption className="srOnly">Scheduled report rows for {project.name}</caption>
-          <TableHeader>
-            <TableRow>
-              <TableHead>Outline</TableHead>
-              <TableHead>Task</TableHead>
-              <TableHead>Start</TableHead>
-              <TableHead>Finish</TableHead>
-              <TableHead>Float</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {schedule.items.map((item) => (
-              <TableRow key={item.workItem.id}>
-                <TableCell>{item.workItem.outline}</TableCell>
-                <TableCell className="font-medium">{item.workItem.title}</TableCell>
-                <TableCell>{formatShortDateTime(item.start)}</TableCell>
-                <TableCell>{formatShortDateTime(item.finish)}</TableCell>
-                <TableCell>{Math.round(item.totalFloatSeconds / 3600)}h</TableCell>
+            <caption className="srOnly">Scheduled report rows for {project.name}</caption>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Outline</TableHead>
+                <TableHead>Task</TableHead>
+                <TableHead>Start</TableHead>
+                <TableHead>Finish</TableHead>
+                <TableHead>Float</TableHead>
               </TableRow>
-            ))}
-          </TableBody>
+            </TableHeader>
+            <TableBody>
+              {reportRowsPage.items.map((item) => (
+                <TableRow key={item.workItem.id}>
+                  <TableCell>{item.workItem.outline}</TableCell>
+                  <TableCell className="font-medium">{item.workItem.title}</TableCell>
+                  <TableCell>{formatShortDateTime(item.start)}</TableCell>
+                  <TableCell>{formatShortDateTime(item.finish)}</TableCell>
+                  <TableCell>{Math.round(item.totalFloatSeconds / 3600)}h</TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
           </Table>
+          <PaginationControls label="report rows" {...reportRowsPage} onPageChange={reportRowsPage.setPage} />
         </CardContent>
       </Card>
     </section>
@@ -3851,22 +4685,26 @@ function AgentCenter({
   };
 
   return (
-    <section className="grid gap-4 lg:grid-cols-2">
+    <section className="grid gap-3 lg:grid-cols-2">
       {notice !== idleAgentNotice && (
         <div className="rounded-lg border bg-background p-3 text-sm font-medium lg:col-span-2">{notice}</div>
       )}
 
       <Card className="lg:col-span-2">
-        <CardHeader>
+        <CardHeader className="compactCardHeader">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
               <CardTitle className="flex items-center gap-2"><ClipboardCheck className="h-4 w-4" /> Agent</CardTitle>
-              <CardDescription>Machine-readable status endpoints, command inbox, and AI audit runtime.</CardDescription>
+              <div className="compactBadgeRow">
+                <Badge variant="outline" className="iconBadge" title="Read endpoints"><FileText />read</Badge>
+                <Badge variant="outline" className="iconBadge" title="Command inbox"><Inbox />write</Badge>
+                <Badge variant={aiProviderReady ? "success" : "warning"} className="iconBadge" title="AI provider"><Zap />{aiProviderReady ? "AI" : "AI off"}</Badge>
+              </div>
             </div>
             <IconStatusBadge variant="outline" status="No secrets exposed" icon={<Lock />} />
           </div>
         </CardHeader>
-        <CardContent className="grid gap-3 md:grid-cols-3">
+        <CardContent className="grid gap-2 md:grid-cols-3">
           <SettingsRow label="Protocol" value="/agent/manual.txt" />
           <SettingsRow label="Portfolio state" value="/agent/projects.txt | .json" />
           <SettingsRow label="Write entry" value="/agent/commands" />
@@ -3874,38 +4712,45 @@ function AgentCenter({
       </Card>
 
       <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2"><FileDown className="h-4 w-4" /> Read Endpoints</CardTitle>
-          <CardDescription>Plaintext and JSON project state for external agents.</CardDescription>
+        <CardHeader className="compactCardHeader">
+          <div className="cardHeaderLine">
+            <CardTitle className="flex items-center gap-2"><FileDown className="h-4 w-4" /> Read Endpoints</CardTitle>
+            <Badge variant="outline" className="iconBadge" title="No secrets exposed"><Lock />safe</Badge>
+          </div>
         </CardHeader>
         <CardContent className="flex flex-wrap gap-2">
-          <IconLinkButton label="Open agent manual" href="/agent/manual.txt"><FileText /></IconLinkButton>
-          <IconLinkButton label="Open projects text endpoint" href="/agent/projects.txt"><FileText /></IconLinkButton>
-          <IconLinkButton label="Open projects JSON endpoint" href="/agent/projects.json"><FileJson /></IconLinkButton>
-          <IconLinkButton label="Open selected project endpoint" href={`/agent/projects/${encodeURIComponent(agentProjectId)}.txt`}><Target /></IconLinkButton>
+          <IconLinkButton label="Manual" href="/agent/manual.txt"><FileText /></IconLinkButton>
+          <IconLinkButton label="Projects text" href="/agent/projects.txt"><FileText /></IconLinkButton>
+          <IconLinkButton label="Projects JSON" href="/agent/projects.json"><FileJson /></IconLinkButton>
+          <IconLinkButton label="Selected project" href={`/agent/projects/${encodeURIComponent(agentProjectId)}.txt`}><Target /></IconLinkButton>
         </CardContent>
       </Card>
 
       <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2"><ClipboardCheck className="h-4 w-4" /> Command Inbox</CardTitle>
-          <CardDescription>Dry-run receipts and guarded write boundary.</CardDescription>
+        <CardHeader className="compactCardHeader">
+          <div className="cardHeaderLine">
+            <CardTitle className="flex items-center gap-2"><ClipboardCheck className="h-4 w-4" /> Command Inbox</CardTitle>
+            <Badge variant="warning" className="iconBadge" title="Guarded writes queue"><ShieldAlert />guard</Badge>
+          </div>
         </CardHeader>
         <CardContent className="space-y-3">
-          <div className="grid gap-3 md:grid-cols-2">
+          <div className="grid gap-2 md:grid-cols-2">
             <SettingsRow label="Low-risk commands" value="auto-apply" />
             <SettingsRow label="Guarded commands" value="queue gate" />
           </div>
-          <IconLinkButton label="Open command inbox" href="/agent/commands"><Inbox /></IconLinkButton>
+          <IconLinkButton label="Command inbox" href="/agent/commands"><Inbox /></IconLinkButton>
         </CardContent>
       </Card>
 
       <Card className="lg:col-span-2" id="agent-ai-audit">
-        <CardHeader>
+        <CardHeader className="compactCardHeader">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
               <CardTitle className="flex items-center gap-2"><Zap className="h-4 w-4" /> AI Contrarian Audit</CardTitle>
-              <CardDescription>Runs the saved provider against bounded project context and records an audit decision.</CardDescription>
+              <div className="compactBadgeRow">
+                <Badge variant={aiProviderReady ? "success" : "warning"} className="iconBadge" title="Provider"><Zap />{aiProviderReady ? "provider" : "missing"}</Badge>
+                <Badge variant={sessionPassphrase.trim() ? "success" : "warning"} className="iconBadge" title="Passphrase"><KeyRound />{sessionPassphrase.trim() ? "unlocked" : "locked"}</Badge>
+              </div>
             </div>
             <IconStatusBadge
               variant={aiProviderReady ? sessionPassphrase.trim() ? "success" : "warning" : "warning"}
@@ -4388,9 +5233,9 @@ function Settings({
   };
 
   const resetWorkspace = () => {
-    if (!window.confirm("Reset the local workspace to the bundled sample data?")) return;
+    if (!window.confirm("Clear the local workspace in this browser? Firebase settings and saved secrets are not removed.")) return;
     onWorkspaceReset();
-    setNotice("Local workspace reset to sample data.");
+    setNotice("Local workspace cleared. Firebase settings and saved secrets were kept.");
   };
 
   const openPanel = (panel: SettingsPanelId) => {
@@ -4845,11 +5690,10 @@ function SettingsOverviewCard({
 }) {
   return (
     <Card className="min-w-0">
-      <CardHeader className="pb-3">
-        <div className="flex items-start justify-between gap-3">
+      <CardHeader className="compactCardHeader">
+        <div className="flex items-center justify-between gap-3">
           <div className="min-w-0 flex-1">
-            <CardTitle className="flex items-center gap-2">{icon}{title}</CardTitle>
-            <CardDescription className="mt-1 line-clamp-2">{description}</CardDescription>
+            <CardTitle className="flex items-center gap-2" title={description}>{icon}{title}</CardTitle>
           </div>
           <div className="flex shrink-0 items-center gap-1.5">
             <IconStatusBadge variant={badgeVariant} status={status} icon={statusIcon} />
@@ -4937,39 +5781,39 @@ function IconLinkButton({
 }
 
 function ActionCard({
+  icon,
   label,
   title,
   detail,
   meta,
-  cta,
   href,
   tone = "neutral"
 }: {
+  icon: ReactNode;
   label: string;
   title: string;
-  detail: string;
+  detail?: string;
   meta: string;
-  cta: string;
   href: string;
   tone?: "neutral" | "danger" | "warning";
 }) {
   return (
     <a
       className={cn(
-        "grid min-h-36 content-between rounded-lg border bg-card p-3 text-card-foreground shadow-sm transition hover:bg-accent/45 hover:shadow-md",
+        "actionCard",
         tone === "danger" && "border-destructive/40 bg-destructive/5",
         tone === "warning" && "border-amber-300 bg-amber-50/60"
       )}
       href={href}
     >
       <div>
-        <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{label}</div>
-        <div className="mt-2 line-clamp-2 text-sm font-semibold">{title}</div>
-        <p className="mt-1 line-clamp-3 text-xs text-muted-foreground">{detail}</p>
+        <div className="actionCardLabel">{icon}{label}</div>
+        <div className="actionCardTitle">{title}</div>
+        {detail && <p className="actionCardDetail">{detail}</p>}
       </div>
-      <div className="mt-3 flex items-center justify-between gap-2">
+      <div className="actionCardFooter">
         <Badge variant={tone === "danger" ? "destructive" : tone === "warning" ? "warning" : "secondary"}>{meta}</Badge>
-        <span className="text-xs font-semibold text-primary">{cta}</span>
+        <span className="actionCardOpen" aria-hidden="true"><PanelRight /></span>
       </div>
     </a>
   );
@@ -4979,18 +5823,88 @@ function SummaryTile({
   label,
   value,
   detail,
-  tone = "default"
+  tone = "default",
+  onClick,
+  ariaLabel
 }: {
   label: string;
   value: string;
   detail: string;
   tone?: "default" | "danger" | "warning";
+  onClick?: () => void;
+  ariaLabel?: string;
 }) {
+  const longValue = value.length > 24;
+  const content = (
+    <>
+      <div className="summaryTileHead">
+        <span>{label}</span>
+        {!longValue && <Badge variant={tone === "danger" ? "destructive" : tone === "warning" ? "warning" : "secondary"}>{value}</Badge>}
+      </div>
+      {longValue && <strong className="summaryTileValue" title={value}>{value}</strong>}
+      {detail && <p>{detail}</p>}
+    </>
+  );
+  const className = cn("summaryTile", tone === "danger" && "danger", tone === "warning" && "warning", onClick && "summaryTileButton");
+  if (onClick) {
+    return (
+      <button type="button" className={className} onClick={onClick} aria-label={ariaLabel ?? `${label}: ${value}`}>
+        {content}
+      </button>
+    );
+  }
   return (
-    <div className={cn("rounded-lg border bg-background p-3", tone === "danger" && "border-destructive/30 bg-destructive/5", tone === "warning" && "border-amber-300 bg-amber-50/70")}>
-      <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{label}</div>
-      <div className="mt-1 line-clamp-2 text-sm font-semibold">{value}</div>
-      <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">{detail}</p>
+    <div className={className}>
+      {content}
+    </div>
+  );
+}
+
+function PaginationControls({
+  page,
+  pageCount,
+  pageSize,
+  total,
+  onPageChange,
+  label
+}: {
+  page: number;
+  pageCount: number;
+  pageSize: number;
+  total: number;
+  onPageChange: (page: number) => void;
+  label: string;
+}) {
+  if (total <= pageSize) return null;
+  const start = page * pageSize + 1;
+  const end = Math.min(total, start + pageSize - 1);
+  return (
+    <div className="paginationControls" aria-label={`${label} pagination`}>
+      <span>{start}-{end} / {total}</span>
+      <div>
+        <Button
+          type="button"
+          size="icon"
+          variant="outline"
+          aria-label={`Previous ${label} page`}
+          title="Previous page"
+          onClick={() => onPageChange(Math.max(0, page - 1))}
+          disabled={page <= 0}
+        >
+          <ChevronLeft />
+        </Button>
+        <Button
+          type="button"
+          size="icon"
+          variant="outline"
+          aria-label={`Next ${label} page`}
+          title="Next page"
+          onClick={() => onPageChange(Math.min(pageCount - 1, page + 1))}
+          disabled={page >= pageCount - 1}
+        >
+          <ChevronRight />
+        </Button>
+      </div>
     </div>
   );
 }
@@ -5106,12 +6020,13 @@ function ToggleField({ label, checked, onChange }: { label: string; checked: boo
 }
 
 function EvidenceList({ evidence }: { evidence: Evidence[] }) {
+  const evidencePage = usePagedItems(evidence, 6);
   if (!evidence.length) {
     return <div className="rounded-lg border border-dashed p-6 text-sm text-muted-foreground">No evidence linked yet.</div>;
   }
   return (
     <div className="space-y-2">
-      {evidence.map((item) => (
+      {evidencePage.items.map((item) => (
         <div key={item.id} className="rounded-lg border bg-background p-3">
           <div className="flex flex-wrap items-center gap-2">
             <Badge variant="outline">{item.kind}</Badge>
@@ -5129,37 +6044,42 @@ function EvidenceList({ evidence }: { evidence: Evidence[] }) {
           </div>
         </div>
       ))}
+      <PaginationControls label="evidence" {...evidencePage} onPageChange={evidencePage.setPage} />
     </div>
   );
 }
 
 function BaselineTable({ baseline, items }: { baseline?: Baseline; items: ScheduledItem[] }) {
+  const itemPage = usePagedItems(items, 10);
   if (!baseline) {
     return <div className="rounded-lg border border-dashed p-6 text-sm text-muted-foreground">No plan snapshot captured. This is optional and does not block marking the project done.</div>;
   }
   return (
-    <Table>
-      <TableHeader>
-        <TableRow>
-          <TableHead>WBS</TableHead>
-          <TableHead>Item</TableHead>
-          <TableHead>Baseline start</TableHead>
-          <TableHead>Baseline finish</TableHead>
-          <TableHead>Work</TableHead>
-        </TableRow>
-      </TableHeader>
-      <TableBody>
-        {items.map((item) => (
-          <TableRow key={item.workItem.id}>
-            <TableCell>{item.workItem.outline}</TableCell>
-            <TableCell className="font-medium">{item.workItem.title}</TableCell>
-            <TableCell>{baseline.plannedStartByItem[item.workItem.id]?.slice(0, 10) ?? "-"}</TableCell>
-            <TableCell>{baseline.plannedFinishByItem[item.workItem.id]?.slice(0, 10) ?? "-"}</TableCell>
-            <TableCell>{Math.round((baseline.plannedWorkSecondsByItem[item.workItem.id] ?? 0) / 3600)}h</TableCell>
+    <div className="grid gap-2">
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>WBS</TableHead>
+            <TableHead>Item</TableHead>
+            <TableHead>Baseline start</TableHead>
+            <TableHead>Baseline finish</TableHead>
+            <TableHead>Work</TableHead>
           </TableRow>
-        ))}
-      </TableBody>
-    </Table>
+        </TableHeader>
+        <TableBody>
+          {itemPage.items.map((item) => (
+            <TableRow key={item.workItem.id}>
+              <TableCell>{item.workItem.outline}</TableCell>
+              <TableCell className="font-medium">{item.workItem.title}</TableCell>
+              <TableCell>{baseline.plannedStartByItem[item.workItem.id]?.slice(0, 10) ?? "-"}</TableCell>
+              <TableCell>{baseline.plannedFinishByItem[item.workItem.id]?.slice(0, 10) ?? "-"}</TableCell>
+              <TableCell>{Math.round((baseline.plannedWorkSecondsByItem[item.workItem.id] ?? 0) / 3600)}h</TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+      <PaginationControls label="baseline rows" {...itemPage} onPageChange={itemPage.setPage} />
+    </div>
   );
 }
 
@@ -5215,32 +6135,6 @@ function Metric({
   );
 }
 
-function SignalBar({
-  label,
-  value,
-  tone
-}: {
-  label: string;
-  value: number;
-  tone: "ok" | "warn" | "danger";
-}) {
-  const bounded = Math.max(0, Math.min(100, Math.round(value)));
-  return (
-    <div className="rounded-md border bg-background p-2">
-      <div className="flex items-center justify-between gap-2">
-        <span className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">{label}</span>
-        <strong className="text-xs">{bounded}</strong>
-      </div>
-      <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-muted">
-        <div
-          className={cn("h-full rounded-full", tone === "danger" ? "bg-destructive" : tone === "warn" ? "bg-amber-500" : "bg-emerald-500")}
-          style={{ width: `${bounded}%` }}
-        />
-      </div>
-    </div>
-  );
-}
-
 function SectionTitle({ icon, title }: { icon: ReactNode; title: string }) {
   return (
     <div className="sectionTitle">
@@ -5288,6 +6182,16 @@ function formatScheduleRange(item: ScheduledItem) {
   return `${formatShortDateTime(item.start)} -> ${formatShortDateTime(item.finish)}`;
 }
 
+function formatCompactScheduleRange(item: ScheduledItem) {
+  const startDate = item.start.slice(5, 10);
+  const finishDate = item.finish.slice(5, 10);
+  const startTime = item.start.slice(11, 16);
+  const finishTime = item.finish.slice(11, 16);
+  return startDate === finishDate
+    ? `${startDate} ${startTime}-${finishTime}`
+    : `${startDate} ${startTime}->${finishDate} ${finishTime}`;
+}
+
 function scheduleTiming(item: ScheduledItem): ScheduleTiming {
   const dayStart = `${now.slice(0, 10)}T00:00:00.000Z`;
   const dayEnd = addSeconds(dayStart, 24 * 60 * 60);
@@ -5328,6 +6232,63 @@ function compactProjectLabel(name: string) {
   return words.slice(0, 2).join(" ");
 }
 
+function compactProjectCode(name: string) {
+  const asciiWords = name.match(/[A-Za-z0-9]+/g);
+  if (asciiWords?.length) {
+    const initials = asciiWords.map((word) => word[0]).join("").slice(0, 3).toUpperCase();
+    return initials.length >= 2 ? initials : asciiWords[0].slice(0, 3).toUpperCase();
+  }
+  return name.trim().slice(0, 2) || "P";
+}
+
+function formatCompactProjectList(projects: Project[]) {
+  if (!projects.length) return "No project";
+  const labels = projects.slice(0, 2).map((project) => compactProjectLabel(project.name));
+  const remaining = projects.length - labels.length;
+  return remaining > 0 ? `${labels.join(", ")} +${remaining}` : labels.join(", ");
+}
+
+function matrixRelativePosition(value: number, values: number[]) {
+  const finiteValues = values.filter((candidate) => Number.isFinite(candidate));
+  if (finiteValues.length < 2) return 50;
+  const min = Math.min(...finiteValues);
+  const max = Math.max(...finiteValues);
+  if (max - min < 2) return 50;
+  return 16 + ((value - min) / (max - min)) * 68;
+}
+
+function clampMatrixPosition(value: number) {
+  return Math.max(18, Math.min(82, Math.round(value)));
+}
+
+function matrixNodeOffset(index: number) {
+  const offsets = [
+    { x: 0, y: 0 },
+    { x: -5, y: 5 },
+    { x: 5, y: -5 },
+    { x: -5, y: -5 },
+    { x: 5, y: 5 },
+    { x: 0, y: 8 },
+    { x: 0, y: -8 }
+  ];
+  return offsets[index % offsets.length];
+}
+
+function matrixDecisionForPoint(x: number, y: number, openHardGates: number): MatrixDecision {
+  if (openHardGates > 0) return "audit";
+  if (y >= 50 && x >= 50) return "audit";
+  if (y >= 50) return "narrow";
+  if (x >= 50) return "push";
+  return "watch";
+}
+
+function matrixDecisionLabel(decision: MatrixDecision) {
+  if (decision === "narrow") return "Narrow";
+  if (decision === "audit") return "Audit";
+  if (decision === "push") return "Push";
+  return "Watch";
+}
+
 function OutlineTable({
   items,
   gates,
@@ -5339,58 +6300,74 @@ function OutlineTable({
   evidence: Evidence[];
   onFinishItem: (item: ScheduledItem) => void;
 }) {
+  const itemPage = usePagedItems(items, 10);
   return (
-    <Table>
-      <caption className="srOnly">Project outline with schedule, evidence, gate, and float status</caption>
-      <TableHeader>
-        <TableRow>
-          <TableHead>WBS</TableHead>
-          <TableHead>Item</TableHead>
-          <TableHead>Start</TableHead>
-          <TableHead>Finish</TableHead>
-          <TableHead>%</TableHead>
-          <TableHead>Status</TableHead>
-          <TableHead>Float</TableHead>
-          <TableHead>Action</TableHead>
-        </TableRow>
-      </TableHeader>
-      <TableBody>
-          {items.map((item) => {
-            const gate = gates.find((candidate) => candidate.status !== "cleared" && candidate.targetId === item.workItem.id);
-            const hasEvidence = evidence.some((candidate) => candidate.workItemId === item.workItem.id);
-            const status = gate
-              ? `${gate.severity} gate`
-              : item.workItem.evidenceRequired && !hasEvidence
-                ? "Needs evidence"
-                : item.isCritical
-                  ? "Critical"
-                  : "Clear";
-            return (
-              <TableRow key={item.workItem.id} data-work-item-id={item.workItem.id} className={item.isCritical ? "border-l-4 border-l-destructive" : ""}>
-                <TableCell className="font-medium">{item.workItem.outline}</TableCell>
-                <TableCell>{item.workItem.title}</TableCell>
-                <TableCell>{formatShortDateTime(item.start)}</TableCell>
-                <TableCell>{formatShortDateTime(item.finish)}</TableCell>
-                <TableCell>{item.workItem.percentComplete}</TableCell>
-                <TableCell><Badge variant={gate ? "destructive" : item.isCritical ? "warning" : "secondary"}>{status}</Badge></TableCell>
-                <TableCell>{Math.round(item.totalFloatSeconds / 3600)}h</TableCell>
-                <TableCell>
-                  {item.workItem.kind === "phase" ? (
-                    <span className="text-xs text-muted-foreground">-</span>
-                  ) : item.workItem.percentComplete >= 100 ? (
-                    <Badge variant="success">Done</Badge>
-                  ) : (
-                    <Button type="button" size="sm" variant="outline" onClick={() => onFinishItem(item)} aria-label={`Mark ${item.workItem.title} done`}>
-                      <CheckCircle2 />
-                      Done
-                    </Button>
-                  )}
-                </TableCell>
-              </TableRow>
-            );
-          })}
-      </TableBody>
-    </Table>
+    <div className="grid gap-2">
+      <Table>
+        <caption className="srOnly">Project outline with schedule, evidence, gate, and float status</caption>
+        <TableHeader>
+          <TableRow>
+            <TableHead>WBS</TableHead>
+            <TableHead>Work item</TableHead>
+            <TableHead>Plan</TableHead>
+            <TableHead>%</TableHead>
+            <TableHead>State</TableHead>
+            <TableHead>Action</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+            {itemPage.items.map((item) => {
+              const gate = gates.find((candidate) => candidate.status !== "cleared" && candidate.targetId === item.workItem.id);
+              const hasEvidence = evidence.some((candidate) => candidate.workItemId === item.workItem.id);
+              const status = gate
+                ? `${gate.severity} gate`
+                : item.workItem.evidenceRequired && !hasEvidence
+                  ? "Needs evidence"
+                  : item.isCritical
+                    ? "Critical"
+                    : "Clear";
+              return (
+                <TableRow key={item.workItem.id} data-work-item-id={item.workItem.id} className={item.isCritical ? "border-l-4 border-l-destructive" : ""}>
+                  <TableCell className="font-medium">{item.workItem.outline}</TableCell>
+                  <TableCell className="outlineItemCell">
+                    <strong title={item.workItem.title}>{item.workItem.title}</strong>
+                    <span>
+                      {item.workItem.kind}
+                      {item.workItem.evidenceRequired && " / evidence"}
+                      {item.workItem.isKeyTask && " / key"}
+                    </span>
+                  </TableCell>
+                  <TableCell className="outlinePlanCell">
+                    <span>{formatShortDateTime(item.start)}</span>
+                    <span>{formatShortDateTime(item.finish)}</span>
+                  </TableCell>
+                  <TableCell>{item.workItem.percentComplete}</TableCell>
+                  <TableCell>
+                    <Badge
+                      variant={gate ? "destructive" : item.isCritical ? "warning" : "secondary"}
+                      title={`${status}; float ${Math.round(item.totalFloatSeconds / 3600)}h`}
+                    >
+                      {gate ? "Gate" : item.isCritical ? "CP" : item.workItem.evidenceRequired && !hasEvidence ? "Evidence" : "Clear"}
+                    </Badge>
+                  </TableCell>
+                  <TableCell>
+                    {item.workItem.kind === "phase" ? (
+                      <span className="text-xs text-muted-foreground">-</span>
+                    ) : item.workItem.percentComplete >= 100 ? (
+                      <Badge variant="success">Done</Badge>
+                    ) : (
+                      <Button type="button" size="icon" variant="outline" onClick={() => onFinishItem(item)} aria-label={`Mark ${item.workItem.title} done`} title="Mark done">
+                        <CheckCircle2 />
+                      </Button>
+                    )}
+                  </TableCell>
+                </TableRow>
+              );
+            })}
+        </TableBody>
+      </Table>
+      <PaginationControls label="outline" {...itemPage} onPageChange={itemPage.setPage} />
+    </div>
   );
 }
 
@@ -5528,9 +6505,10 @@ function GanttChart({
   return (
     <div className="ganttWorkSurface" aria-label={`Interactive Gantt chart with ${items.length} items from ${formatShortDateTime(min)} to ${formatShortDateTime(max)}; ${criticalCount} critical items.`}>
       <div className="ganttToolbar">
-        <div>
-          <strong>{baseline ? baseline.name : "No baseline"}</strong>
-          <span>{criticalPathWidth} critical items / {visibleDependencies.length} dependencies</span>
+        <div className="ganttToolbarBadges">
+          <Badge variant={baseline ? "success" : "outline"} className="iconBadge" title={baseline?.name ?? "No baseline"}>{baseline ? <CheckCircle2 /> : <Archive />}{baseline ? "B" : "-"}</Badge>
+          <Badge variant="outline" className="iconBadge" title="Dependencies"><Network />{visibleDependencies.length}</Badge>
+          <Badge variant={criticalPathWidth ? "warning" : "outline"} className="iconBadge" title="Critical path"><AlertTriangle />{criticalPathWidth}</Badge>
         </div>
         <div className="segmentedControl" aria-label="Gantt zoom">
           {([
@@ -5957,17 +6935,19 @@ function SignalList({
       {gates.map((gate) => (
         <article
           className={cn(
-            "grid gap-2 rounded-lg border bg-background p-3 sm:grid-cols-[18px_minmax(0,1fr)_auto]",
+            compact
+              ? "compactSignalRow"
+              : "grid gap-2 rounded-lg border bg-background p-3 sm:grid-cols-[18px_minmax(0,1fr)_auto]",
             gate.severity === "hard" && "border-destructive/35 bg-destructive/5",
             gate.severity === "warning" && "border-amber-300 bg-amber-50/60"
           )}
           key={gate.id}
         >
-          <GitPullRequest size={15} className="mt-0.5 text-muted-foreground" />
-          <div>
+          <GitPullRequest size={compact ? 14 : 15} className={cn("text-muted-foreground", !compact && "mt-0.5")} />
+          <div className={cn(compact && "compactSignalBody")}>
             <strong className="text-sm">{gate.targetType}</strong>
-            <p className="mt-1 text-xs text-muted-foreground">{gate.reason}</p>
-            <p className="mt-1 text-xs text-muted-foreground">Required: {gate.requiredAction}</p>
+            <span className={cn(compact ? "compactSignalText" : "mt-1 block text-xs text-muted-foreground")}>{gate.reason}</span>
+            <span className={cn(compact ? "compactSignalRequired" : "mt-1 block text-xs text-muted-foreground")}>Req: {gate.requiredAction}</span>
             {onClear && gate.status !== "cleared" && (
               <form
                 className="mt-2 grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]"
