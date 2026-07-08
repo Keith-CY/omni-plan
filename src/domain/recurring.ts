@@ -42,7 +42,7 @@ export function generateRecurringOccurrences(item: WorkItem, fallbackStart: ISOD
 
   for (let index = 0; index < count; index += 1) {
     const start = startMode === "after-previous-finish"
-      ? rollingStart
+      ? index === 0 ? rollingStart : addFixedCadence(rollingStart, rule, 1)
       : addFixedCadence(anchorStart, rule, index);
     const finish = addSeconds(start, duration);
     occurrences.push({ index: index + 1, start, finish, startMode });

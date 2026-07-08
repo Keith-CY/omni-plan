@@ -1,5 +1,6 @@
 import {
   AlertTriangle,
+  ArrowRightLeft,
   Archive,
   BarChart3,
   CalendarClock,
@@ -82,6 +83,7 @@ import {
   type GitHubSyncSettings
 } from "./domain/settings";
 import { BrowserWorkspaceRepository, browserWorkspaceStorageStatus } from "./domain/storage";
+import { moveWorkItemToProject } from "./domain/workItems";
 import {
   buildChangeEnvelopePath,
   buildGitHubSyncPaths,
@@ -187,11 +189,17 @@ interface AutoSyncStatus {
 type DependencyPatch = Partial<Pick<Dependency, "type" | "lagSeconds">>;
 
 interface ProjectCreateValues {
-  name: string;
-  mode: ProjectMode;
-  startDate: string;
-  userProblem: string;
-  appetiteKind: ShapeUpAppetiteKind;
+  title: string;
+}
+
+interface ProjectDetailsPatch {
+  name?: string;
+  mode?: ProjectMode;
+  northStar?: string;
+  currentOutcome?: string;
+  startDate?: string;
+  horizonDate?: string;
+  reviewCadenceDays?: number;
 }
 
 interface WorkItemCreateValues {
@@ -208,6 +216,11 @@ interface WorkItemCreateValues {
   isKeyTask: boolean;
   isScopeExpansion: boolean;
   isFastDelivery: boolean;
+}
+
+interface WorkItemMoveValues {
+  targetProjectId: string;
+  parentId?: string;
 }
 
 interface RepeatRuleDraft {
@@ -255,6 +268,19 @@ interface CalendarEvent {
   href: string;
   critical?: boolean;
   repeatLabel?: string;
+}
+
+interface CalendarRecurringRule {
+  id: string;
+  projectId: string;
+  projectName: string;
+  title: string;
+  outline: string;
+  cadenceLabel: string;
+  startModeLabel: string;
+  nextStart: string;
+  nextFinish: string;
+  href: string;
 }
 
 interface RouteState {
@@ -1024,40 +1050,34 @@ function RoutedApp() {
   };
 
   const createProject = (values: ProjectCreateValues) => {
-    const problem = values.userProblem.trim();
-    if (!problem) return;
-    const name = values.name.trim() || problem.split(/\s+/).slice(0, 8).join(" ");
+    const title = values.title.trim();
+    if (!title) return;
+    const name = title.split(/\s+/).slice(0, 8).join(" ").slice(0, 80) || title.slice(0, 80);
     const projectId = uniqueId("p", name, workspace.projects.map((project) => project.id));
     const createdAt = timestamp();
-    const appetiteDays = shapeUpAppetiteDays[values.appetiteKind];
-    const shapeUpPitch = createShapeUpPitch({
-      problem,
-      appetiteKind: values.appetiteKind,
-      now: createdAt
-    });
+    const start = toUtcStart(createdAt.slice(0, 10));
     const directionCard: DirectionCard = {
       targetUser: "Personal project operator",
-      userProblem: problem,
-      businessGoal: "Shape the project before committing execution time.",
+      userProblem: title,
+      businessGoal: title,
       coreHypothesis: "",
       successMetric: "",
-      failureCondition: "Betting Gate cannot be approved with missing Shape Up pitch fields.",
-      validationMethod: "Complete the Shape Up Pitch and review it at the Betting Gate.",
-      timeboxDays: appetiteDays,
+      failureCondition: "",
+      validationMethod: "",
+      timeboxDays: 14,
       opportunityCost: ""
     };
     const project: Project = {
       id: projectId,
       name,
-      status: "waiting",
-      mode: values.mode,
+      status: "active",
+      mode: "build",
       priority: 3,
-      northStar: `Shape ${name} into a bounded bet before execution.`,
-      currentOutcome: "Complete the Shape Up pitch and decide whether to bet.",
-      horizon: addSeconds(toUtcStart(values.startDate), appetiteDays * daySeconds),
-      start: toUtcStart(values.startDate),
+      northStar: title,
+      currentOutcome: title,
+      horizon: addSeconds(start, 14 * daySeconds),
+      start,
       directionCard,
-      shapeUpPitch,
       reviewCadenceDays: 7
     };
     setWorkspace((previous) => ({
@@ -1066,15 +1086,61 @@ function RoutedApp() {
       changeSets: [
         createChangeSet(
           projectId,
-          `Create Shape Up project ${name}`,
-          "Created as a waiting Shape Up pitch. It cannot enter execution until the Betting Gate is approved.",
-          [{ entity: "Project", entityId: projectId, field: "created", before: null, after: { name, createdAt, status: "waiting", appetiteDays } }],
+          `Create project ${name}`,
+          "Created as an active project from the quick project composer.",
+          [{ entity: "Project", entityId: projectId, field: "created", before: null, after: { name, createdAt, status: "active", mode: "build" } }],
           previous.changeSets.length
         ),
         ...previous.changeSets
       ]
     }));
-    routerNavigate(pathForRoute({ view: "project", selectedProjectId: projectId }));
+    window.setTimeout(() => {
+      routerNavigate(pathForRoute({ view: "project", selectedProjectId: projectId }));
+    }, 0);
+  };
+
+  const updateProjectDetails = (projectId: string, patch: ProjectDetailsPatch) => {
+    setWorkspace((previous) => {
+      const project = previous.projects.find((candidate) => candidate.id === projectId);
+      if (!project) return previous;
+
+      const nextProject: Project = { ...project };
+      const diffs: ChangeSet["diffs"] = [];
+      const setField = <K extends keyof Project>(field: K, value: Project[K]) => {
+        if (nextProject[field] === value) return;
+        diffs.push({ entity: "Project", entityId: projectId, field: String(field), before: nextProject[field], after: value });
+        nextProject[field] = value;
+      };
+
+      if (patch.name !== undefined) {
+        const name = patch.name.trim();
+        if (name) setField("name", name);
+      }
+      if (patch.mode) setField("mode", patch.mode);
+      if (patch.northStar !== undefined) setField("northStar", patch.northStar.trim());
+      if (patch.currentOutcome !== undefined) setField("currentOutcome", patch.currentOutcome.trim());
+      if (patch.startDate !== undefined) setField("start", toUtcStart(patch.startDate));
+      if (patch.horizonDate !== undefined) setField("horizon", toUtcStart(patch.horizonDate));
+      if (patch.reviewCadenceDays !== undefined) {
+        setField("reviewCadenceDays", Math.max(1, Math.min(365, Math.round(patch.reviewCadenceDays || 7))));
+      }
+
+      if (!diffs.length) return previous;
+      return {
+        ...previous,
+        projects: previous.projects.map((candidate) => candidate.id === projectId ? nextProject : candidate),
+        changeSets: [
+          createChangeSet(
+            projectId,
+            `Update project settings for ${nextProject.name}`,
+            "Edited project identity, outcome, mode, or scheduling defaults.",
+            diffs,
+            previous.changeSets.length
+          ),
+          ...previous.changeSets
+        ]
+      };
+    });
   };
 
   const updateDirectionCard = (projectId: string, directionCard: DirectionCard) => {
@@ -1402,6 +1468,62 @@ function RoutedApp() {
         ]
       };
     });
+  };
+
+  const moveWorkItem = (sourceProjectId: string, workItemId: string, values: WorkItemMoveValues) => {
+    const previous = workspaceRef.current;
+    const workItem = previous.workItems.find((item) => item.id === workItemId && item.projectId === sourceProjectId);
+    const sourceProject = previous.projects.find((project) => project.id === sourceProjectId);
+    const targetProject = previous.projects.find((project) => project.id === values.targetProjectId);
+    if (!workItem || !sourceProject || !targetProject || sourceProjectId === values.targetProjectId) return;
+
+    const result = moveWorkItemToProject(previous, {
+      workItemId,
+      targetProjectId: values.targetProjectId,
+      parentId: values.parentId
+    });
+    if (!result) return;
+
+    const movedIds = new Set(result.movedIds);
+    const diffs: ChangeSet["diffs"] = [];
+    for (const before of previous.workItems.filter((item) => movedIds.has(item.id))) {
+      const after = result.workspace.workItems.find((item) => item.id === before.id);
+      if (!after) continue;
+      diffs.push({ entity: "WorkItem", entityId: before.id, field: "projectId", before: before.projectId, after: after.projectId });
+      if ((before.parentId ?? null) !== (after.parentId ?? null)) {
+        diffs.push({ entity: "WorkItem", entityId: before.id, field: "parentId", before: before.parentId ?? null, after: after.parentId ?? null });
+      }
+      if (before.outline !== after.outline) {
+        diffs.push({ entity: "WorkItem", entityId: before.id, field: "outline", before: before.outline, after: after.outline });
+      }
+    }
+    for (const dependencyId of result.movedDependencyIds) {
+      diffs.push({ entity: "Dependency", entityId: dependencyId, field: "projectId", before: sourceProjectId, after: values.targetProjectId });
+    }
+    for (const dependencyId of result.removedDependencyIds) {
+      const dependency = previous.dependencies.find((item) => item.id === dependencyId);
+      diffs.push({ entity: "Dependency", entityId: dependencyId, field: "removed", before: dependency ?? dependencyId, after: null });
+    }
+
+    const movedLabel = result.movedIds.length === 1 ? "1 item" : `${result.movedIds.length} items`;
+    const nextWorkspace = {
+      ...result.workspace,
+      changeSets: [
+        createChangeSet(
+          values.targetProjectId,
+          `Move ${workItem.title}`,
+          `Moved ${movedLabel} from ${sourceProject.name} to ${targetProject.name}.`,
+          diffs,
+          previous.changeSets.length
+        ),
+        ...result.workspace.changeSets
+      ]
+    };
+    workspaceRef.current = nextWorkspace;
+    setWorkspace(nextWorkspace);
+    saveWorkspaceImmediately(nextWorkspace);
+    pushWorkspaceSoon("Work item moved; syncing workspace now.");
+    navigate("project", values.targetProjectId);
   };
 
   const updateWorkItemRepeatRule = (projectId: string, workItemId: string, repeatRule?: RepeatRule) => {
@@ -1979,7 +2101,9 @@ function RoutedApp() {
         {view === "project" && selectedProject && selectedSchedule && (
           <ProjectWorkspace
             project={selectedProject}
+            target={route.target}
             workItems={workspace.workItems.filter((item) => item.projectId === selectedProject.id)}
+            allWorkItems={workspace.workItems}
             baseline={selectedBaseline}
             baselineChangeSet={selectedBaseline ? workspace.changeSets.find((changeSet) =>
               changeSet.projectId === selectedProject.id &&
@@ -1994,11 +2118,13 @@ function RoutedApp() {
             evidence={workspace.evidence.filter((item) => item.projectId === selectedProject.id)}
             onProjectChange={(projectId) => navigate("project", projectId)}
             onProjectStatusUpdate={updateProjectStatus}
+            onProjectDetailsUpdate={updateProjectDetails}
             onDirectionCardUpdate={updateDirectionCard}
             onShapeUpPitchUpdate={updateShapeUpPitch}
             onShapeUpBetApprove={approveShapeUpBet}
             onShapeUpConvert={convertProjectToShapeUp}
             onWorkItemCreate={createWorkItem}
+            onWorkItemMove={moveWorkItem}
             onWorkItemRepeatRuleUpdate={updateWorkItemRepeatRule}
             onDependencyCreate={createDependency}
             onEvidenceCreate={createEvidence}
@@ -2573,23 +2699,18 @@ function PortfolioDashboard({
 }
 
 function CreateProjectSheet({ onCreate }: { onCreate: (values: ProjectCreateValues) => void }) {
-  const today = now.slice(0, 10);
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState<ProjectCreateValues>({
-    name: "",
-    mode: "build",
-    startDate: today,
-    userProblem: "",
-    appetiteKind: "small-batch"
+    title: ""
   });
   const update = (patch: Partial<ProjectCreateValues>) => setDraft((current) => ({ ...current, ...patch }));
 
   const submit = (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (!draft.userProblem.trim()) return;
+    if (!draft.title.trim()) return;
     onCreate(draft);
     setOpen(false);
-    setDraft((current) => ({ ...current, name: "", userProblem: "", appetiteKind: "small-batch" }));
+    setDraft({ title: "" });
   };
 
   return (
@@ -2600,35 +2721,19 @@ function CreateProjectSheet({ onCreate }: { onCreate: (values: ProjectCreateValu
           New Project
         </Button>
       </SheetTrigger>
-      <SheetContent className="w-[94vw] overflow-y-auto sm:max-w-2xl">
+      <SheetContent className="w-[94vw] overflow-y-auto sm:max-w-lg">
         <SheetHeader>
-          <SheetTitle>Create Shape Up Project</SheetTitle>
-          <SheetDescription>Capture a bounded pitch candidate. It starts waiting and cannot enter execution until Betting Gate approval.</SheetDescription>
+          <SheetTitle>New project</SheetTitle>
+          <SheetDescription>Capture the work first. Advanced strategy and scheduling can be filled in later.</SheetDescription>
         </SheetHeader>
-        <form className="mt-4 grid gap-4" onSubmit={submit}>
-          <div className="grid gap-3 md:grid-cols-2">
-            <SettingsInput label="Project name" name="project-name" value={draft.name} onChange={(value) => update({ name: value })} placeholder="Optional; otherwise derived from the problem" autoComplete="off" testId="project-name" />
-            <NativeSelectField
-              label="Mode"
-              value={draft.mode}
-              onChange={(value) => update({ mode: value as ProjectMode })}
-              options={projectModes.map((mode) => ({ value: mode, label: mode }))}
-              testId="project-mode"
-            />
-            <SettingsInput label="Start date" name="project-start" value={draft.startDate} onChange={(value) => update({ startDate: value })} placeholder="2026-07-01" autoComplete="off" testId="project-start" />
-            <NativeSelectField
-              label="Appetite"
-              value={draft.appetiteKind}
-              onChange={(value) => update({ appetiteKind: value as ShapeUpAppetiteKind })}
-              options={[
-                { value: "small-batch", label: "Small Batch - 2 weeks" },
-                { value: "big-batch", label: "Big Batch - 6 weeks" }
-              ]}
-              testId="shapeup-appetite"
-            />
+        <form className="quickProjectForm" onSubmit={submit}>
+          <FormTextarea label="Title / problem" value={draft.title} onChange={(value) => update({ title: value })} placeholder="What needs to be made visible and actionable?" />
+          <div className="quickProjectDefaults" aria-label="Project defaults">
+            <Badge variant="success" className="iconBadge" title="Lifecycle status"><CheckCircle2 />active</Badge>
+            <Badge variant="secondary" className="iconBadge" title="Mode"><Workflow />build</Badge>
+            <Badge variant="outline" className="iconBadge" title="Start date"><CalendarClock />today</Badge>
           </div>
-          <FormTextarea label="Problem" value={draft.userProblem} onChange={(value) => update({ userProblem: value })} placeholder="What problem is worth shaping before betting execution time?" />
-          <Button type="submit" disabled={!draft.userProblem.trim()}>Create waiting pitch</Button>
+          <Button type="submit" disabled={!draft.title.trim()}><Plus />Create project</Button>
         </form>
       </SheetContent>
     </Sheet>
@@ -2637,7 +2742,9 @@ function CreateProjectSheet({ onCreate }: { onCreate: (values: ProjectCreateValu
 
 function ProjectWorkspace({
   project,
+  target,
   workItems,
+  allWorkItems,
   projects,
   baseline,
   baselineChangeSet,
@@ -2649,11 +2756,13 @@ function ProjectWorkspace({
   evidence,
   onProjectChange,
   onProjectStatusUpdate,
+  onProjectDetailsUpdate,
   onDirectionCardUpdate,
   onShapeUpPitchUpdate,
   onShapeUpBetApprove,
   onShapeUpConvert,
   onWorkItemCreate,
+  onWorkItemMove,
   onWorkItemRepeatRuleUpdate,
   onDependencyCreate,
   onEvidenceCreate,
@@ -2669,7 +2778,9 @@ function ProjectWorkspace({
   onDependencyRemove
 }: {
   project: Project;
+  target?: string;
   workItems: WorkItem[];
+  allWorkItems: WorkItem[];
   projects: Project[];
   baseline?: Baseline;
   baselineChangeSet?: ChangeSet;
@@ -2681,11 +2792,13 @@ function ProjectWorkspace({
   evidence: Evidence[];
   onProjectChange: (projectId: string) => void;
   onProjectStatusUpdate: (projectId: string, status: ProjectStatus) => void;
+  onProjectDetailsUpdate: (projectId: string, patch: ProjectDetailsPatch) => void;
   onDirectionCardUpdate: (projectId: string, directionCard: DirectionCard) => void;
   onShapeUpPitchUpdate: (projectId: string, pitch: ShapeUpPitch) => void;
   onShapeUpBetApprove: (projectId: string) => void;
   onShapeUpConvert: (projectId: string) => void;
   onWorkItemCreate: (projectId: string, values: WorkItemCreateValues) => void;
+  onWorkItemMove: (sourceProjectId: string, workItemId: string, values: WorkItemMoveValues) => void;
   onWorkItemRepeatRuleUpdate: (projectId: string, workItemId: string, repeatRule?: RepeatRule) => void;
   onDependencyCreate: (projectId: string, values: DependencyCreateValues) => void;
   onEvidenceCreate: (projectId: string, values: EvidenceCreateValues) => void;
@@ -2700,45 +2813,102 @@ function ProjectWorkspace({
   onDependencyUpdate: (dependencyId: string, patch: DependencyPatch) => void;
   onDependencyRemove: (dependencyId: string) => void;
 }) {
+  const tabTarget = target === "recurring" || target === "evidence" || target === "audit" || target === "baselines" || target === "reports" ? target : "plan";
   const next = nextScheduledItem(schedule.items);
   const blockingGate = gates.find((gate) => gate.severity === "hard" && gate.status !== "cleared");
   const latestEvidence = [...evidence].sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
   const shapeUpLocked = isShapeUpProject(project) && !isShapeUpBet(project);
   const shapeUpGanttEmpty = isShapeUpBet(project) && schedule.items.length === 0;
   const canDeleteProject = workItems.length === 0;
+  const [dailyDraft, setDailyDraft] = useState({
+    northStar: project.northStar,
+    currentOutcome: project.currentOutcome
+  });
+  useEffect(() => {
+    setDailyDraft({
+      northStar: project.northStar,
+      currentOutcome: project.currentOutcome
+    });
+  }, [project.id, project.northStar, project.currentOutcome]);
+  const dailyDirty = dailyDraft.northStar !== project.northStar || dailyDraft.currentOutcome !== project.currentOutcome;
 
   return (
     <section className="grid gap-3">
       <Card>
-        <CardContent className="grid gap-3 p-3 lg:grid-cols-[minmax(260px,0.7fr)_minmax(0,1.3fr)]">
-          <div className="space-y-2">
-            <NativeSelectField
-              label="Project"
-              value={project.id}
-              onChange={onProjectChange}
-              options={projects.map((candidate) => ({ value: candidate.id, label: candidate.name }))}
-              testId="project-selector"
-            />
-            <NativeSelectField
-              label="Lifecycle status"
-              value={projectLifecycleStatus(project)}
-              onChange={(value) => onProjectStatusUpdate(project.id, value as ProjectStatus)}
-              options={projectStatuses.map((status) => ({ value: status, label: status }))}
-              testId="project-status-selector"
-            />
+        <CardContent className="projectDailySurface">
+          <div className="projectDailyControls">
+            <div className="projectPickerGrid">
+              <NativeSelectField
+                label="Project"
+                value={project.id}
+                onChange={onProjectChange}
+                options={projects.map((candidate) => ({ value: candidate.id, label: candidate.name }))}
+                testId="project-selector"
+              />
+              <NativeSelectField
+                label="Status"
+                value={projectLifecycleStatus(project)}
+                onChange={(value) => onProjectStatusUpdate(project.id, value as ProjectStatus)}
+                options={projectStatuses.map((status) => ({ value: status, label: status }))}
+                testId="project-status-selector"
+              />
+            </div>
             <div className="flex flex-wrap gap-2">
               <Badge variant="secondary" className="iconBadge" title="Project mode"><Workflow />{project.mode}</Badge>
               {isProjectArchived(project) && <Badge variant="outline" className="iconBadge" title="Archived"><Archive />archived</Badge>}
               <Badge variant="outline" className="iconBadge" title="Horizon"><CalendarClock />{project.horizon.slice(5, 10)}</Badge>
               <Badge variant={blockingGate ? "destructive" : "success"} className="iconBadge" title={blockingGate?.reason ?? "No blocker"}>{blockingGate ? <Lock /> : <CheckCircle2 />}{blockingGate ? "gate" : "clear"}</Badge>
             </div>
-            {canDeleteProject && (
-              <Button type="button" variant="destructive" size="icon" onClick={() => onProjectDelete(project.id)} aria-label="Delete empty project" title="Delete empty project" data-testid="project-delete-empty">
-                <Trash2 />
-              </Button>
-            )}
+            <div className="projectDailyActions">
+              <ProjectAdvancedSheet
+                project={project}
+                onProjectDetailsUpdate={onProjectDetailsUpdate}
+                onDirectionCardUpdate={onDirectionCardUpdate}
+                onShapeUpPitchUpdate={onShapeUpPitchUpdate}
+                onShapeUpBetApprove={onShapeUpBetApprove}
+                onShapeUpConvert={onShapeUpConvert}
+              />
+              {canDeleteProject && (
+                <Button type="button" variant="destructive" size="icon" onClick={() => onProjectDelete(project.id)} aria-label="Delete empty project" title="Delete empty project" data-testid="project-delete-empty">
+                  <Trash2 />
+                </Button>
+              )}
+            </div>
           </div>
-          <div className="grid gap-2 md:grid-cols-3">
+
+          <form
+            className="projectOutcomeForm"
+            onSubmit={(event) => {
+              event.preventDefault();
+              onProjectDetailsUpdate(project.id, dailyDraft);
+            }}
+          >
+            <label>
+              <span><Target size={13} />Outcome</span>
+              <Input
+                name={`project-outcome-${project.id}`}
+                value={dailyDraft.currentOutcome}
+                onChange={(event) => setDailyDraft((current) => ({ ...current, currentOutcome: event.target.value }))}
+                placeholder="Current visible result"
+                autoComplete="off"
+              />
+            </label>
+            <label>
+              <span><FileText size={13} />North star</span>
+              <Input
+                name={`project-northstar-${project.id}`}
+                value={dailyDraft.northStar}
+                onChange={(event) => setDailyDraft((current) => ({ ...current, northStar: event.target.value }))}
+                placeholder="Why this project matters"
+                autoComplete="off"
+              />
+            </label>
+            <Button type="submit" size="icon" disabled={!dailyDirty} title="Save project summary" aria-label="Save project summary">
+              <Save />
+            </Button>
+          </form>
+
+          <div className="projectSignalTiles">
             <SummaryTile label={next ? `${scheduleTiming(next)} action` : "Next action"} value={next?.workItem.title ?? "No open scheduled work"} detail={next ? `${formatScheduleRange(next)} / ${next.isCritical ? "critical path" : "non-critical"}` : "Review baselines before adding more work."} />
             <SummaryTile label="Audit state" value={blockingGate ? "Blocked by hard gate" : "No hard blocker"} detail={blockingGate?.reason ?? "Warnings still need review before milestone closure."} tone={blockingGate ? "danger" : "default"} />
             <SummaryTile label="Evidence" value={formatFreshness(health?.evidenceFreshnessDays)} detail={latestEvidence?.summary ?? "Attach evidence before marking the next milestone complete."} />
@@ -2746,27 +2916,7 @@ function ProjectWorkspace({
         </CardContent>
       </Card>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>{project.northStar}</CardTitle>
-          <div className="compactBadgeRow">
-            <Badge variant="outline" className="iconBadge" title={project.currentOutcome}><Target />outcome</Badge>
-            <Badge variant="secondary" className="iconBadge" title={project.directionCard?.userProblem ?? project.currentOutcome}><FileText />brief</Badge>
-          </div>
-        </CardHeader>
-        <CardContent>
-          <DirectionCardPanel project={project} onSave={(directionCard) => onDirectionCardUpdate(project.id, directionCard)} />
-        </CardContent>
-      </Card>
-
-      <ShapeUpProjectPanel
-        project={project}
-        onSave={(pitch) => onShapeUpPitchUpdate(project.id, pitch)}
-        onBet={() => onShapeUpBetApprove(project.id)}
-        onConvert={() => onShapeUpConvert(project.id)}
-      />
-
-      <Tabs defaultValue="plan" className="w-full">
+      <Tabs key={`${project.id}-${tabTarget}`} defaultValue={tabTarget} className="w-full">
         <TabsList className="grid w-full grid-cols-3 sm:grid-cols-6 lg:w-auto">
           <TabsTrigger value="plan">Plan</TabsTrigger>
           <TabsTrigger value="recurring">Recurring</TabsTrigger>
@@ -2793,9 +2943,13 @@ function ProjectWorkspace({
                 onCreate={onWorkItemCreate}
               />
               <OutlineTable
+                projectId={project.id}
                 items={schedule.items}
                 gates={gates}
                 evidence={evidence}
+                projects={projects}
+                allWorkItems={allWorkItems}
+                onMoveItem={(workItemId, values) => onWorkItemMove(project.id, workItemId, values)}
                 onFinishItem={(item) => {
                   const plannedHours = Math.max(1, formatAssignmentHours(item) || Math.round(item.workItem.durationSeconds / 3600));
                   onActualRecord(project.id, item.workItem.id, {
@@ -2976,6 +3130,129 @@ function ProjectWorkspace({
         </TabsContent>
       </Tabs>
     </section>
+  );
+}
+
+function ProjectAdvancedSheet({
+  project,
+  onProjectDetailsUpdate,
+  onDirectionCardUpdate,
+  onShapeUpPitchUpdate,
+  onShapeUpBetApprove,
+  onShapeUpConvert
+}: {
+  project: Project;
+  onProjectDetailsUpdate: (projectId: string, patch: ProjectDetailsPatch) => void;
+  onDirectionCardUpdate: (projectId: string, directionCard: DirectionCard) => void;
+  onShapeUpPitchUpdate: (projectId: string, pitch: ShapeUpPitch) => void;
+  onShapeUpBetApprove: (projectId: string) => void;
+  onShapeUpConvert: (projectId: string) => void;
+}) {
+  const [detailsDraft, setDetailsDraft] = useState({
+    name: project.name,
+    mode: project.mode,
+    startDate: datePart(project.start),
+    horizonDate: datePart(project.horizon),
+    reviewCadenceDays: String(project.reviewCadenceDays || 7)
+  });
+  useEffect(() => {
+    setDetailsDraft({
+      name: project.name,
+      mode: project.mode,
+      startDate: datePart(project.start),
+      horizonDate: datePart(project.horizon),
+      reviewCadenceDays: String(project.reviewCadenceDays || 7)
+    });
+  }, [project.id, project.name, project.mode, project.start, project.horizon, project.reviewCadenceDays]);
+  const detailsDirty =
+    detailsDraft.name !== project.name ||
+    detailsDraft.mode !== project.mode ||
+    detailsDraft.startDate !== datePart(project.start) ||
+    detailsDraft.horizonDate !== datePart(project.horizon) ||
+    Number(detailsDraft.reviewCadenceDays || 7) !== project.reviewCadenceDays;
+
+  return (
+    <Sheet>
+      <SheetTrigger asChild>
+        <Button type="button" variant="outline" size="sm" className="projectAdvancedTrigger" title="Advanced project settings">
+          <SettingsIcon />
+          Advanced
+        </Button>
+      </SheetTrigger>
+      <SheetContent className="w-[94vw] overflow-y-auto sm:max-w-3xl">
+        <SheetHeader>
+          <SheetTitle>Advanced project settings</SheetTitle>
+          <SheetDescription>{project.name}</SheetDescription>
+        </SheetHeader>
+        <div className="projectAdvancedBody">
+          <form
+            className="projectAdvancedForm"
+            onSubmit={(event) => {
+              event.preventDefault();
+              if (!detailsDraft.name.trim()) return;
+              onProjectDetailsUpdate(project.id, {
+                name: detailsDraft.name,
+                mode: detailsDraft.mode,
+                startDate: detailsDraft.startDate,
+                horizonDate: detailsDraft.horizonDate,
+                reviewCadenceDays: Number(detailsDraft.reviewCadenceDays) || 7
+              });
+            }}
+          >
+            <section className="advancedSection">
+              <div className="advancedSectionHeader">
+                <h3><FileText />Identity</h3>
+                <Badge variant="secondary" className="iconBadge" title="Project mode"><Workflow />{detailsDraft.mode}</Badge>
+              </div>
+              <div className="advancedFieldGrid">
+                <SettingsInput label="Name" name={`advanced-project-name-${project.id}`} value={detailsDraft.name} onChange={(value) => setDetailsDraft((current) => ({ ...current, name: value }))} placeholder="Project name" autoComplete="off" />
+                <NativeSelectField
+                  label="Mode"
+                  value={detailsDraft.mode}
+                  onChange={(value) => setDetailsDraft((current) => ({ ...current, mode: value as ProjectMode }))}
+                  options={projectModes.map((mode) => ({ value: mode, label: mode }))}
+                />
+              </div>
+            </section>
+            <section className="advancedSection">
+              <div className="advancedSectionHeader">
+                <h3><CalendarClock />Scheduling</h3>
+                <Badge variant="outline" className="iconBadge" title="Review cadence"><RefreshCw />{detailsDraft.reviewCadenceDays || 7}d</Badge>
+              </div>
+              <div className="advancedFieldGrid">
+                <SettingsInput label="Start date" name={`advanced-project-start-${project.id}`} value={detailsDraft.startDate} onChange={(value) => setDetailsDraft((current) => ({ ...current, startDate: value }))} placeholder="2026-07-01" autoComplete="off" />
+                <SettingsInput label="Horizon date" name={`advanced-project-horizon-${project.id}`} value={detailsDraft.horizonDate} onChange={(value) => setDetailsDraft((current) => ({ ...current, horizonDate: value }))} placeholder="2026-07-15" autoComplete="off" />
+                <SettingsInput label="Review cadence days" name={`advanced-project-review-${project.id}`} value={detailsDraft.reviewCadenceDays} onChange={(value) => setDetailsDraft((current) => ({ ...current, reviewCadenceDays: value }))} placeholder="7" autoComplete="off" />
+              </div>
+              <div className="advancedSectionActions">
+                <Button type="submit" size="sm" disabled={!detailsDirty || !detailsDraft.name.trim()}><Save />Save settings</Button>
+              </div>
+            </section>
+          </form>
+
+          <section className="advancedSection">
+            <div className="advancedSectionHeader">
+              <h3><Target />Direction</h3>
+              <Badge variant={project.directionCard?.successMetric ? "success" : "warning"} className="iconBadge" title="Direction metric"><CheckCircle2 />metric</Badge>
+            </div>
+            <DirectionCardPanel project={project} onSave={(directionCard) => onDirectionCardUpdate(project.id, directionCard)} />
+          </section>
+
+          <section className="advancedSection">
+            <div className="advancedSectionHeader">
+              <h3><Target />Shape Up</h3>
+              <Badge variant={isShapeUpProject(project) ? "secondary" : "outline"} className="iconBadge" title="Shape Up mode"><Workflow />{isShapeUpProject(project) ? "on" : "off"}</Badge>
+            </div>
+            <ShapeUpProjectPanel
+              project={project}
+              onSave={(pitch) => onShapeUpPitchUpdate(project.id, pitch)}
+              onBet={() => onShapeUpBetApprove(project.id)}
+              onConvert={() => onShapeUpConvert(project.id)}
+            />
+          </section>
+        </div>
+      </SheetContent>
+    </Sheet>
   );
 }
 
@@ -3524,6 +3801,7 @@ function WorkItemComposer({
   onCreate: (projectId: string, values: WorkItemCreateValues) => void;
 }) {
   const [open, setOpen] = useState(false);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
   const [draft, setDraft] = useState<WorkItemCreateValues>({
     title: "",
     kind: "task",
@@ -3556,10 +3834,14 @@ function WorkItemComposer({
       isScopeExpansion: false,
       isFastDelivery: false
     }));
+    setAdvancedOpen(false);
     setOpen(false);
   };
   return (
-    <Sheet open={open} onOpenChange={setOpen}>
+    <Sheet open={open} onOpenChange={(nextOpen) => {
+      setOpen(nextOpen);
+      if (!nextOpen) setAdvancedOpen(false);
+    }}>
       <SheetTrigger asChild>
         <Button type="button" size="sm" className="outlineAddButton"><Plus />Add</Button>
       </SheetTrigger>
@@ -3575,60 +3857,75 @@ function WorkItemComposer({
             submitWorkItem();
           }}
         >
-          <div className="grid gap-3 md:grid-cols-3">
+          <div className="workItemQuickCreate">
             <SettingsInput label="Title" name={`work-title-${projectId}`} value={draft.title} onChange={(value) => update({ title: value })} placeholder="Task or milestone title" autoComplete="off" />
-            <NativeSelectField
-              label="Kind"
-              value={draft.kind}
-              onChange={(value) => update({ kind: value as WorkItemKind })}
-              options={workItemKinds.map((kind) => ({ value: kind, label: kind }))}
-              testId="work-item-kind"
-            />
-            <NativeSelectField
-              label="Parent phase"
-              value={draft.parentId ?? "none"}
-              onChange={(value) => update({ parentId: value === "none" ? undefined : value })}
-              options={[{ value: "none", label: "No parent" }, ...parentOptions.map((item) => ({ value: item.id, label: `${item.outline} ${item.title}` }))]}
-              testId="work-item-parent"
-            />
-            <label className="block">
-              <span className="text-sm font-medium">Duration days</span>
-              <Input className="mt-2" type="number" min={0} step={0.25} value={draft.durationDays} onChange={(event) => update({ durationDays: Number(event.target.value) || 0 })} disabled={draft.kind === "milestone"} />
-            </label>
-            <label className="block">
-              <span className="text-sm font-medium">Effort hours</span>
-              <Input className="mt-2" type="number" min={0} step={0.25} value={draft.effortHours} onChange={(event) => update({ effortHours: Number(event.target.value) || 0 })} />
-            </label>
-            <NativeSelectField
-              label="Attention"
-              value={draft.attention}
-              onChange={(value) => update({ attention: value as WorkItemCreateValues["attention"] })}
-              options={[
-                { value: "deep", label: "deep" },
-                { value: "medium", label: "medium" },
-                { value: "shallow", label: "shallow" }
-              ]}
-              testId="work-item-attention"
-            />
-            <NativeSelectField
-              label="Date constraint"
-              value={draft.constraintMode}
-              onChange={(value) => update({ constraintMode: value as WorkItemCreateValues["constraintMode"] })}
-              options={[
-                { value: "none", label: "None" },
-                { value: "noEarlierThan", label: "No earlier than" },
-                { value: "fixedStart", label: "Fixed start" }
-              ]}
-              testId="work-item-constraint-mode"
-            />
-            <SettingsInput label="Constraint date" name={`constraint-date-${projectId}`} value={draft.constraintDate} onChange={(value) => update({ constraintDate: value })} placeholder="2026-07-01" autoComplete="off" />
+            <div className="quickProjectDefaults" aria-label="Work item defaults">
+              <Badge variant="secondary" className="iconBadge" title="Kind"><Workflow />{draft.kind}</Badge>
+              <Badge variant="outline" className="iconBadge" title="Duration"><CalendarClock />{draft.durationDays}d</Badge>
+              <Badge variant="outline" className="iconBadge" title="Effort"><Timer />{draft.effortHours}h</Badge>
+              <Button type="button" variant="outline" size="sm" onClick={() => setAdvancedOpen((current) => !current)} aria-expanded={advancedOpen}>
+                <SettingsIcon />
+                Advanced
+              </Button>
+            </div>
           </div>
-          <div className="mt-3 flex flex-wrap gap-3 text-sm">
-            <ToggleField label="Evidence required" checked={draft.evidenceRequired} onChange={(checked) => update({ evidenceRequired: checked })} />
-            <ToggleField label="Key task" checked={draft.isKeyTask} onChange={(checked) => update({ isKeyTask: checked })} />
-            <ToggleField label="Scope expansion" checked={draft.isScopeExpansion} onChange={(checked) => update({ isScopeExpansion: checked })} />
-            <ToggleField label="Fast delivery" checked={draft.isFastDelivery} onChange={(checked) => update({ isFastDelivery: checked })} />
-          </div>
+          {advancedOpen && (
+            <div className="workItemAdvancedPanel">
+              <div className="advancedFieldGrid">
+                <NativeSelectField
+                  label="Kind"
+                  value={draft.kind}
+                  onChange={(value) => update({ kind: value as WorkItemKind })}
+                  options={workItemKinds.map((kind) => ({ value: kind, label: kind }))}
+                  testId="work-item-kind"
+                />
+                <NativeSelectField
+                  label="Parent phase"
+                  value={draft.parentId ?? "none"}
+                  onChange={(value) => update({ parentId: value === "none" ? undefined : value })}
+                  options={[{ value: "none", label: "No parent" }, ...parentOptions.map((item) => ({ value: item.id, label: `${item.outline} ${item.title}` }))]}
+                  testId="work-item-parent"
+                />
+                <label className="block">
+                  <span className="text-sm font-medium">Duration days</span>
+                  <Input className="mt-2" type="number" min={0} step={0.25} value={draft.durationDays} onChange={(event) => update({ durationDays: Number(event.target.value) || 0 })} disabled={draft.kind === "milestone"} />
+                </label>
+                <label className="block">
+                  <span className="text-sm font-medium">Effort hours</span>
+                  <Input className="mt-2" type="number" min={0} step={0.25} value={draft.effortHours} onChange={(event) => update({ effortHours: Number(event.target.value) || 0 })} />
+                </label>
+                <NativeSelectField
+                  label="Attention"
+                  value={draft.attention}
+                  onChange={(value) => update({ attention: value as WorkItemCreateValues["attention"] })}
+                  options={[
+                    { value: "deep", label: "deep" },
+                    { value: "medium", label: "medium" },
+                    { value: "shallow", label: "shallow" }
+                  ]}
+                  testId="work-item-attention"
+                />
+                <NativeSelectField
+                  label="Date constraint"
+                  value={draft.constraintMode}
+                  onChange={(value) => update({ constraintMode: value as WorkItemCreateValues["constraintMode"] })}
+                  options={[
+                    { value: "none", label: "None" },
+                    { value: "noEarlierThan", label: "No earlier than" },
+                    { value: "fixedStart", label: "Fixed start" }
+                  ]}
+                  testId="work-item-constraint-mode"
+                />
+                <SettingsInput label="Constraint date" name={`constraint-date-${projectId}`} value={draft.constraintDate} onChange={(value) => update({ constraintDate: value })} placeholder="2026-07-01" autoComplete="off" />
+              </div>
+              <div className="mt-3 flex flex-wrap gap-3 text-sm">
+                <ToggleField label="Evidence required" checked={draft.evidenceRequired} onChange={(checked) => update({ evidenceRequired: checked })} />
+                <ToggleField label="Key task" checked={draft.isKeyTask} onChange={(checked) => update({ isKeyTask: checked })} />
+                <ToggleField label="Scope expansion" checked={draft.isScopeExpansion} onChange={(checked) => update({ isScopeExpansion: checked })} />
+                <ToggleField label="Fast delivery" checked={draft.isFastDelivery} onChange={(checked) => update({ isFastDelivery: checked })} />
+              </div>
+            </div>
+          )}
           <div className="mt-4 flex justify-end">
             <Button type="submit" disabled={!draft.title.trim()}><Plus />Add</Button>
           </div>
@@ -3850,10 +4147,12 @@ function CalendarView({
   const [monthStart, setMonthStart] = useState(() => monthStartIso(now));
   const [selectedDay, setSelectedDay] = useState(now.slice(0, 10));
   const [monthEventsOpen, setMonthEventsOpen] = useState(false);
+  const [recurringOpen, setRecurringOpen] = useState(false);
   const days = buildCalendarDays(monthStart);
   const gridStart = `${days[0]}T00:00:00.000Z`;
   const gridEnd = addSeconds(`${days[days.length - 1]}T00:00:00.000Z`, daySeconds);
   const events = buildCalendarEvents(projects, workItems, schedules, gridStart, gridEnd);
+  const recurringRules = buildRecurringRules(projects, workItems);
   const eventsByDay = new Map<string, CalendarEvent[]>();
   for (const event of events) {
     const day = event.start.slice(0, 10);
@@ -3862,6 +4161,7 @@ function CalendarView({
   const monthEvents = events.filter((event) => isSameUtcMonth(event.start.slice(0, 10), monthStart));
   const selectedEvents = eventsByDay.get(selectedDay) ?? [];
   const monthEventPage = usePagedItems(monthEvents, 10);
+  const recurringRulePage = usePagedItems(recurringRules, 12);
   const activeProjectCount = projects.filter((project) => !isProjectArchived(project)).length;
   const selectedLabel = new Intl.DateTimeFormat("en", { day: "2-digit", month: "short", timeZone: "UTC", weekday: "short" }).format(new Date(`${selectedDay}T00:00:00.000Z`));
 
@@ -3898,7 +4198,13 @@ function CalendarView({
           onClick={() => setMonthEventsOpen(true)}
           ariaLabel={`Open ${monthEvents.length} month events`}
         />
-        <SummaryTile label="Recurring" value={String(monthEvents.filter((event) => event.kind === "recurring").length)} detail="Generated from repeat rules" />
+        <SummaryTile
+          label="Recurring"
+          value={String(recurringRules.length)}
+          detail={`${monthEvents.filter((event) => event.kind === "recurring").length} this month`}
+          onClick={() => setRecurringOpen(true)}
+          ariaLabel={`Open ${recurringRules.length} recurring rules`}
+        />
         <SummaryTile label="Critical" value={String(monthEvents.filter((event) => event.critical).length)} detail="Scheduled critical path starts" tone={monthEvents.some((event) => event.critical) ? "warning" : "default"} />
         <SummaryTile label="Selected day" value={String(selectedEvents.length)} detail={selectedLabel} />
       </div>
@@ -3918,6 +4224,41 @@ function CalendarView({
               </div>
             )}
             <PaginationControls label="month events" {...monthEventPage} onPageChange={monthEventPage.setPage} />
+          </div>
+        </SheetContent>
+      </Sheet>
+      <Sheet open={recurringOpen} onOpenChange={setRecurringOpen}>
+        <SheetContent className="w-[92vw] overflow-y-auto sm:max-w-2xl">
+          <SheetHeader>
+            <SheetTitle>Recurring rules</SheetTitle>
+            <SheetDescription>{recurringRules.length} rules across active projects</SheetDescription>
+          </SheetHeader>
+          <div className="calendarRecurringList">
+            {recurringRules.length ? recurringRulePage.items.map((rule) => (
+              <a key={rule.id} className="calendarRecurringRule" href={rule.href}>
+                <div className="calendarAgendaIcon">
+                  <RefreshCw />
+                </div>
+                <div className="calendarRecurringRuleBody">
+                  <div className="calendarRecurringRuleTitle">
+                    <Badge variant="secondary">{rule.outline}</Badge>
+                    <strong title={rule.title}>{rule.title}</strong>
+                  </div>
+                  <div className="calendarRecurringRuleMeta">
+                    <Badge variant="outline"><RefreshCw />{rule.cadenceLabel}</Badge>
+                    <Badge variant="outline"><Timer />{rule.startModeLabel}</Badge>
+                    <Badge variant="outline"><CalendarClock />{formatShortDateTime(rule.nextStart)}</Badge>
+                  </div>
+                  <span>{rule.projectName}</span>
+                </div>
+              </a>
+            )) : (
+              <div className="emptyState">
+                <RefreshCw />
+                <span>No recurring rules configured.</span>
+              </div>
+            )}
+            <PaginationControls label="recurring rules" {...recurringRulePage} onPageChange={recurringRulePage.setPage} />
           </div>
         </SheetContent>
       </Sheet>
@@ -4040,6 +4381,33 @@ function buildCalendarEvents(
   }
 
   return events.sort((a, b) => a.start.localeCompare(b.start) || a.projectName.localeCompare(b.projectName) || a.title.localeCompare(b.title));
+}
+
+function buildRecurringRules(projects: Project[], workItems: WorkItem[]): CalendarRecurringRule[] {
+  const projectById = new Map(projects.map((project) => [project.id, project]));
+  const rules: CalendarRecurringRule[] = [];
+  for (const item of workItems) {
+    if (!item.repeatRule || item.kind === "phase") continue;
+    const project = projectById.get(item.projectId);
+    if (!project || isProjectArchived(project)) continue;
+    const occurrenceLimit = Math.min(90, Math.max(1, Math.round(item.repeatRule.count || 1)));
+    const occurrences = generateRecurringOccurrences(item, project.start, occurrenceLimit);
+    const nextOccurrence = occurrences.find((occurrence) => occurrence.start >= now) ?? occurrences[0];
+    if (!nextOccurrence) continue;
+    rules.push({
+      id: item.id,
+      projectId: project.id,
+      projectName: project.name,
+      title: item.title,
+      outline: item.outline,
+      cadenceLabel: repeatCadenceLabel(item.repeatRule),
+      startModeLabel: repeatStartModeLabel(item.repeatRule),
+      nextStart: nextOccurrence.start,
+      nextFinish: nextOccurrence.finish,
+      href: hashForRoute({ view: "project", selectedProjectId: project.id, target: "recurring" })
+    });
+  }
+  return rules.sort((a, b) => a.nextStart.localeCompare(b.nextStart) || a.projectName.localeCompare(b.projectName) || a.title.localeCompare(b.title));
 }
 
 function CalendarAgendaEvent({ event }: { event: CalendarEvent }) {
@@ -6289,15 +6657,120 @@ function matrixDecisionLabel(decision: MatrixDecision) {
   return "Watch";
 }
 
+function MoveWorkItemSheet({
+  projectId,
+  item,
+  projects,
+  allWorkItems,
+  onMove
+}: {
+  projectId: string;
+  item: WorkItem;
+  projects: Project[];
+  allWorkItems: WorkItem[];
+  onMove: (workItemId: string, values: WorkItemMoveValues) => void;
+}) {
+  const targetProjects = projects.filter((project) => project.id !== projectId && !isProjectArchived(project));
+  const targetProjectKey = targetProjects.map((project) => project.id).join("|");
+  const [open, setOpen] = useState(false);
+  const [targetProjectId, setTargetProjectId] = useState(targetProjects[0]?.id ?? "");
+  const [parentId, setParentId] = useState("none");
+
+  useEffect(() => {
+    setTargetProjectId((current) => targetProjects.some((project) => project.id === current) ? current : targetProjects[0]?.id ?? "");
+    setParentId("none");
+  }, [projectId, targetProjectKey]);
+
+  const parentOptions = allWorkItems
+    .filter((candidate) => candidate.projectId === targetProjectId && candidate.kind === "phase")
+    .sort((a, b) => a.outline.localeCompare(b.outline, undefined, { numeric: true }));
+  const targetProject = targetProjects.find((project) => project.id === targetProjectId);
+  const canMove = Boolean(targetProjectId);
+
+  return (
+    <Sheet open={open} onOpenChange={setOpen}>
+      <SheetTrigger asChild>
+        <Button
+          type="button"
+          size="icon"
+          variant="outline"
+          disabled={!targetProjects.length}
+          aria-label={`Move ${item.title} to another project`}
+          title={targetProjects.length ? "Move to project" : "No other active project"}
+        >
+          <ArrowRightLeft />
+        </Button>
+      </SheetTrigger>
+      <SheetContent className="w-[92vw] overflow-y-auto sm:max-w-md">
+        <SheetHeader>
+          <SheetTitle>Move work item</SheetTitle>
+          <SheetDescription>{item.outline} {item.title}</SheetDescription>
+        </SheetHeader>
+        <form
+          className="moveWorkItemForm"
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (!canMove) return;
+            onMove(item.id, {
+              targetProjectId,
+              parentId: parentId === "none" ? undefined : parentId
+            });
+            setOpen(false);
+          }}
+        >
+          <div className="moveWorkItemSummary">
+            <Badge variant="secondary" className="iconBadge" title="Kind"><Workflow />{item.kind}</Badge>
+            {item.kind === "phase" && <Badge variant="warning" className="iconBadge" title="Child items move with this phase"><Layers3 />subtree</Badge>}
+            {item.repeatRule && <Badge variant="outline" className="iconBadge" title="Recurring rule preserved"><RefreshCw />repeat</Badge>}
+          </div>
+          <NativeSelectField
+            label="Target project"
+            value={targetProjectId}
+            onChange={(value) => {
+              setTargetProjectId(value);
+              setParentId("none");
+            }}
+            options={targetProjects.map((project) => ({ value: project.id, label: project.name }))}
+          />
+          <NativeSelectField
+            label="Parent phase"
+            value={parentId}
+            onChange={setParentId}
+            options={[{ value: "none", label: "No parent" }, ...parentOptions.map((phase) => ({ value: phase.id, label: `${phase.outline} ${phase.title}` }))]}
+          />
+          <div className="moveWorkItemNote">
+            <CheckCircle2 size={14} />
+            <span>Evidence, progress, and recurrence follow the item. Dependencies that still point back to the old project are removed.</span>
+          </div>
+          <div className="flex justify-end">
+            <Button type="submit" disabled={!canMove}>
+              <ArrowRightLeft />
+              Move{targetProject ? ` to ${compactProjectLabel(targetProject.name)}` : ""}
+            </Button>
+          </div>
+        </form>
+      </SheetContent>
+    </Sheet>
+  );
+}
+
 function OutlineTable({
+  projectId,
   items,
   gates,
   evidence,
+  projects,
+  allWorkItems,
+  onMoveItem,
   onFinishItem
 }: {
+  projectId: string;
   items: ScheduledItem[];
   gates: AuditGate[];
   evidence: Evidence[];
+  projects: Project[];
+  allWorkItems: WorkItem[];
+  onMoveItem: (workItemId: string, values: WorkItemMoveValues) => void;
   onFinishItem: (item: ScheduledItem) => void;
 }) {
   const itemPage = usePagedItems(items, 10);
@@ -6351,15 +6824,24 @@ function OutlineTable({
                     </Badge>
                   </TableCell>
                   <TableCell>
-                    {item.workItem.kind === "phase" ? (
-                      <span className="text-xs text-muted-foreground">-</span>
-                    ) : item.workItem.percentComplete >= 100 ? (
-                      <Badge variant="success">Done</Badge>
-                    ) : (
-                      <Button type="button" size="icon" variant="outline" onClick={() => onFinishItem(item)} aria-label={`Mark ${item.workItem.title} done`} title="Mark done">
-                        <CheckCircle2 />
-                      </Button>
-                    )}
+                    <div className="outlineActionCell">
+                      <MoveWorkItemSheet
+                        projectId={projectId}
+                        item={item.workItem}
+                        projects={projects}
+                        allWorkItems={allWorkItems}
+                        onMove={onMoveItem}
+                      />
+                      {item.workItem.kind === "phase" ? (
+                        <span className="text-xs text-muted-foreground">-</span>
+                      ) : item.workItem.percentComplete >= 100 ? (
+                        <Badge variant="success">Done</Badge>
+                      ) : (
+                        <Button type="button" size="icon" variant="outline" onClick={() => onFinishItem(item)} aria-label={`Mark ${item.workItem.title} done`} title="Mark done">
+                          <CheckCircle2 />
+                        </Button>
+                      )}
+                    </div>
                   </TableCell>
                 </TableRow>
               );

@@ -1979,6 +1979,74 @@ input:focus-visible {
   margin-top: 16px;
 }
 
+.calendarRecurringList {
+  display: grid;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.calendarRecurringRule {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  gap: 9px;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 9px;
+  background: var(--surface);
+  color: var(--ink);
+  text-decoration: none;
+  transition: border-color 160ms ease, background 160ms ease;
+}
+
+.calendarRecurringRule:hover,
+.calendarRecurringRule:focus-visible {
+  border-color: rgba(37, 99, 235, 0.38);
+  background: rgba(37, 99, 235, 0.05);
+}
+
+.calendarRecurringRuleBody {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.calendarRecurringRuleTitle,
+.calendarRecurringRuleMeta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.calendarRecurringRuleTitle strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 950;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.calendarRecurringRuleMeta {
+  flex-wrap: wrap;
+}
+
+.calendarRecurringRuleMeta svg {
+  width: 12px;
+  height: 12px;
+}
+
+.calendarRecurringRuleBody > span {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 750;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .calendarAgendaItem {
   display: grid;
   grid-template-columns: 34px minmax(0, 1fr);
@@ -3417,6 +3485,141 @@ th {
   line-height: 1.4;
 }
 
+.quickProjectForm {
+  display: grid;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.quickProjectDefaults {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.projectDailySurface {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+}
+
+.projectDailyControls {
+  display: grid;
+  grid-template-columns: minmax(260px, 0.8fr) minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 10px;
+  min-width: 0;
+}
+
+.projectPickerGrid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(140px, 0.6fr);
+  gap: 8px;
+  min-width: 0;
+}
+
+.projectDailyActions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.projectOutcomeForm {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 8px;
+  min-width: 0;
+}
+
+.projectOutcomeForm label {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.projectOutcomeForm label > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 950;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.projectSignalTiles {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.projectAdvancedTrigger svg {
+  width: 14px;
+  height: 14px;
+}
+
+.projectAdvancedBody {
+  display: grid;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.projectAdvancedForm {
+  display: grid;
+  gap: 12px;
+}
+
+.advancedSection {
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 10px;
+}
+
+.advancedSectionHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.advancedSectionHeader h3 {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  margin: 0;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 950;
+}
+
+.advancedSectionHeader h3 svg {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+}
+
+.advancedFieldGrid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  min-width: 0;
+}
+
+.advancedSectionActions {
+  display: flex;
+  justify-content: flex-end;
+}
+
 .directionCompactForm {
   display: grid;
   gap: 10px;
@@ -3504,7 +3707,21 @@ th {
 }
 
 .workItemSheetForm {
+  display: grid;
+  gap: 12px;
   margin-top: 16px;
+}
+
+.workItemQuickCreate {
+  display: grid;
+  gap: 10px;
+}
+
+.workItemAdvancedPanel {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(248, 250, 252, 0.72);
+  padding: 10px;
 }
 
 .outlineItemCell {
@@ -3534,6 +3751,45 @@ th {
 
 .outlinePlanCell {
   min-width: 78px;
+}
+
+.outlineActionCell {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 78px;
+}
+
+.outlineActionCell > button {
+  width: 32px;
+  height: 32px;
+}
+
+.moveWorkItemForm {
+  display: grid;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.moveWorkItemSummary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.moveWorkItemNote {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 7px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(248, 250, 252, 0.8);
+  color: var(--text-muted);
+  padding: 8px 9px;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.35;
 }
 
 .completionBlockers {
@@ -3702,6 +3958,18 @@ th {
     grid-template-columns: 1fr;
   }
 
+  .projectDailyControls,
+  .projectOutcomeForm,
+  .projectSignalTiles,
+  .advancedFieldGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .projectDailyActions,
+  .advancedSectionActions {
+    justify-content: flex-start;
+  }
+
   .focusVisualGrid {
     grid-template-columns: 1fr;
   }
@@ -3793,6 +4061,7 @@ th {
   }
 
   .directionGrid,
+  .projectPickerGrid,
   .completionBlockers {
     grid-template-columns: 1fr;
   }

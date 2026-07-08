@@ -24,7 +24,7 @@ describe("recurring work items", () => {
     expect(repeatStartModeLabel(item.repeatRule)).toBe("fixed time");
   });
 
-  it("starts the next rolling occurrence when the previous one finishes", () => {
+  it("starts the next rolling occurrence from the previous finish plus cadence", () => {
     const item = workItem({
       durationSeconds: 2 * 24 * 60 * 60,
       repeatRule: {
@@ -40,8 +40,8 @@ describe("recurring work items", () => {
 
     expect(occurrences.map((occurrence) => [occurrence.start, occurrence.finish])).toEqual([
       ["2026-07-06T08:00:00.000Z", "2026-07-08T08:00:00.000Z"],
-      ["2026-07-08T08:00:00.000Z", "2026-07-10T08:00:00.000Z"],
-      ["2026-07-10T08:00:00.000Z", "2026-07-12T08:00:00.000Z"]
+      ["2026-07-15T08:00:00.000Z", "2026-07-17T08:00:00.000Z"],
+      ["2026-07-24T08:00:00.000Z", "2026-07-26T08:00:00.000Z"]
     ]);
     expect(repeatCadenceLabel(item.repeatRule)).toBe("every 7d");
     expect(repeatStartModeLabel(item.repeatRule)).toBe("after previous finish");
