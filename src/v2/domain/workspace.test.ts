@@ -51,6 +51,17 @@ describe("stableHash", () => {
       await stableHash({ outer: { a: 1, b: 2 } }),
     );
   });
+
+  it("orders distinct canonically equivalent Unicode keys deterministically", async () => {
+    const composed = "é";
+    const decomposed = "e\u0301";
+    const composedFirst = { [composed]: 1, [decomposed]: 2 };
+    const decomposedFirst = { [decomposed]: 2, [composed]: 1 };
+
+    expect(await stableHash(composedFirst)).toBe(
+      await stableHash(decomposedFirst),
+    );
+  });
 });
 
 describe("V2 test builders", () => {
