@@ -231,6 +231,40 @@ function buildPersistedRebetPausedWorkspaces(): {
   };
 }
 
+function advanceReferencedDependencyBeyondPlanSnapshot(
+  workspace: WorkspaceV2,
+): void {
+  const dependency = workspace.dependencies.find(
+    ({ id }) => id === "dependency-history",
+  );
+  if (dependency === undefined) {
+    throw new Error("Expected dependency-history fixture");
+  }
+  dependency.lagSeconds = 600;
+  dependency.revision = 2;
+}
+
+function buildPendingReplanRebetPausedWorkspaces(): {
+  previous: WorkspaceV2;
+  candidate: WorkspaceV2;
+} {
+  const workspaces = buildRebetPausedWorkspaces();
+  advanceReferencedDependencyBeyondPlanSnapshot(workspaces.previous);
+  advanceReferencedDependencyBeyondPlanSnapshot(workspaces.candidate);
+  return workspaces;
+}
+
+function buildPersistedPendingReplanRebetPausedWorkspaces(): {
+  previous: WorkspaceV2;
+  candidate: WorkspaceV2;
+} {
+  const paused = buildPendingReplanRebetPausedWorkspaces().candidate;
+  return {
+    previous: structuredClone(paused),
+    candidate: structuredClone(paused),
+  };
+}
+
 describe("validateWorkspaceInvariants Bet rules", () => {
   it("accepts a valid deterministic workspace without mutation", () => {
     const workspace = buildValidWorkspace();
@@ -529,12 +563,12 @@ describe("validateWorkspaceInvariants Bet rules", () => {
   });
 
   it.each(["atomic", "persisted"] as const)(
-    "rejects a referenced ProjectDependency revision change during an %s Re-bet pause",
+    "rejects a referenced ProjectDependency change from a pending Replan during an %s Re-bet pause",
     (mode) => {
       const { previous, candidate } =
         mode === "atomic"
-          ? buildRebetPausedWorkspaces()
-          : buildPersistedRebetPausedWorkspaces();
+          ? buildPendingReplanRebetPausedWorkspaces()
+          : buildPersistedPendingReplanRebetPausedWorkspaces();
       const dependency = candidate.dependencies.find(
         ({ id }) => id === "dependency-history",
       );
@@ -542,7 +576,7 @@ describe("validateWorkspaceInvariants Bet rules", () => {
         throw new Error("Expected dependency-history fixture");
       }
       dependency.lagSeconds = 900;
-      dependency.revision += 1;
+      dependency.revision = 3;
 
       expect(
         validateWorkspaceInvariants(candidate, NOW, previous),
@@ -554,6 +588,55 @@ describe("validateWorkspaceInvariants Bet rules", () => {
       );
     },
   );
+
+  it("allows an atomic Re-bet pause when a pending Replan has advanced the live dependency", () => {
+    const { previous, candidate } = buildPendingReplanRebetPausedWorkspaces();
+
+    expect(previous.planVersions[0].dependencyRevisions).toEqual({
+      "dependency-history": 1,
+    });
+    expect(
+      previous.dependencies.find(({ id }) => id === "dependency-history")
+        ?.revision,
+    ).toBe(2);
+    expect(
+      validateWorkspaceInvariants(candidate, NOW, previous).filter(({ code }) =>
+        ["BET_REQUIRED", "SCOPE_OUTSIDE_BET"].includes(code),
+      ),
+    ).toEqual([]);
+  });
+
+  it("sustains a persisted Re-bet pause with a newer unchanged live dependency", () => {
+    const { previous, candidate } =
+      buildPersistedPendingReplanRebetPausedWorkspaces();
+
+    expect(
+      validateWorkspaceInvariants(candidate, NOW, previous).filter(({ code }) =>
+        ["BET_REQUIRED", "SCOPE_OUTSIDE_BET"].includes(code),
+      ),
+    ).toEqual([]);
+  });
+
+  it("allows a Direction edit during a persisted Re-bet pause with a pending Replan", () => {
+    const { previous, candidate } =
+      buildPersistedPendingReplanRebetPausedWorkspaces();
+    const direction = buildDirectionBrief({
+      ...structuredClone(candidate.directionBriefs[0]),
+      id: "brief-pending-replan-edit",
+      version: 2,
+      audienceAndProblem: "Refined while pending Replan remains frozen",
+      createdAt: NOW,
+      updatedAt: NOW,
+    });
+    candidate.directionBriefs.push(direction);
+    candidate.projects[0].activeDirectionBriefId = direction.id;
+
+    expect(
+      validateWorkspaceInvariants(candidate, NOW, previous).filter(({ code }) =>
+        ["BET_REQUIRED", "SCOPE_OUTSIDE_BET"].includes(code),
+      ),
+    ).toEqual([]);
+  });
 
   it("rejects deletion of a ProjectDependency referenced by the frozen Plan", () => {
     const { previous, candidate } = buildRebetPausedWorkspaces();

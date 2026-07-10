@@ -378,8 +378,7 @@ function planScopeIsStructurallyValid(
     const dependency = dependenciesById.get(dependencyId);
     return (
       dependency !== undefined &&
-      dependency.projectId === plan.projectId &&
-      dependency.revision === plan.dependencyRevisions[dependencyId]
+      dependency.projectId === plan.projectId
     );
   });
 }
