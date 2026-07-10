@@ -3,6 +3,7 @@ import type { ActorKind, CommandOrigin, ProjectHold } from "./types";
 export type RejectionCode =
   | "REVISION_CONFLICT"
   | "DUPLICATE_COMMAND"
+  | "INVALID_COMMAND"
   | "SOURCE_NOT_AUTHORIZED"
   | "ACTOR_NOT_AUTHORIZED"
   | "HUMAN_CONFIRMATION_REQUIRED"
@@ -21,6 +22,7 @@ export type RejectionCode =
   | "SYNC_CONFLICT"
   | "PROJECT_CLOSED"
   | "ENTITY_NOT_FOUND"
+  | "ENTITY_ALREADY_EXISTS"
   | "COMMAND_NOT_IMPLEMENTED";
 
 export interface CommandRejection {
@@ -47,6 +49,10 @@ export const REJECTION_DETAILS = {
   DUPLICATE_COMMAND: {
     reason: "This command was already received.",
     permittedNextCommand: "read_existing_command_receipt",
+  },
+  INVALID_COMMAND: {
+    reason: "The command payload is invalid.",
+    permittedNextCommand: "repair_command_payload",
   },
   SOURCE_NOT_AUTHORIZED: {
     reason: "The command source is not authorized for this operation.",
@@ -119,6 +125,10 @@ export const REJECTION_DETAILS = {
   ENTITY_NOT_FOUND: {
     reason: "A referenced workspace entity does not exist.",
     permittedNextCommand: "repair_workspace_reference",
+  },
+  ENTITY_ALREADY_EXISTS: {
+    reason: "A workspace entity already uses this ID.",
+    permittedNextCommand: "use_unique_entity_id",
   },
   COMMAND_NOT_IMPLEMENTED: {
     reason: "This command is not implemented by OmniPlan V2.",

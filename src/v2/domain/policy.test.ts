@@ -733,6 +733,7 @@ describe("typed rejection stability", () => {
   const expectedNextCommands = {
     REVISION_CONFLICT: "retry_at_current_revision",
     DUPLICATE_COMMAND: "read_existing_command_receipt",
+    INVALID_COMMAND: "repair_command_payload",
     SOURCE_NOT_AUTHORIZED: "retry_with_authorized_source",
     ACTOR_NOT_AUTHORIZED: "retry_with_authorized_actor",
     HUMAN_CONFIRMATION_REQUIRED: "request_human_confirmation",
@@ -751,6 +752,7 @@ describe("typed rejection stability", () => {
     SYNC_CONFLICT: "resolve_sync_conflict",
     PROJECT_CLOSED: "create_follow_up_project",
     ENTITY_NOT_FOUND: "repair_workspace_reference",
+    ENTITY_ALREADY_EXISTS: "use_unique_entity_id",
     COMMAND_NOT_IMPLEMENTED: "use_supported_command",
   } as const satisfies Record<RejectionCode, string>;
 

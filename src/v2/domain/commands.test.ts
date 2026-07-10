@@ -583,14 +583,77 @@ describe("executeCommand applied receipts", () => {
     expect(result.workspace.inboxItems).toEqual([existing]);
     expect(result.workspace.commandReceipts).toEqual([]);
     expect(result.rejection).toMatchObject({
-      code: "DUPLICATE_COMMAND",
+      code: "ENTITY_ALREADY_EXISTS",
       reason: "InboxItem duplicate-inbox already exists.",
       gate: "entity_id:InboxItem:duplicate-inbox",
       permittedNextCommand: "capture_inbox",
     });
     expect(result.receipt).toMatchObject({
       status: "rejected",
-      rejectionCode: "DUPLICATE_COMMAND",
+      rejectionCode: "ENTITY_ALREADY_EXISTS",
+      diff: [],
+    });
+  });
+
+  it.each([
+    {
+      name: "null capacity profile",
+      command: { type: "configure_capacity", profile: null },
+      gate: "command_payload:configure_capacity",
+    },
+    {
+      name: "non-string Inbox text",
+      command: { type: "capture_inbox", id: "inbox-invalid", text: null },
+      gate: "command_payload:capture_inbox",
+    },
+  ])("rejects a malformed runtime payload: $name", async ({ command, gate }) => {
+    const workspace = buildWorkspaceV2("workspace-1");
+
+    const result = rejected(
+      await executeCommand(
+        workspace,
+        command as unknown as V2Command,
+        buildContext(),
+      ),
+    );
+
+    expect(result.workspace).toBe(workspace);
+    expect(result.workspace.revision).toBe(0);
+    expect(result.workspace.capacityProfile).toBeUndefined();
+    expect(result.workspace.inboxItems).toEqual([]);
+    expect(result.workspace.commandReceipts).toEqual([]);
+    expect(result.rejection).toMatchObject({
+      code: "INVALID_COMMAND",
+      gate,
+      permittedNextCommand: command.type,
+    });
+    expect(result.receipt).toMatchObject({
+      status: "rejected",
+      rejectionCode: "INVALID_COMMAND",
+      revision: 0,
+      diff: [],
+    });
+  });
+
+  it("rejects an unknown runtime command type instead of throwing", async () => {
+    const workspace = buildWorkspaceV2("workspace-1");
+    const command = { type: "erase_workspace" } as unknown as V2Command;
+
+    const result = rejected(
+      await executeCommand(workspace, command, buildContext()),
+    );
+
+    expect(result.workspace).toBe(workspace);
+    expect(result.rejection).toMatchObject({
+      code: "INVALID_COMMAND",
+      gate: "command_type:erase_workspace",
+      permittedNextCommand: "use_supported_command",
+    });
+    expect(result.receipt).toMatchObject({
+      commandType: "erase_workspace",
+      status: "rejected",
+      rejectionCode: "INVALID_COMMAND",
+      revision: 0,
       diff: [],
     });
   });
@@ -833,6 +896,67 @@ describe("executeCommand rejection precedence and atomicity", () => {
     expect(workspace.commandReceipts).toHaveLength(1);
   });
 
+  it("treats any stored receipt status as reserving its command ID", async () => {
+    const rejectedReceipt: CommandReceipt = {
+      ...buildStoredAppliedReceipt("command-1", 3),
+      status: "rejected",
+      rejectionCode: "REVISION_CONFLICT",
+    };
+    const workspace = buildWorkspaceV2("workspace-1", {
+      revision: 3,
+      commandReceipts: [rejectedReceipt],
+    });
+
+    const result = rejected(
+      await executeCommand(
+        workspace,
+        { type: "configure_capacity", profile: PROFILE },
+        buildContext({ expectedRevision: 3 }),
+      ),
+    );
+
+    expect(result.workspace).toBe(workspace);
+    expect(result.rejection.code).toBe("DUPLICATE_COMMAND");
+    expect(result.receipt.rejectionCode).toBe("DUPLICATE_COMMAND");
+    expect(workspace.commandReceipts).toEqual([rejectedReceipt]);
+  });
+
+  it.each(["stale revision", "unauthorized source"] as const)(
+    "does not deep-clone the workspace history for a cheap %s rejection",
+    async (scenario) => {
+      const original = buildWorkspaceV2("workspace-1", { revision: 3 });
+      const workspace = new Proxy(original, {});
+      const context =
+        scenario === "stale revision"
+          ? buildContext({ expectedRevision: 2 })
+          : buildContext({
+              expectedRevision: 3,
+              source: {
+                sourceId: "unverified",
+                verified: false,
+                capabilities: [],
+              },
+            });
+
+      const result = rejected(
+        await executeCommand(
+          workspace,
+          { type: "configure_capacity", profile: PROFILE },
+          context,
+        ),
+      );
+
+      expect(result.workspace).toBe(workspace);
+      expect(result.rejection.code).toBe(
+        scenario === "stale revision"
+          ? "REVISION_CONFLICT"
+          : "SOURCE_NOT_AUTHORIZED",
+      );
+      expect(original.revision).toBe(3);
+      expect(original.commandReceipts).toEqual([]);
+    },
+  );
+
   it("checks Agent source authority before human-only authority and the handler", async () => {
     const workspace = buildWorkspaceV2("workspace-1");
     const command = {
@@ -960,6 +1084,116 @@ describe("executeCommand rejection precedence and atomicity", () => {
 });
 
 describe("executeCommand trusted policy projection", () => {
+  it("aggregates holds across duplicate Project IDs independent of input order", async () => {
+    const unheld = buildProjectV2({
+      id: "project-1",
+      activeDirectionBriefId: "brief-1",
+      holds: [],
+      createdAt: NOW,
+      updatedAt: NOW,
+    });
+    const held = buildProjectV2({
+      ...structuredClone(unheld),
+      holds: [
+        {
+          type: "sync_conflict",
+          sourceId: "conflict-1",
+          affectedRecordIds: ["project-1"],
+          createdAt: NOW,
+        },
+      ],
+    });
+    const command = {
+      type: "update_project_metadata",
+      projectId: "project-1",
+      name: "Blocked by either duplicate",
+    } as const satisfies V2Command;
+    const context = buildContext({ expectedRevision: 11 });
+
+    const forward = rejected(
+      await executeCommand(
+        buildWorkspaceV2("workspace-1", {
+          revision: 11,
+          projects: [unheld, held],
+        }),
+        command,
+        context,
+      ),
+    );
+    const reverse = rejected(
+      await executeCommand(
+        buildWorkspaceV2("workspace-1", {
+          revision: 11,
+          projects: [held, unheld],
+        }),
+        command,
+        { ...context, commandId: "command-reverse-project-order" },
+      ),
+    );
+
+    expect(forward.rejection).toMatchObject({
+      code: "HOLD_BLOCKS_COMMAND",
+      hold: "sync_conflict",
+    });
+    expect(reverse.rejection).toMatchObject({
+      code: "HOLD_BLOCKS_COMMAND",
+      hold: "sync_conflict",
+    });
+  });
+
+  it.each([
+    { type: "request_validation", projectId: "project-1" },
+    { type: "satisfy_validation", projectId: "project-1" },
+    {
+      type: "close_project",
+      projectId: "project-1",
+      decision: {
+        id: "close-1",
+        projectId: "project-1",
+        successComparison: "Target met",
+        outcome: "achieved",
+        keyLearning: "Respect conflicts",
+        unfinishedDisposition: "discard",
+      },
+    },
+    {
+      type: "abandon_project",
+      projectId: "project-1",
+      decision: {
+        id: "close-2",
+        projectId: "project-1",
+        successComparison: "No longer valuable",
+        outcome: "abandoned",
+        keyLearning: "Respect conflicts",
+        unfinishedDisposition: "historical_incomplete",
+      },
+    },
+  ] as const satisfies readonly V2Command[])(
+    "includes active lifecycle records when authorizing $type",
+    async (command) => {
+      const workspace = buildProjectWorkspace("sync_conflict");
+      workspace.projects[0].activeBetId = "bet-current";
+      workspace.projects[0].activePlanVersionId = "plan-current";
+      workspace.projects[0].holds[0].affectedRecordIds = ["bet-current"];
+
+      const result = rejected(
+        await executeCommand(
+          workspace,
+          command,
+          buildContext({
+            commandId: `command-${command.type}`,
+            expectedRevision: 11,
+          }),
+        ),
+      );
+
+      expect(result.rejection).toMatchObject({
+        code: "HOLD_BLOCKS_COMMAND",
+        hold: "sync_conflict",
+      });
+    },
+  );
+
   it("blocks uncommitted actuals during overdue review but reaches the handler for committed targets", async () => {
     const commitment: DailyCommitment = {
       id: "commitment-1",

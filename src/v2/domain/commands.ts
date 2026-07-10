@@ -175,6 +175,47 @@ export type V2Command =
     }
   | { type: "archive_project"; projectId: Id; archived: boolean };
 
+const knownCommandTypes = new Set(
+  Object.keys({
+    configure_capacity: true,
+    capture_inbox: true,
+    confirm_action_triage: true,
+    confirm_project_triage: true,
+    update_project_metadata: true,
+    update_action: true,
+    complete_action: true,
+    promote_action_to_project: true,
+    update_direction: true,
+    place_bet: true,
+    create_work_item: true,
+    update_work_item: true,
+    propose_replan: true,
+    commit_today: true,
+    accept_replan: true,
+    record_actual: true,
+    attach_evidence: true,
+    approve_evidence_exception: true,
+    resolve_evidence_exception: true,
+    request_validation: true,
+    satisfy_validation: true,
+    record_bet_boundary: true,
+    mark_review_overdue: true,
+    create_review: true,
+    complete_review: true,
+    resolve_sync_conflict: true,
+    close_project: true,
+    abandon_project: true,
+    archive_project: true,
+  } satisfies Record<V2Command["type"], true>),
+);
+
+function isKnownCommandType(value: unknown): value is V2Command["type"] {
+  return (
+    typeof value === "string" &&
+    knownCommandTypes.has(value)
+  );
+}
+
 export interface CommandContext {
   commandId: string;
   expectedRevision: number;
@@ -203,20 +244,30 @@ function uniqueIds(values: Array<Id | undefined>): Id[] {
     .sort(compareText);
 }
 
+function recordsWithId<T extends { id: Id }>(
+  values: readonly T[],
+  id: Id,
+): T[] {
+  return values.filter((value) => value.id === id);
+}
+
 function projectIdsForTarget(
   workspace: WorkspaceV2,
   target: CommitmentSlot["target"] | ActualV2["target"],
 ): Id[] {
   if (target.kind === "action") {
-    return uniqueIds([
-      workspace.actions.find(({ id }) => id === target.actionId)
-        ?.promotedProjectId,
-    ]);
+    return uniqueIds(
+      recordsWithId(workspace.actions, target.actionId).map(
+        ({ promotedProjectId }) => promotedProjectId,
+      ),
+    );
   }
 
   return uniqueIds([
     "projectId" in target ? target.projectId : undefined,
-    workspace.workItems.find(({ id }) => id === target.workItemId)?.projectId,
+    ...recordsWithId(workspace.workItems, target.workItemId).map(
+      ({ projectId }) => projectId,
+    ),
   ]);
 }
 
@@ -233,37 +284,36 @@ function projectIdsForStoredCommitment(
   workspace: WorkspaceV2,
   commitmentId: Id,
 ): Id[] {
-  const commitment = workspace.dailyCommitments.find(
-    ({ id }) => id === commitmentId,
+  return uniqueIds(
+    recordsWithId(workspace.dailyCommitments, commitmentId).flatMap(
+      ({ slots }) => projectIdsForSlots(workspace, slots),
+    ),
   );
-  return commitment === undefined
-    ? []
-    : projectIdsForSlots(workspace, commitment.slots);
 }
 
 function projectIdsForStoredProposal(
   workspace: WorkspaceV2,
   proposalId: Id,
 ): Id[] {
-  const proposal = workspace.replanProposals.find(({ id }) => id === proposalId);
-  return proposal === undefined
-    ? []
-    : uniqueIds([
-        ...projectIdsForSlots(workspace, proposal.proposedSlots),
-        ...projectIdsForStoredCommitment(
-          workspace,
-          proposal.baseCommitmentId,
-        ),
-      ]);
+  return uniqueIds(
+    recordsWithId(workspace.replanProposals, proposalId).flatMap((proposal) => [
+      ...projectIdsForSlots(workspace, proposal.proposedSlots),
+      ...projectIdsForStoredCommitment(
+        workspace,
+        proposal.baseCommitmentId,
+      ),
+    ]),
+  );
 }
 
 function projectIdsForStoredReview(
   workspace: WorkspaceV2,
   reviewId: Id,
 ): Id[] {
-  return (
-    workspace.reviews.find(({ id }) => id === reviewId)?.affectedProjectIds ??
-    []
+  return uniqueIds(
+    recordsWithId(workspace.reviews, reviewId).flatMap(
+      ({ affectedProjectIds }) => affectedProjectIds,
+    ),
   );
 }
 
@@ -274,7 +324,8 @@ function compareCommitmentRecency(
   return (
     right.version - left.version ||
     compareText(right.committedAt, left.committedAt) ||
-    compareText(left.id, right.id)
+    compareText(left.id, right.id) ||
+    compareText(canonicalString(left), canonicalString(right))
   );
 }
 
@@ -333,10 +384,11 @@ function affectedExistingProjectIds(
 
     case "update_action":
     case "complete_action":
-      candidates = uniqueIds([
-        workspace.actions.find(({ id }) => id === command.actionId)
-          ?.promotedProjectId,
-      ]);
+      candidates = uniqueIds(
+        recordsWithId(workspace.actions, command.actionId).map(
+          ({ promotedProjectId }) => promotedProjectId,
+        ),
+      );
       break;
 
     case "update_direction":
@@ -350,8 +402,9 @@ function affectedExistingProjectIds(
     case "update_work_item":
       candidates = uniqueIds([
         command.projectId,
-        workspace.workItems.find(({ id }) => id === command.workItemId)
-          ?.projectId,
+        ...recordsWithId(workspace.workItems, command.workItemId).map(
+          ({ projectId }) => projectId,
+        ),
       ]);
       break;
 
@@ -391,28 +444,31 @@ function affectedExistingProjectIds(
     case "attach_evidence":
       candidates = uniqueIds([
         command.evidence.projectId,
-        command.evidence.workItemId === undefined
-          ? undefined
-          : workspace.workItems.find(
-              ({ id }) => id === command.evidence.workItemId,
-            )?.projectId,
+        ...(command.evidence.workItemId === undefined
+          ? []
+          : recordsWithId(
+              workspace.workItems,
+              command.evidence.workItemId,
+            ).map(({ projectId }) => projectId)),
       ]);
       break;
 
     case "approve_evidence_exception":
       candidates = uniqueIds([
         command.exception.projectId,
-        workspace.workItems.find(
-          ({ id }) => id === command.exception.requirementId,
-        )?.projectId,
+        ...recordsWithId(
+          workspace.workItems,
+          command.exception.requirementId,
+        ).map(({ projectId }) => projectId),
       ]);
       break;
 
     case "resolve_evidence_exception":
-      candidates = uniqueIds([
-        workspace.exceptions.find(({ id }) => id === command.exceptionId)
-          ?.projectId,
-      ]);
+      candidates = uniqueIds(
+        recordsWithId(workspace.exceptions, command.exceptionId).map(
+          ({ projectId }) => projectId,
+        ),
+      );
       break;
 
     case "mark_review_overdue":
@@ -425,12 +481,12 @@ function affectedExistingProjectIds(
       break;
 
     case "resolve_sync_conflict": {
-      const conflict = workspace.syncConflicts.find(
-        ({ id }) => id === command.resolution.conflictId,
-      );
       candidates = uniqueIds([
         ...projectIdsForStoredReview(workspace, command.reviewId),
-        conflict?.projectId,
+        ...recordsWithId(
+          workspace.syncConflicts,
+          command.resolution.conflictId,
+        ).map(({ projectId }) => projectId),
       ]);
       break;
     }
@@ -470,61 +526,67 @@ function recordIdsForStoredCommitment(
   workspace: WorkspaceV2,
   commitmentId: Id,
 ): Id[] {
-  const commitment = workspace.dailyCommitments.find(
-    ({ id }) => id === commitmentId,
-  );
-  return commitment === undefined
+  const commitments = recordsWithId(workspace.dailyCommitments, commitmentId);
+  return commitments.length === 0
     ? [commitmentId]
-    : uniqueIds([
-        commitment.id,
-        ...recordIdsForSlots(commitment.slots),
-      ]);
+    : uniqueIds(
+        commitments.flatMap((commitment) => [
+          commitment.id,
+          ...recordIdsForSlots(commitment.slots),
+        ]),
+      );
 }
 
 function recordIdsForStoredProposal(
   workspace: WorkspaceV2,
   proposalId: Id,
 ): Id[] {
-  const proposal = workspace.replanProposals.find(({ id }) => id === proposalId);
-  return proposal === undefined
+  const proposals = recordsWithId(workspace.replanProposals, proposalId);
+  return proposals.length === 0
     ? [proposalId]
-    : uniqueIds([
-        proposal.id,
-        ...recordIdsForStoredCommitment(
-          workspace,
-          proposal.baseCommitmentId,
-        ),
-        ...recordIdsForSlots(proposal.proposedSlots),
-      ]);
+    : uniqueIds(
+        proposals.flatMap((proposal) => [
+          proposal.id,
+          ...recordIdsForStoredCommitment(
+            workspace,
+            proposal.baseCommitmentId,
+          ),
+          ...recordIdsForSlots(proposal.proposedSlots),
+        ]),
+      );
 }
 
 function recordIdsForStoredReview(
   workspace: WorkspaceV2,
   reviewId: Id,
 ): Id[] {
-  const review = workspace.reviews.find(({ id }) => id === reviewId);
-  return review === undefined
+  const reviews = recordsWithId(workspace.reviews, reviewId);
+  return reviews.length === 0
     ? [reviewId]
-    : uniqueIds([
-        review.id,
-        ...review.affectedProjectIds,
-        ...review.affectedRecordIds,
-      ]);
+    : uniqueIds(
+        reviews.flatMap((review) => [
+          review.id,
+          ...review.affectedProjectIds,
+          ...review.affectedRecordIds,
+        ]),
+      );
 }
 
 function projectLifecycleRecordIds(
   workspace: WorkspaceV2,
   projectId: Id,
 ): Id[] {
-  const project = workspace.projects.find(({ id }) => id === projectId);
-  return project === undefined
+  const projects = recordsWithId(workspace.projects, projectId);
+  return projects.length === 0
     ? [projectId]
-    : uniqueIds([
-        project.id,
-        project.activeDirectionBriefId,
-        project.activeBetId,
-        project.activePlanVersionId,
-      ]);
+    : uniqueIds(
+        projects.flatMap((project) => [
+          project.id,
+          project.activeDirectionBriefId,
+          project.activeBetId,
+          project.activePlanVersionId,
+        ]),
+      );
 }
 
 function affectedRecordIds(
@@ -541,10 +603,11 @@ function affectedRecordIds(
     case "confirm_project_triage":
       return uniqueIds([command.inboxItemId, command.project.id]);
     case "update_project_metadata":
-    case "request_validation":
-    case "satisfy_validation":
     case "archive_project":
       return [command.projectId];
+    case "request_validation":
+    case "satisfy_validation":
+      return projectLifecycleRecordIds(workspace, command.projectId);
     case "update_action":
     case "complete_action":
       return [command.actionId];
@@ -567,13 +630,12 @@ function affectedRecordIds(
         command.workItem.betScopeId,
       ]);
     case "update_work_item": {
-      const stored = workspace.workItems.find(
-        ({ id }) => id === command.workItemId,
-      );
       return uniqueIds([
         command.projectId,
         command.workItemId,
-        stored?.betScopeId,
+        ...recordsWithId(workspace.workItems, command.workItemId).map(
+          ({ betScopeId }) => betScopeId,
+        ),
         command.patch.betScopeId,
       ]);
     }
@@ -621,10 +683,9 @@ function affectedRecordIds(
     case "resolve_evidence_exception":
       return uniqueIds([
         command.exceptionId,
-        workspace.exceptions.find(({ id }) => id === command.exceptionId)
-          ?.projectId,
-        workspace.exceptions.find(({ id }) => id === command.exceptionId)
-          ?.requirementId,
+        ...recordsWithId(workspace.exceptions, command.exceptionId).flatMap(
+          ({ projectId, requirementId }) => [projectId, requirementId],
+        ),
       ]);
     case "record_bet_boundary":
       return projectLifecycleRecordIds(workspace, command.projectId);
@@ -641,18 +702,26 @@ function affectedRecordIds(
       return uniqueIds([
         ...recordIdsForStoredReview(workspace, command.reviewId),
         command.resolution.conflictId,
-        workspace.syncConflicts.find(
-          ({ id }) => id === command.resolution.conflictId,
-        )?.recordId,
+        ...recordsWithId(
+          workspace.syncConflicts,
+          command.resolution.conflictId,
+        ).map(({ recordId }) => recordId),
         command.resolution.reappliedCommandId,
       ]);
     case "close_project":
-    case "abandon_project":
-      return uniqueIds([
+    case "abandon_project": {
+      const boundProjectIds = uniqueIds([
         command.projectId,
-        command.decision.id,
+        command.decision.projectId,
         command.decision.followUpProjectId,
       ]);
+      return uniqueIds([
+        command.decision.id,
+        ...boundProjectIds.flatMap((projectId) =>
+          projectLifecycleRecordIds(workspace, projectId),
+        ),
+      ]);
+    }
   }
 }
 
@@ -763,7 +832,9 @@ function buildAuthorizationContext(
   const projectIds = affectedExistingProjectIds(workspace, command);
   const projectHolds: ProjectHoldState[] = projectIds.flatMap(
     (projectId) =>
-      workspace.projects.find(({ id }) => id === projectId)?.holds ?? [],
+      recordsWithId(workspace.projects, projectId).flatMap(
+        ({ holds }) => holds,
+      ),
   );
 
   return {
@@ -803,6 +874,9 @@ function canonicalString(value: unknown): string {
 }
 
 function sameJson(left: unknown, right: unknown): boolean {
+  if (left === undefined || right === undefined) {
+    return left === right;
+  }
   return canonicalString(left) === canonicalString(right);
 }
 
@@ -971,7 +1045,7 @@ function computeAuditDiff(
 type ReceiptBase = Omit<CommandReceipt, "receiptHash">;
 
 async function buildReceipt(
-  workspace: WorkspaceV2,
+  baseRevision: number,
   command: V2Command,
   context: CommandContext,
   status: CommandReceipt["status"],
@@ -981,7 +1055,6 @@ async function buildReceipt(
 ): Promise<CommandReceipt> {
   const commandId = context.commandId;
   const commandType = command.type;
-  const baseRevision = workspace.revision;
   const actorId = context.actorId;
   const actorKind = context.actorKind;
   const origin = context.origin;
@@ -1014,7 +1087,7 @@ async function buildReceipt(
 
 function rejectionFromInvariant(
   violation: InvariantViolation,
-  workspace: WorkspaceV2,
+  workspaceRevision: number,
   context: CommandContext,
 ): CommandRejection {
   return createCommandRejection(
@@ -1022,7 +1095,7 @@ function rejectionFromInvariant(
     {
       actorKind: context.actorKind,
       origin: context.origin,
-      workspaceRevision: workspace.revision,
+      workspaceRevision,
     },
     {
       reason: violation.reason,
@@ -1038,17 +1111,17 @@ async function rejectedResult(
   command: V2Command,
   context: CommandContext,
   rejection: CommandRejection,
-  receiptWorkspace: WorkspaceV2 = workspace,
+  baseRevision: number,
 ): Promise<Extract<CommandResult, { ok: false }>> {
   return {
     ok: false,
     workspace,
     receipt: await buildReceipt(
-      receiptWorkspace,
+      baseRevision,
       command,
       context,
       "rejected",
-      receiptWorkspace.revision,
+      baseRevision,
       [],
       rejection.code,
     ),
@@ -1061,30 +1134,28 @@ export async function executeCommand(
   command: V2Command,
   context: CommandContext,
 ): Promise<CommandResult> {
-  const workspaceSnapshot = structuredClone(workspace);
   const commandSnapshot = structuredClone(command);
   const contextSnapshot = structuredClone(context);
+  const baseRevision = workspace.revision;
   const rejectionContext = {
     actorKind: contextSnapshot.actorKind,
     origin: contextSnapshot.origin,
-    workspaceRevision: workspaceSnapshot.revision,
+    workspaceRevision: baseRevision,
   };
 
-  if (contextSnapshot.expectedRevision !== workspaceSnapshot.revision) {
+  if (contextSnapshot.expectedRevision !== baseRevision) {
     return rejectedResult(
       workspace,
       commandSnapshot,
       contextSnapshot,
       createCommandRejection("REVISION_CONFLICT", rejectionContext),
-      workspaceSnapshot,
+      baseRevision,
     );
   }
 
   if (
-    workspaceSnapshot.commandReceipts.some(
-      (receipt) =>
-        receipt.status === "applied" &&
-        receipt.commandId === contextSnapshot.commandId,
+    workspace.commandReceipts.some(
+      (receipt) => receipt.commandId === contextSnapshot.commandId,
     )
   ) {
     return rejectedResult(
@@ -1092,14 +1163,29 @@ export async function executeCommand(
       commandSnapshot,
       contextSnapshot,
       createCommandRejection("DUPLICATE_COMMAND", rejectionContext),
-      workspaceSnapshot,
+      baseRevision,
+    );
+  }
+
+  const runtimeCommandType = (commandSnapshot as { type?: unknown }).type;
+  if (!isKnownCommandType(runtimeCommandType)) {
+    return rejectedResult(
+      workspace,
+      commandSnapshot,
+      contextSnapshot,
+      createCommandRejection("INVALID_COMMAND", rejectionContext, {
+        reason: "The command type is not recognized.",
+        gate: `command_type:${String(runtimeCommandType)}`,
+        permittedNextCommand: "use_supported_command",
+      }),
+      baseRevision,
     );
   }
 
   const authorizationRejection = authorizeCommand(
-    commandSnapshot.type,
+    runtimeCommandType,
     buildAuthorizationContext(
-      workspaceSnapshot,
+      workspace,
       commandSnapshot,
       contextSnapshot,
     ),
@@ -1110,25 +1196,26 @@ export async function executeCommand(
       commandSnapshot,
       contextSnapshot,
       authorizationRejection,
-      workspaceSnapshot,
+      baseRevision,
     );
   }
 
-  const candidate = structuredClone(workspaceSnapshot);
-  const handlerRejection = await applyCommandHandler(
-    candidate,
+  const workspaceSnapshot = structuredClone(workspace);
+  const handlerResult = await applyCommandHandler(
+    workspaceSnapshot,
     commandSnapshot,
     contextSnapshot,
   );
-  if (handlerRejection !== undefined) {
+  if (!handlerResult.ok) {
     return rejectedResult(
       workspace,
       commandSnapshot,
       contextSnapshot,
-      handlerRejection,
-      workspaceSnapshot,
+      handlerResult.rejection,
+      baseRevision,
     );
   }
+  const candidate = handlerResult.workspace;
 
   const [invariantViolation] = validateWorkspaceInvariants(
     candidate,
@@ -1142,28 +1229,35 @@ export async function executeCommand(
       contextSnapshot,
       rejectionFromInvariant(
         invariantViolation,
-        workspaceSnapshot,
+        baseRevision,
         contextSnapshot,
       ),
-      workspaceSnapshot,
+      baseRevision,
     );
   }
 
   const diff = computeAuditDiff(workspaceSnapshot, candidate);
-  candidate.revision = workspaceSnapshot.revision + 1;
+  const nextRevision = baseRevision + 1;
   const receipt = await buildReceipt(
-    workspaceSnapshot,
+    baseRevision,
     commandSnapshot,
     contextSnapshot,
     "applied",
-    candidate.revision,
+    nextRevision,
     diff,
   );
-  candidate.commandReceipts.push(structuredClone(receipt));
+  const nextWorkspace: WorkspaceV2 = {
+    ...candidate,
+    revision: nextRevision,
+    commandReceipts: [
+      ...candidate.commandReceipts,
+      structuredClone(receipt),
+    ],
+  };
 
   return {
     ok: true,
-    workspace: candidate,
+    workspace: nextWorkspace,
     receipt: structuredClone(receipt),
   };
 }
