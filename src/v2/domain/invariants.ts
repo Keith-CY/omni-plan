@@ -305,28 +305,46 @@ function isIntentionallyPausedForRebet(
   if (
     previousProject === undefined ||
     previousProject.stage !== project.stage ||
-    previousProject.activeBetId !== project.activeBetId
+    previousProject.activeBetId !== project.activeBetId ||
+    previousProject.activePlanVersionId !== project.activePlanVersionId
   ) {
     return false;
   }
 
   const previousBet = indexById(previousWorkspace.bets).get(project.activeBetId);
   const candidateBet = betsById.get(project.activeBetId);
-  return (
-    previousBet !== undefined &&
-    previousBet.projectId === project.id &&
+  if (
+    previousBet === undefined ||
+    previousBet.projectId !== project.id ||
+    candidateBet === undefined ||
+    candidateBet.projectId !== project.id ||
+    candidateBet.invalidatedAt === undefined ||
+    workspace.bets.some(
+      (bet) => bet.projectId === project.id && bet.invalidatedAt === undefined,
+    )
+  ) {
+    return false;
+  }
+
+  const atomicPauseEntry =
     previousBet.invalidatedAt === undefined &&
-    candidateBet !== undefined &&
-    candidateBet.projectId === project.id &&
-    candidateBet.invalidatedAt !== undefined &&
     sameStructure(
       betDataWithoutInvalidation(candidateBet),
       betDataWithoutInvalidation(previousBet),
-    ) &&
-    !workspace.bets.some(
-      (bet) => bet.projectId === project.id && bet.invalidatedAt === undefined,
-    )
+    );
+  const previousRebetHolds = previousProject.holds.filter(
+    ({ type }) => type === "rebet_required",
   );
+  const candidateRebetHolds = project.holds.filter(
+    ({ type }) => type === "rebet_required",
+  );
+  const persistedPauseContinuation =
+    previousBet.invalidatedAt !== undefined &&
+    sameStructure(candidateBet, previousBet) &&
+    previousRebetHolds.length > 0 &&
+    sameStructure(candidateRebetHolds, previousRebetHolds);
+
+  return atomicPauseEntry || persistedPauseContinuation;
 }
 
 function planScopeIsStructurallyValid(
@@ -406,7 +424,12 @@ function validateBetRules(
   const plansById = indexById(workspace.planVersions);
   const projectsById = indexById(workspace.projects);
   const workItemsById = indexById(workspace.workItems);
+  const actualsById = indexById(workspace.actuals);
+  const commitmentsById = indexById(workspace.dailyCommitments);
   const previousActualsById = indexById(previousWorkspace?.actuals ?? []);
+  const previousWorkItemsById = indexById(
+    previousWorkspace?.workItems ?? [],
+  );
   const previousCommitmentsById = indexById(
     previousWorkspace?.dailyCommitments ?? [],
   );
@@ -568,6 +591,90 @@ function validateBetRules(
           "place_bet",
         );
       }
+    }
+  }
+
+  if (previousWorkspace === undefined) {
+    return;
+  }
+
+  for (const previousActual of sortedById(previousWorkspace.actuals)) {
+    if (previousActual.target.kind !== "work_item") {
+      continue;
+    }
+    const previousWorkItem = previousWorkItemsById.get(
+      previousActual.target.workItemId,
+    );
+    if (previousWorkItem === undefined) {
+      continue;
+    }
+    const project = projectsById.get(previousWorkItem.projectId);
+    if (
+      project === undefined ||
+      !isIntentionallyPausedForRebet(
+        workspace,
+        previousWorkspace,
+        project,
+        betsById,
+      )
+    ) {
+      continue;
+    }
+    const candidateActual = actualsById.get(previousActual.id);
+    if (
+      candidateActual !== undefined &&
+      sameStructure(candidateActual, previousActual)
+    ) {
+      continue;
+    }
+    add(
+      "BET_REQUIRED",
+      `Actual ${previousActual.id} targets Work Item ${previousWorkItem.id} without a valid current Bet for Project ${project.id}.`,
+      `actual:${previousActual.id}:current_bet`,
+      "place_bet",
+    );
+  }
+
+  for (const previousCommitment of sortedById(
+    previousWorkspace.dailyCommitments,
+  )) {
+    const candidateCommitment = commitmentsById.get(previousCommitment.id);
+    const candidateSlotsById = indexById(candidateCommitment?.slots ?? []);
+    for (const previousSlot of sortedById(previousCommitment.slots)) {
+      if (previousSlot.target.kind !== "work_item") {
+        continue;
+      }
+      const previousWorkItem = previousWorkItemsById.get(
+        previousSlot.target.workItemId,
+      );
+      if (previousWorkItem === undefined) {
+        continue;
+      }
+      const project = projectsById.get(previousWorkItem.projectId);
+      if (
+        project === undefined ||
+        !isIntentionallyPausedForRebet(
+          workspace,
+          previousWorkspace,
+          project,
+          betsById,
+        )
+      ) {
+        continue;
+      }
+      const candidateSlot = candidateSlotsById.get(previousSlot.id);
+      if (
+        candidateSlot !== undefined &&
+        sameStructure(candidateSlot, previousSlot)
+      ) {
+        continue;
+      }
+      add(
+        "BET_REQUIRED",
+        `Daily Commitment ${previousCommitment.id} slot ${previousSlot.id} targets Work Item ${previousWorkItem.id} without a valid current Bet for Project ${project.id}.`,
+        `daily_commitment:${previousCommitment.id}:slot:${previousSlot.id}:current_bet`,
+        "place_bet",
+      );
     }
   }
 }

@@ -196,6 +196,17 @@ function buildRebetPausedWorkspaces(): {
   return { previous, candidate };
 }
 
+function buildPersistedRebetPausedWorkspaces(): {
+  previous: WorkspaceV2;
+  candidate: WorkspaceV2;
+} {
+  const paused = buildRebetPausedWorkspaces().candidate;
+  return {
+    previous: structuredClone(paused),
+    candidate: structuredClone(paused),
+  };
+}
+
 describe("validateWorkspaceInvariants Bet rules", () => {
   it("accepts a valid deterministic workspace without mutation", () => {
     const workspace = buildValidWorkspace();
@@ -478,6 +489,186 @@ describe("validateWorkspaceInvariants Bet rules", () => {
       validateWorkspaceInvariants(candidate, NOW, previous).filter(({ code }) =>
         ["BET_REQUIRED", "BET_EXPIRED", "SCOPE_OUTSIDE_BET"].includes(code),
       ),
+    ).toEqual([]);
+  });
+
+  it("sustains an unchanged persisted Re-bet pause", () => {
+    const { previous, candidate } = buildPersistedRebetPausedWorkspaces();
+
+    expect(
+      validateWorkspaceInvariants(candidate, NOW, previous).filter(({ code }) =>
+        ["BET_REQUIRED", "SCOPE_OUTSIDE_BET"].includes(code),
+      ),
+    ).toEqual([]);
+  });
+
+  it("allows a Direction-only edit during a persisted Re-bet pause", () => {
+    const { previous, candidate } = buildPersistedRebetPausedWorkspaces();
+    const direction = buildDirectionBrief({
+      ...structuredClone(candidate.directionBriefs[0]),
+      id: "brief-rebet-edit",
+      version: 2,
+      audienceAndProblem: "Refined during Re-bet pause",
+      createdAt: NOW,
+      updatedAt: NOW,
+    });
+    candidate.directionBriefs.push(direction);
+    candidate.projects[0].activeDirectionBriefId = direction.id;
+
+    expect(
+      validateWorkspaceInvariants(candidate, NOW, previous).filter(({ code }) =>
+        ["BET_REQUIRED", "SCOPE_OUTSIDE_BET"].includes(code),
+      ),
+    ).toEqual([]);
+  });
+
+  it.each(["atomic", "persisted"] as const)(
+    "rejects removal of a historical project-work Actual during an %s Re-bet pause",
+    (mode) => {
+      const { previous, candidate } =
+        mode === "atomic"
+          ? buildRebetPausedWorkspaces()
+          : buildPersistedRebetPausedWorkspaces();
+      candidate.actuals = [];
+
+      expect(
+        violationsWithCode(candidate, "BET_REQUIRED", previous),
+      ).toContainEqual(
+        expect.objectContaining({
+          code: "BET_REQUIRED",
+          gate: "actual:actual-history:current_bet",
+        }),
+      );
+    },
+  );
+
+  it.each(["slot", "commitment"] as const)(
+    "rejects removal of a historical project-work %s during a Re-bet pause",
+    (kind) => {
+      const { previous, candidate } = buildRebetPausedWorkspaces();
+      if (kind === "slot") {
+        candidate.dailyCommitments[0].slots = [];
+      } else {
+        candidate.dailyCommitments = [];
+      }
+
+      expect(
+        violationsWithCode(candidate, "BET_REQUIRED", previous),
+      ).toContainEqual(
+        expect.objectContaining({
+          code: "BET_REQUIRED",
+          gate:
+            "daily_commitment:commitment-history:slot:slot-history:current_bet",
+        }),
+      );
+    },
+  );
+
+  it.each(["clear_pointer", "change_pointer", "remove_plan"] as const)(
+    "rejects frozen active Plan mutation %s during a Re-bet pause",
+    (kind) => {
+      const { previous, candidate } = buildRebetPausedWorkspaces();
+      if (kind === "clear_pointer") {
+        delete candidate.projects[0].activePlanVersionId;
+      } else if (kind === "change_pointer") {
+        candidate.projects[0].activePlanVersionId = "plan-missing";
+      } else {
+        candidate.planVersions = [];
+      }
+
+      expect(
+        validateWorkspaceInvariants(candidate, NOW, previous).some(({ code }) =>
+          ["BET_REQUIRED", "SCOPE_OUTSIDE_BET", "ENTITY_NOT_FOUND"].includes(
+            code,
+          ),
+        ),
+      ).toBe(true);
+    },
+  );
+
+  it("ignores removal of unrelated Action-only execution history", () => {
+    const { previous, candidate } = buildRebetPausedWorkspaces();
+    const inbox = {
+      id: "inbox-action-history",
+      originalText: "Historical action",
+      sourceId: "source-1",
+      actorId: "human-1",
+      capturedAt: CREATED_AT,
+      triageStatus: "action" as const,
+      actionId: "action-history",
+    };
+    const action: Action = {
+      id: "action-history",
+      inboxItemId: inbox.id,
+      title: "Historical action",
+      revision: 1,
+      status: "completed",
+      eligibility: {
+        singleSession: true,
+        estimateSeconds: 600,
+        dependencyIds: [],
+        requiresMilestoneEvidence: false,
+        outcomeCount: 1,
+        solutionKnown: true,
+      },
+      attention: "shallow",
+      createdAt: CREATED_AT,
+      updatedAt: CREATED_AT,
+    };
+    for (const workspace of [previous, candidate]) {
+      workspace.inboxItems.push(structuredClone(inbox));
+      workspace.actions.push(structuredClone(action));
+      workspace.actuals.push({
+        id: "actual-action-history",
+        revision: 1,
+        target: { kind: "action", actionId: action.id },
+        actualWorkSeconds: 600,
+        remainingWorkSeconds: 0,
+        actualCost: 0,
+        recordedAt: CREATED_AT,
+      });
+      workspace.dailyCommitments[0].slots.push({
+        id: "slot-action-history",
+        target: { kind: "action", actionId: action.id },
+        targetRevision: 1,
+        start: "2026-07-10T10:00:00.000Z",
+        finish: "2026-07-10T10:10:00.000Z",
+        attention: "shallow",
+      });
+    }
+    candidate.actuals = candidate.actuals.filter(
+      ({ id }) => id !== "actual-action-history",
+    );
+    candidate.dailyCommitments[0].slots = candidate.dailyCommitments[0].slots.filter(
+      ({ id }) => id !== "slot-action-history",
+    );
+
+    expect(
+      violationsWithCode(candidate, "BET_REQUIRED", previous),
+    ).toEqual([]);
+  });
+
+  it("keeps persisted project-work history valid across canonical reordering", () => {
+    const { previous, candidate } = buildPersistedRebetPausedWorkspaces();
+    const secondActual = {
+      ...structuredClone(previous.actuals[0]),
+      id: "actual-history-2",
+    };
+    const secondSlot = {
+      ...structuredClone(previous.dailyCommitments[0].slots[0]),
+      id: "slot-history-2",
+      start: "2026-07-10T09:30:00.000Z",
+      finish: "2026-07-10T10:00:00.000Z",
+    };
+    previous.actuals.push(structuredClone(secondActual));
+    candidate.actuals.push(structuredClone(secondActual));
+    previous.dailyCommitments[0].slots.push(structuredClone(secondSlot));
+    candidate.dailyCommitments[0].slots.push(structuredClone(secondSlot));
+    candidate.actuals.reverse();
+    candidate.dailyCommitments[0].slots.reverse();
+
+    expect(
+      violationsWithCode(candidate, "BET_REQUIRED", previous),
     ).toEqual([]);
   });
 
