@@ -837,6 +837,51 @@ describe("executeCommand applied receipts", () => {
     });
   });
 
+  it.each([
+    {
+      name: "incomplete ProjectDraft",
+      command: {
+        type: "confirm_project_triage",
+        inboxItemId: "inbox-1",
+        project: { id: "project-1" },
+      },
+    },
+    {
+      name: "incomplete CommitmentSlot",
+      command: {
+        type: "commit_today",
+        commitment: {
+          id: "commitment-1",
+          localDate: "2026-07-11",
+          proposalHash: "proposal-hash",
+          slots: [
+            {
+              id: "slot-1",
+              target: { kind: "action", actionId: "action-1" },
+            },
+          ],
+        },
+      },
+    },
+  ])("rejects an exact-contract violation: $name", async ({ command }) => {
+    const workspace = buildWorkspaceV2("workspace-1");
+
+    const result = rejected(
+      await executeCommand(
+        workspace,
+        command as unknown as V2Command,
+        buildContext(),
+      ),
+    );
+
+    expect(result.rejection).toMatchObject({
+      code: "INVALID_COMMAND",
+      gate: `command_payload:${command.type}`,
+      permittedNextCommand: command.type,
+    });
+    expect(result.receipt.rejectionCode).toBe("INVALID_COMMAND");
+  });
+
   it("checks source authority before rejecting a malformed known payload", async () => {
     const workspace = buildWorkspaceV2("workspace-1");
     const command = {

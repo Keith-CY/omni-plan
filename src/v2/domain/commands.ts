@@ -233,6 +233,18 @@ function isOptionalStringValue(value: unknown): boolean {
   return value === undefined || isStringValue(value);
 }
 
+function isOptionalFiniteNumberValue(value: unknown): boolean {
+  return value === undefined || isFiniteNumberValue(value);
+}
+
+function isOptionalBooleanValue(value: unknown): boolean {
+  return value === undefined || typeof value === "boolean";
+}
+
+function isOneOf(value: unknown, options: readonly string[]): boolean {
+  return isStringValue(value) && options.includes(value);
+}
+
 function isStringArrayValue(value: unknown): value is string[] {
   return Array.isArray(value) && value.every(isStringValue);
 }
@@ -303,7 +315,11 @@ function isCommitmentSlotValue(value: unknown): boolean {
   return (
     isRecordValue(value) &&
     isStringValue(value.id) &&
-    isTargetValue(value.target, true)
+    isTargetValue(value.target, true) &&
+    isFiniteNumberValue(value.targetRevision) &&
+    isStringValue(value.start) &&
+    isStringValue(value.finish) &&
+    isOneOf(value.attention, ["deep", "medium", "shallow"])
   );
 }
 
@@ -312,7 +328,312 @@ function areCommitmentSlotsValue(value: unknown): boolean {
 }
 
 function isProjectDraftValue(value: unknown): boolean {
-  return isRecordValue(value) && isStringValue(value.id);
+  return (
+    isRecordValue(value) &&
+    isStringValue(value.id) &&
+    isStringValue(value.name) &&
+    isFiniteNumberValue(value.priority) &&
+    isStringValue(value.notes)
+  );
+}
+
+function isActionEligibilityValue(value: unknown): boolean {
+  return (
+    isRecordValue(value) &&
+    typeof value.singleSession === "boolean" &&
+    isFiniteNumberValue(value.estimateSeconds) &&
+    isStringArrayValue(value.dependencyIds) &&
+    typeof value.requiresMilestoneEvidence === "boolean" &&
+    isFiniteNumberValue(value.outcomeCount) &&
+    typeof value.solutionKnown === "boolean"
+  );
+}
+
+function isActionDraftValue(value: unknown): boolean {
+  return (
+    isRecordValue(value) &&
+    isStringValue(value.id) &&
+    isStringValue(value.title) &&
+    isActionEligibilityValue(value.eligibility) &&
+    isOneOf(value.attention, ["deep", "medium", "shallow"]) &&
+    isOptionalStringValue(value.desiredDate) &&
+    isOptionalStringValue(value.fixedStart)
+  );
+}
+
+function isActionPatchValue(value: unknown): boolean {
+  return (
+    isRecordValue(value) &&
+    isOptionalStringValue(value.title) &&
+    (value.eligibility === undefined ||
+      isActionEligibilityValue(value.eligibility)) &&
+    (value.attention === undefined ||
+      isOneOf(value.attention, ["deep", "medium", "shallow"])) &&
+    isOptionalStringValue(value.desiredDate) &&
+    isOptionalStringValue(value.fixedStart)
+  );
+}
+
+function isBetScopeValue(value: unknown): boolean {
+  return (
+    isRecordValue(value) &&
+    isStringValue(value.id) &&
+    isStringValue(value.title) &&
+    isStringValue(value.description)
+  );
+}
+
+function isDirectionBriefDraftValue(value: unknown): boolean {
+  return (
+    isRecordValue(value) &&
+    isStringValue(value.id) &&
+    isStringValue(value.projectId) &&
+    isStringValue(value.audienceAndProblem) &&
+    isStringValue(value.successEvidence) &&
+    isFiniteNumberValue(value.appetiteSeconds) &&
+    isStringValue(value.validationMethod) &&
+    Array.isArray(value.firstScope) &&
+    value.firstScope.every(isBetScopeValue) &&
+    isStringValue(value.noGoOrKill) &&
+    isStringValue(value.advancedNotes)
+  );
+}
+
+function isEstimateValue(value: unknown): boolean {
+  return (
+    isRecordValue(value) &&
+    isOptionalFiniteNumberValue(value.optimisticSeconds) &&
+    isFiniteNumberValue(value.mostLikelySeconds) &&
+    isOptionalFiniteNumberValue(value.pessimisticSeconds)
+  );
+}
+
+function isConstraintValue(value: unknown): boolean {
+  return (
+    isRecordValue(value) &&
+    isOptionalStringValue(value.noEarlierThan) &&
+    isOptionalStringValue(value.noLaterThan) &&
+    isOptionalStringValue(value.fixedStart) &&
+    isOptionalStringValue(value.fixedFinish)
+  );
+}
+
+function isAssignmentValue(value: unknown): boolean {
+  return (
+    isRecordValue(value) &&
+    isStringValue(value.resourceId) &&
+    isOneOf(value.attention, ["deep", "medium", "shallow"]) &&
+    isFiniteNumberValue(value.effortSeconds)
+  );
+}
+
+function isSplitSegmentValue(value: unknown): boolean {
+  return (
+    isRecordValue(value) &&
+    isFiniteNumberValue(value.offsetSeconds) &&
+    isFiniteNumberValue(value.durationSeconds)
+  );
+}
+
+function isRepeatRuleValue(value: unknown): boolean {
+  return (
+    isRecordValue(value) &&
+    (value.cadence === undefined ||
+      isOneOf(value.cadence, ["every-n-days", "weekly", "monthly"])) &&
+    isOptionalFiniteNumberValue(value.everyDays) &&
+    isFiniteNumberValue(value.count) &&
+    (value.startMode === undefined ||
+      isOneOf(value.startMode, ["fixed-time", "after-previous-finish"])) &&
+    isOptionalStringValue(value.startAt)
+  );
+}
+
+function isProjectWorkItemBaseValue(
+  value: unknown,
+): value is Record<string, unknown> {
+  return (
+    isRecordValue(value) &&
+    isOptionalStringValue(value.parentId) &&
+    isOneOf(value.kind, ["phase", "task", "milestone", "hammock"]) &&
+    isStringValue(value.title) &&
+    isStringValue(value.outline) &&
+    isFiniteNumberValue(value.durationSeconds) &&
+    isEstimateValue(value.estimate) &&
+    (value.constraint === undefined || isConstraintValue(value.constraint)) &&
+    Array.isArray(value.assignmentIds) &&
+    value.assignmentIds.every(isAssignmentValue) &&
+    isFiniteNumberValue(value.percentComplete) &&
+    isOptionalBooleanValue(value.isKeyTask) &&
+    isOptionalBooleanValue(value.isScopeExpansion) &&
+    isOptionalBooleanValue(value.isFastDelivery) &&
+    (value.splitSegments === undefined ||
+      (Array.isArray(value.splitSegments) &&
+        value.splitSegments.every(isSplitSegmentValue))) &&
+    (value.repeatRule === undefined || isRepeatRuleValue(value.repeatRule)) &&
+    isOptionalStringValue(value.hammockStartId) &&
+    isOptionalStringValue(value.hammockFinishId) &&
+    isOptionalBooleanValue(value.evidenceRequired) &&
+    (value.resultStatus === undefined ||
+      isOneOf(value.resultStatus, ["completed", "learned", "blocked"])) &&
+    isOptionalStringValue(value.outcomeNote)
+  );
+}
+
+function isProjectWorkItemValue(value: unknown): boolean {
+  return (
+    isProjectWorkItemBaseValue(value) &&
+    isStringValue(value.id) &&
+    isStringValue(value.projectId) &&
+    isFiniteNumberValue(value.revision) &&
+    isStringValue(value.betScopeId)
+  );
+}
+
+function isWorkItemPatchValue(value: unknown): boolean {
+  if (!isRecordValue(value)) return false;
+  return (
+    isOptionalStringValue(value.parentId) &&
+    (value.kind === undefined ||
+      isOneOf(value.kind, ["phase", "task", "milestone", "hammock"])) &&
+    isOptionalStringValue(value.title) &&
+    isOptionalStringValue(value.outline) &&
+    isOptionalFiniteNumberValue(value.durationSeconds) &&
+    (value.estimate === undefined || isEstimateValue(value.estimate)) &&
+    (value.constraint === undefined || isConstraintValue(value.constraint)) &&
+    (value.assignmentIds === undefined ||
+      (Array.isArray(value.assignmentIds) &&
+        value.assignmentIds.every(isAssignmentValue))) &&
+    isOptionalFiniteNumberValue(value.percentComplete) &&
+    isOptionalBooleanValue(value.isKeyTask) &&
+    isOptionalBooleanValue(value.isScopeExpansion) &&
+    isOptionalBooleanValue(value.isFastDelivery) &&
+    (value.splitSegments === undefined ||
+      (Array.isArray(value.splitSegments) &&
+        value.splitSegments.every(isSplitSegmentValue))) &&
+    (value.repeatRule === undefined || isRepeatRuleValue(value.repeatRule)) &&
+    isOptionalStringValue(value.hammockStartId) &&
+    isOptionalStringValue(value.hammockFinishId) &&
+    isOptionalBooleanValue(value.evidenceRequired) &&
+    (value.resultStatus === undefined ||
+      isOneOf(value.resultStatus, ["completed", "learned", "blocked"])) &&
+    isOptionalStringValue(value.outcomeNote) &&
+    isOptionalStringValue(value.betScopeId)
+  );
+}
+
+function isReplanProposalValue(value: unknown): boolean {
+  return (
+    isRecordValue(value) &&
+    isStringValue(value.id) &&
+    isStringValue(value.localDate) &&
+    isStringValue(value.baseCommitmentId) &&
+    isFiniteNumberValue(value.baseRevision) &&
+    isStringArrayValue(value.reasonCodes) &&
+    areCommitmentSlotsValue(value.proposedSlots) &&
+    isStringValue(value.proposalHash) &&
+    isStringValue(value.createdAt) &&
+    isStringValue(value.createdBy) &&
+    isOneOf(value.status, ["open", "accepted", "dismissed"])
+  );
+}
+
+function isActualValue(value: unknown): boolean {
+  return (
+    isRecordValue(value) &&
+    isStringValue(value.id) &&
+    isFiniteNumberValue(value.revision) &&
+    isTargetValue(value.target, false) &&
+    isOptionalStringValue(value.actualStart) &&
+    isOptionalStringValue(value.actualFinish) &&
+    isFiniteNumberValue(value.actualWorkSeconds) &&
+    isFiniteNumberValue(value.remainingWorkSeconds) &&
+    isFiniteNumberValue(value.actualCost) &&
+    isStringValue(value.recordedAt)
+  );
+}
+
+function isEvidenceValue(value: unknown): boolean {
+  return (
+    isRecordValue(value) &&
+    isStringValue(value.id) &&
+    isOneOf(value.kind, [
+      "note",
+      "commit",
+      "pr",
+      "ci",
+      "doc",
+      "screenshot",
+      "release",
+      "feedback",
+      "metric",
+      "email",
+      "calendar",
+      "minutes",
+      "booking",
+    ]) &&
+    isStringValue(value.summary) &&
+    isOptionalStringValue(value.url) &&
+    isOptionalStringValue(value.localFileRef) &&
+    isStringValue(value.projectId) &&
+    isOptionalStringValue(value.workItemId) &&
+    isStringValue(value.createdAt) &&
+    isFiniteNumberValue(value.confidence) &&
+    isStringArrayValue(value.tags)
+  );
+}
+
+function isExceptionDraftValue(value: unknown): boolean {
+  return (
+    isRecordValue(value) &&
+    isStringValue(value.id) &&
+    isStringValue(value.projectId) &&
+    isStringValue(value.requirementId) &&
+    isStringValue(value.rationale) &&
+    isStringValue(value.knownConsequence) &&
+    isStringValue(value.reviewAt) &&
+    isStringValue(value.expiresAt)
+  );
+}
+
+function isReviewDraftValue(value: unknown): boolean {
+  return (
+    isRecordValue(value) &&
+    isStringValue(value.id) &&
+    isOneOf(value.kind, ["weekly", "event"]) &&
+    isStringValue(value.triggerKey) &&
+    isOneOf(value.triggerType, [
+      "weekly",
+      "bet_midpoint",
+      "bet_expired",
+      "evidence_stale",
+      "exception_expired",
+      "capacity_variance",
+      "hard_gate",
+      "sync_conflict",
+    ]) &&
+    isStringArrayValue(value.affectedProjectIds) &&
+    isStringArrayValue(value.affectedRecordIds) &&
+    isStringValue(value.dueAt)
+  );
+}
+
+function isReviewConclusionValue(value: unknown): boolean {
+  return (
+    isRecordValue(value) &&
+    isStringValue(value.summary) &&
+    isStringArrayValue(value.decisionCodes) &&
+    isStringArrayValue(value.followUpCommandIds)
+  );
+}
+
+function isConflictResolutionValue(value: unknown): boolean {
+  return (
+    isRecordValue(value) &&
+    isStringValue(value.conflictId) &&
+    isOneOf(value.retainedVersion, ["local", "remote"]) &&
+    isOptionalStringValue(value.reappliedCommandId) &&
+    isStringValue(value.rationale)
+  );
 }
 
 function isDecisionValue(
@@ -326,6 +647,15 @@ function isDecisionValue(
     isRecordValue(value) &&
     isStringValue(value.id) &&
     isStringValue(value.projectId) &&
+    isStringValue(value.successComparison) &&
+    isOneOf(value.outcome, ["achieved", "partial", "invalidated", "abandoned"]) &&
+    isStringValue(value.keyLearning) &&
+    isOneOf(value.unfinishedDisposition, [
+      "discard",
+      "return_to_inbox",
+      "follow_up_project",
+      "historical_incomplete",
+    ]) &&
     isOptionalStringValue(value.followUpProjectId)
   );
 }
@@ -347,8 +677,7 @@ function isStructurallyValidCommand(value: unknown): value is V2Command {
     case "confirm_action_triage":
       return (
         isStringValue(value.inboxItemId) &&
-        isRecordValue(value.action) &&
-        isStringValue(value.action.id)
+        isActionDraftValue(value.action)
       );
     case "confirm_project_triage":
       return (
@@ -356,9 +685,14 @@ function isStructurallyValidCommand(value: unknown): value is V2Command {
         isProjectDraftValue(value.project)
       );
     case "update_project_metadata":
-      return isStringValue(value.projectId);
+      return (
+        isStringValue(value.projectId) &&
+        isOptionalStringValue(value.name) &&
+        isOptionalFiniteNumberValue(value.priority) &&
+        isOptionalStringValue(value.notes)
+      );
     case "update_action":
-      return isStringValue(value.actionId) && isRecordValue(value.patch);
+      return isStringValue(value.actionId) && isActionPatchValue(value.patch);
     case "complete_action":
       return (
         isStringValue(value.actionId) &&
@@ -372,9 +706,7 @@ function isStructurallyValidCommand(value: unknown): value is V2Command {
     case "update_direction":
       return (
         isStringValue(value.projectId) &&
-        isRecordValue(value.brief) &&
-        isStringValue(value.brief.id) &&
-        isStringValue(value.brief.projectId)
+        isDirectionBriefDraftValue(value.brief)
       );
     case "place_bet":
       return (
@@ -385,30 +717,22 @@ function isStructurallyValidCommand(value: unknown): value is V2Command {
     case "create_work_item":
       return (
         isStringValue(value.projectId) &&
-        isRecordValue(value.workItem) &&
-        isStringValue(value.workItem.id) &&
-        isStringValue(value.workItem.projectId) &&
-        isStringValue(value.workItem.betScopeId)
+        isProjectWorkItemValue(value.workItem)
       );
     case "update_work_item":
       return (
         isStringValue(value.projectId) &&
         isStringValue(value.workItemId) &&
-        isRecordValue(value.patch) &&
-        isOptionalStringValue(value.patch.betScopeId)
+        isWorkItemPatchValue(value.patch)
       );
     case "propose_replan":
-      return (
-        isRecordValue(value.proposal) &&
-        isStringValue(value.proposal.id) &&
-        isStringValue(value.proposal.baseCommitmentId) &&
-        areCommitmentSlotsValue(value.proposal.proposedSlots)
-      );
+      return isReplanProposalValue(value.proposal);
     case "commit_today":
       return (
         isRecordValue(value.commitment) &&
         isStringValue(value.commitment.id) &&
         isStringValue(value.commitment.localDate) &&
+        isStringValue(value.commitment.proposalHash) &&
         areCommitmentSlotsValue(value.commitment.slots)
       );
     case "accept_replan":
@@ -417,25 +741,11 @@ function isStructurallyValidCommand(value: unknown): value is V2Command {
         isStringValue(value.commitmentId)
       );
     case "record_actual":
-      return (
-        isRecordValue(value.actual) &&
-        isStringValue(value.actual.id) &&
-        isTargetValue(value.actual.target, false)
-      );
+      return isActualValue(value.actual);
     case "attach_evidence":
-      return (
-        isRecordValue(value.evidence) &&
-        isStringValue(value.evidence.id) &&
-        isStringValue(value.evidence.projectId) &&
-        isOptionalStringValue(value.evidence.workItemId)
-      );
+      return isEvidenceValue(value.evidence);
     case "approve_evidence_exception":
-      return (
-        isRecordValue(value.exception) &&
-        isStringValue(value.exception.id) &&
-        isStringValue(value.exception.projectId) &&
-        isStringValue(value.exception.requirementId)
-      );
+      return isExceptionDraftValue(value.exception);
     case "resolve_evidence_exception":
       return (
         isStringValue(value.exceptionId) && isStringValue(value.resolution)
@@ -454,23 +764,16 @@ function isStructurallyValidCommand(value: unknown): value is V2Command {
         isStringValue(value.reviewId) && isStringValue(value.triggerKey)
       );
     case "create_review":
-      return (
-        isRecordValue(value.review) &&
-        isStringValue(value.review.id) &&
-        isStringValue(value.review.triggerKey) &&
-        isStringArrayValue(value.review.affectedProjectIds) &&
-        isStringArrayValue(value.review.affectedRecordIds)
-      );
+      return isReviewDraftValue(value.review);
     case "complete_review":
       return (
-        isStringValue(value.reviewId) && isRecordValue(value.conclusion)
+        isStringValue(value.reviewId) &&
+        isReviewConclusionValue(value.conclusion)
       );
     case "resolve_sync_conflict":
       return (
         isStringValue(value.reviewId) &&
-        isRecordValue(value.resolution) &&
-        isStringValue(value.resolution.conflictId) &&
-        isOptionalStringValue(value.resolution.reappliedCommandId)
+        isConflictResolutionValue(value.resolution)
       );
     case "close_project":
       return isStringValue(value.projectId) && isDecisionValue(value.decision);
