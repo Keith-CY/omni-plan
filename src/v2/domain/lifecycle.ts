@@ -54,6 +54,14 @@ export function transitionLifecycle(
   project: ProjectV2,
   event: LifecycleEvent,
 ): LifecycleTransitionResult {
+  if (!Object.prototype.hasOwnProperty.call(transitions, project.stage)) {
+    return {
+      ok: false,
+      code: "ILLEGAL_LIFECYCLE_TRANSITION",
+      project,
+    };
+  }
+
   const row = transitions[project.stage];
 
   if (

@@ -187,6 +187,22 @@ describe("transitionLifecycle", () => {
   });
 
   it.each([
+    ["__proto__", "constructor"],
+    ["constructor", "prototype"],
+    ["toString", "length"],
+  ] as const)(
+    "rejects the inherited runtime stage %s combined with event %s",
+    (stage, event) => {
+      const project = {
+        ...buildLifecycleProject("direction", "bet-1"),
+        stage,
+      } as unknown as ProjectV2;
+
+      expectIllegalTransition(project, event as LifecycleEvent);
+    },
+  );
+
+  it.each([
     ["preserves an existing Bet reference", "bet-1"],
     ["does not invent a Bet reference", undefined],
   ] as const)("on appetite expiry, %s", (_description, activeBetId) => {
