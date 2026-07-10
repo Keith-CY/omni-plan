@@ -8,7 +8,18 @@
     "build": "tsc && vite build",
     "test": "vitest run",
     "test:watch": "vitest",
-    "preview": "vite preview --host 127.0.0.1"
+    "preview": "vite preview --host 127.0.0.1",
+    "test:v2": "vitest run src/v2",
+    "test:property": "vitest run src/v2/tests/commandSequence.property.test.ts",
+    "test:ui": "vitest run src/v2/app",
+    "test:e2e": "playwright test",
+    "test:a11y": "playwright test tests/e2e/accessibility.spec.ts",
+    "test:visual": "playwright test tests/e2e/visual.spec.ts",
+    "test:scale": "playwright test tests/e2e/scale.spec.ts",
+    "typecheck": "tsc --noEmit",
+    "build:v1": "tsc --noEmit && vite build --mode v1",
+    "build:v2": "tsc --noEmit && vite build --mode v2",
+    "verify:v2": "bun scripts/verify-v2.ts"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "^1.1.18",
@@ -29,9 +40,17 @@
     "vite": "^6.0.5"
   },
   "devDependencies": {
+    "@axe-core/playwright": "^4.12.1",
+    "@playwright/test": "^1.61.1",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.1",
     "@types/node": "^26.0.1",
     "@types/react": "^18.3.18",
     "@types/react-dom": "^18.3.5",
+    "fake-indexeddb": "^6.2.5",
+    "fast-check": "^4.9.0",
+    "jsdom": "^29.1.1",
     "typescript": "^5.7.2",
     "vitest": "^2.1.8"
   }
