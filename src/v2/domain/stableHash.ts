@@ -3,10 +3,18 @@ import type { JsonValue } from "./types";
 function canonicalJson(value: JsonValue): string {
   if (value === null) return "null";
   if (typeof value === "string") return JSON.stringify(value);
-  if (typeof value === "number" || typeof value === "boolean") {
-    return String(value);
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? String(value) : "null";
   }
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (typeof value === "boolean") return String(value);
+  if (Array.isArray(value)) {
+    const items: string[] = [];
+    for (let index = 0; index < value.length; index += 1) {
+      const item = value[index];
+      items.push(item === undefined ? "null" : canonicalJson(item));
+    }
+    return `[${items.join(",")}]`;
+  }
   return `{${Object.entries(value)
     .filter(([, item]) => item !== undefined)
     .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))

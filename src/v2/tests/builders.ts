@@ -13,11 +13,22 @@ import { createEmptyWorkspaceV2 } from "../domain/workspace";
 type BuilderInput<T, RequiredKeys extends keyof T> = Pick<T, RequiredKeys> &
   Partial<Omit<T, RequiredKeys>>;
 
+function withoutUndefined<T extends object>(value: T): T {
+  return Object.fromEntries(
+    Object.entries(value).filter(([, item]) => item !== undefined),
+  ) as T;
+}
+
 export function buildWorkspaceV2(
   workspaceId: Id,
   overrides: Partial<Omit<WorkspaceV2, "schemaVersion" | "workspaceId">> = {},
 ): WorkspaceV2 {
-  return { ...createEmptyWorkspaceV2(workspaceId), ...overrides };
+  return {
+    ...createEmptyWorkspaceV2(workspaceId),
+    ...withoutUndefined(overrides),
+    schemaVersion: 2,
+    workspaceId,
+  };
 }
 
 export function buildInboxItem(
@@ -29,7 +40,7 @@ export function buildInboxItem(
   return {
     originalText: "Captured item",
     triageStatus: "untriaged",
-    ...input,
+    ...withoutUndefined(input),
   };
 }
 
@@ -45,7 +56,7 @@ export function buildProjectV2(
     notes: "",
     stage: "direction",
     holds: [],
-    ...input,
+    ...withoutUndefined(input),
   };
 }
 
@@ -64,7 +75,7 @@ export function buildDirectionBrief(
     firstScope: [],
     noGoOrKill: "No-go or kill criteria",
     advancedNotes: "",
-    ...input,
+    ...withoutUndefined(input),
   };
 }
 
@@ -85,7 +96,7 @@ export function buildBetVersion(
     version: 1,
     briefHash: "brief-hash",
     committedScope: [],
-    ...input,
+    ...withoutUndefined(input),
   };
 }
 
@@ -97,6 +108,6 @@ export function buildCapacityProfile(
     weeklyWindows: [],
     dailyBudgets: [],
     unavailableBlocks: [],
-    ...input,
+    ...withoutUndefined(input),
   };
 }
