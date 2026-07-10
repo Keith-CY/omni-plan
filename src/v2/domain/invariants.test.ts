@@ -123,6 +123,79 @@ function violationsWithCode(
   );
 }
 
+function buildRebetPausedWorkspaces(): {
+  previous: WorkspaceV2;
+  candidate: WorkspaceV2;
+} {
+  const previous = buildValidWorkspace();
+  previous.actuals = [
+    {
+      id: "actual-history",
+      revision: 1,
+      target: { kind: "work_item", workItemId: "work-item-1" },
+      actualWorkSeconds: 600,
+      remainingWorkSeconds: 3_000,
+      actualCost: 0,
+      recordedAt: CREATED_AT,
+    },
+  ];
+  previous.dailyCommitments = [
+    {
+      id: "commitment-history",
+      localDate: "2026-07-10",
+      version: 1,
+      proposalHash: "historical-commitment",
+      capacitySnapshot: buildCapacityProfile({
+        dailyBudgets: [
+          {
+            weekday: 5,
+            deepSeconds: 3_600,
+            mediumSeconds: 3_600,
+            shallowSeconds: 3_600,
+          },
+        ],
+        updatedAt: CREATED_AT,
+        updatedBy: "human-1",
+      }),
+      slots: [
+        {
+          id: "slot-history",
+          target: {
+            kind: "work_item",
+            workItemId: "work-item-1",
+            projectId: "project-1",
+          },
+          targetRevision: 1,
+          start: "2026-07-10T09:00:00.000Z",
+          finish: "2026-07-10T09:30:00.000Z",
+          attention: "deep",
+        },
+      ],
+      actorId: "human-1",
+      committedAt: CREATED_AT,
+    },
+  ];
+
+  const candidate = structuredClone(previous);
+  candidate.bets[0].invalidatedAt = NOW;
+  candidate.bets[0].invalidationReason = "Direction changed materially";
+  candidate.projects[0].holds.push({
+    type: "rebet_required",
+    sourceId: "bet-1",
+    affectedRecordIds: [
+      "project-1",
+      "bet-1",
+      "plan-1",
+      "work-item-1",
+      "actual-history",
+      "commitment-history",
+    ],
+    createdAt: NOW,
+  });
+
+  return { previous, candidate };
+}
+
 describe("validateWorkspaceInvariants Bet rules", () => {
   it("accepts a valid deterministic workspace without mutation", () => {
     const workspace = buildValidWorkspace();
@@ -333,6 +406,139 @@ describe("validateWorkspaceInvariants Bet rules", () => {
       });
     },
   );
+
+  it("preserves frozen Plan and execution history during an intentional Re-bet pause", () => {
+    const { previous, candidate } = buildRebetPausedWorkspaces();
+
+    const violations = validateWorkspaceInvariants(candidate, NOW, previous);
+
+    expect(
+      violations.filter(({ code }) =>
+        ["BET_REQUIRED", "BET_EXPIRED", "SCOPE_OUTSIDE_BET"].includes(code),
+      ),
+    ).toEqual([]);
+  });
+
+  it("requires a current Bet for a new Actual during a Re-bet pause", () => {
+    const { previous, candidate } = buildRebetPausedWorkspaces();
+    candidate.actuals.push({
+      ...structuredClone(candidate.actuals[0]),
+      id: "actual-new",
+      recordedAt: NOW,
+    });
+
+    expect(
+      violationsWithCode(candidate, "BET_REQUIRED", previous),
+    ).toContainEqual({
+      code: "BET_REQUIRED",
+      reason:
+        "Actual actual-new targets Work Item work-item-1 without a valid current Bet for Project project-1.",
+      gate: "actual:actual-new:current_bet",
+      permittedNextCommand: "place_bet",
+    });
+  });
+
+  it.each(["new", "changed"] as const)(
+    "requires a current Bet for a %s project-work Commitment slot during a Re-bet pause",
+    (kind) => {
+      const { previous, candidate } = buildRebetPausedWorkspaces();
+      if (kind === "new") {
+        candidate.dailyCommitments[0].slots.push({
+          ...structuredClone(candidate.dailyCommitments[0].slots[0]),
+          id: "slot-new",
+          start: "2026-07-10T09:30:00.000Z",
+          finish: "2026-07-10T10:00:00.000Z",
+        });
+      } else {
+        candidate.dailyCommitments[0].slots[0].finish =
+          "2026-07-10T09:45:00.000Z";
+      }
+
+      const slotId = kind === "new" ? "slot-new" : "slot-history";
+      expect(
+        violationsWithCode(candidate, "BET_REQUIRED", previous),
+      ).toContainEqual({
+        code: "BET_REQUIRED",
+        reason: `Daily Commitment commitment-history slot ${slotId} targets Work Item work-item-1 without a valid current Bet for Project project-1.`,
+        gate: `daily_commitment:commitment-history:slot:${slotId}:current_bet`,
+        permittedNextCommand: "place_bet",
+      });
+    },
+  );
+
+  it("keeps unchanged historical commitments exempt across unrelated record reordering", () => {
+    const { previous, candidate } = buildRebetPausedWorkspaces();
+    const evidence = [
+      {
+        id: "evidence-a",
+        kind: "note" as const,
+        summary: "First",
+        projectId: "project-1",
+        workItemId: "work-item-1",
+        createdAt: CREATED_AT,
+        confidence: 1,
+        tags: [],
+      },
+      {
+        id: "evidence-b",
+        kind: "note" as const,
+        summary: "Second",
+        projectId: "project-1",
+        workItemId: "work-item-1",
+        createdAt: CREATED_AT,
+        confidence: 1,
+        tags: [],
+      },
+    ];
+    previous.evidence = structuredClone(evidence);
+    candidate.evidence = structuredClone(evidence).reverse();
+
+    expect(
+      violationsWithCode(candidate, "BET_REQUIRED", previous),
+    ).toEqual([]);
+  });
+
+  it.each(["changed", "new"] as const)(
+    "does not hide a %s active Plan during a Re-bet pause",
+    (kind) => {
+      const { previous, candidate } = buildRebetPausedWorkspaces();
+      if (kind === "changed") {
+        candidate.planVersions[0].scheduleHash = "changed-schedule";
+      } else {
+        candidate.planVersions.push({
+          ...structuredClone(candidate.planVersions[0]),
+          id: "plan-new",
+          version: 2,
+          supersedesId: "plan-1",
+        });
+        candidate.projects[0].activePlanVersionId = "plan-new";
+      }
+
+      const planId = kind === "new" ? "plan-new" : "plan-1";
+      expect(
+        violationsWithCode(candidate, "BET_REQUIRED", previous),
+      ).toContainEqual(
+        expect.objectContaining({
+          code: "BET_REQUIRED",
+          gate: `plan:${planId}:current_bet`,
+        }),
+      );
+    },
+  );
+
+  it("does not hide malformed active Plan scope during a Re-bet pause", () => {
+    const { previous, candidate } = buildRebetPausedWorkspaces();
+    candidate.planVersions[0].scopeMapping = {};
+
+    expect(
+      violationsWithCode(candidate, "SCOPE_OUTSIDE_BET", previous),
+    ).toContainEqual(
+      expect.objectContaining({
+        code: "SCOPE_OUTSIDE_BET",
+        gate: "plan:plan-1:work_item:work-item-1:bet_scope",
+      }),
+    );
+  });
 });
 
 describe("validateWorkspaceInvariants Daily Commitment capacity", () => {

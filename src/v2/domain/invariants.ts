@@ -278,15 +278,98 @@ function findValidCurrentBet(
     : undefined;
 }
 
+function isIntentionallyPausedForRebet(
+  project: ProjectV2,
+  betsById: ReadonlyMap<Id, BetVersion>,
+): boolean {
+  if (
+    !project.holds.some(({ type }) => type === "rebet_required") ||
+    project.activeBetId === undefined
+  ) {
+    return false;
+  }
+  const retainedBet = betsById.get(project.activeBetId);
+  return (
+    retainedBet !== undefined &&
+    retainedBet.projectId === project.id &&
+    retainedBet.invalidatedAt !== undefined
+  );
+}
+
+function planScopeIsStructurallyValid(
+  workspace: WorkspaceV2,
+  plan: WorkspaceV2["planVersions"][number],
+): boolean {
+  const bet = indexById(workspace.bets).get(plan.betId);
+  if (bet === undefined || bet.projectId !== plan.projectId) {
+    return false;
+  }
+  const workItemsById = indexById(workspace.workItems);
+  const committedScopeIds = new Set(bet.committedScope.map(({ id }) => id));
+  return Object.keys(plan.workItemRevisions).every((workItemId) => {
+    const workItem = workItemsById.get(workItemId);
+    return (
+      workItem !== undefined &&
+      workItem.projectId === plan.projectId &&
+      Object.prototype.hasOwnProperty.call(plan.scopeMapping, workItemId) &&
+      plan.scopeMapping[workItemId] === workItem.betScopeId &&
+      committedScopeIds.has(workItem.betScopeId)
+    );
+  });
+}
+
+function isFrozenHistoricalPlan(
+  workspace: WorkspaceV2,
+  previousWorkspace: WorkspaceV2 | undefined,
+  project: ProjectV2,
+  plan: WorkspaceV2["planVersions"][number],
+  betsById: ReadonlyMap<Id, BetVersion>,
+): boolean {
+  if (
+    previousWorkspace === undefined ||
+    !isIntentionallyPausedForRebet(project, betsById)
+  ) {
+    return false;
+  }
+
+  const previousProject = indexById(previousWorkspace.projects).get(project.id);
+  const previousPlan = indexById(previousWorkspace.planVersions).get(plan.id);
+  if (
+    previousProject?.activePlanVersionId !== plan.id ||
+    previousPlan === undefined ||
+    !sameStructure(plan, previousPlan) ||
+    !planScopeIsStructurallyValid(previousWorkspace, previousPlan)
+  ) {
+    return false;
+  }
+
+  const currentWorkItemsById = indexById(workspace.workItems);
+  const previousWorkItemsById = indexById(previousWorkspace.workItems);
+  return Object.keys(plan.workItemRevisions).every((workItemId) => {
+    const currentWorkItem = currentWorkItemsById.get(workItemId);
+    const previousWorkItem = previousWorkItemsById.get(workItemId);
+    return (
+      currentWorkItem !== undefined &&
+      previousWorkItem !== undefined &&
+      sameStructure(currentWorkItem, previousWorkItem)
+    );
+  });
+}
+
 function validateBetRules(
   workspace: WorkspaceV2,
   now: ISODate,
+  previousWorkspace: WorkspaceV2 | undefined,
   add: AddViolation,
 ): void {
   const betsById = indexById(workspace.bets);
   const plansById = indexById(workspace.planVersions);
   const projectsById = indexById(workspace.projects);
   const workItemsById = indexById(workspace.workItems);
+  const previousActualsById = indexById(previousWorkspace?.actuals ?? []);
+  const previousCommitmentsById = indexById(
+    previousWorkspace?.dailyCommitments ?? [],
+  );
 
   for (const project of sortedById(workspace.projects)) {
     const currentBets = sortedById(
@@ -308,7 +391,12 @@ function validateBetRules(
     }
 
     const validActiveBet = findValidCurrentBet(project, betsById);
-    if (activeBetStages.has(project.stage) && validActiveBet === undefined) {
+    const rebetPaused = isIntentionallyPausedForRebet(project, betsById);
+    if (
+      activeBetStages.has(project.stage) &&
+      validActiveBet === undefined &&
+      !rebetPaused
+    ) {
       add(
         "BET_REQUIRED",
         project.stage === "executing"
@@ -325,12 +413,20 @@ function validateBetRules(
     ) {
       const plan = plansById.get(project.activePlanVersionId)!;
       const planBet = betsById.get(plan.betId);
+      const frozenHistoricalPlan = isFrozenHistoricalPlan(
+        workspace,
+        previousWorkspace,
+        project,
+        plan,
+        betsById,
+      );
       if (
-        validActiveBet === undefined ||
-        plan.betId !== validActiveBet.id ||
-        planBet === undefined ||
-        planBet.invalidatedAt !== undefined ||
-        planBet.projectId !== project.id
+        !frozenHistoricalPlan &&
+        (validActiveBet === undefined ||
+          plan.betId !== validActiveBet.id ||
+          planBet === undefined ||
+          planBet.invalidatedAt !== undefined ||
+          planBet.projectId !== project.id)
       ) {
         add(
           "BET_REQUIRED",
@@ -369,6 +465,14 @@ function validateBetRules(
       project !== undefined &&
       findValidCurrentBet(project, betsById) === undefined
     ) {
+      const previousActual = previousActualsById.get(actual.id);
+      if (
+        isIntentionallyPausedForRebet(project, betsById) &&
+        previousActual !== undefined &&
+        sameStructure(actual, previousActual)
+      ) {
+        continue;
+      }
       add(
         "BET_REQUIRED",
         `Actual ${actual.id} targets Work Item ${workItem.id} without a valid current Bet for Project ${project.id}.`,
@@ -391,6 +495,17 @@ function validateBetRules(
         project !== undefined &&
         findValidCurrentBet(project, betsById) === undefined
       ) {
+        const previousCommitment = previousCommitmentsById.get(commitment.id);
+        const previousSlot = indexById(previousCommitment?.slots ?? []).get(
+          slot.id,
+        );
+        if (
+          isIntentionallyPausedForRebet(project, betsById) &&
+          previousSlot !== undefined &&
+          sameStructure(slot, previousSlot)
+        ) {
+          continue;
+        }
         add(
           "BET_REQUIRED",
           `Daily Commitment ${commitment.id} slot ${slot.id} targets Work Item ${workItem.id} without a valid current Bet for Project ${project.id}.`,
@@ -481,6 +596,7 @@ function validateCapacityRules(
 
 function validateScopeRules(
   workspace: WorkspaceV2,
+  previousWorkspace: WorkspaceV2 | undefined,
   add: AddViolation,
 ): void {
   const plansById = indexById(workspace.planVersions);
@@ -493,6 +609,17 @@ function validateScopeRules(
     }
     const plan = plansById.get(project.activePlanVersionId);
     if (plan === undefined) {
+      continue;
+    }
+    if (
+      isFrozenHistoricalPlan(
+        workspace,
+        previousWorkspace,
+        project,
+        plan,
+        betsById,
+      )
+    ) {
       continue;
     }
     const candidateBet = betsById.get(plan.betId);
@@ -1534,9 +1661,9 @@ export function validateWorkspaceInvariants(
 ): InvariantViolation[] {
   const collector = createCollector();
 
-  validateBetRules(workspace, now, collector.add);
+  validateBetRules(workspace, now, previousWorkspace, collector.add);
   validateCapacityRules(workspace, collector.add);
-  validateScopeRules(workspace, collector.add);
+  validateScopeRules(workspace, previousWorkspace, collector.add);
   validateExceptionRules(workspace, now, collector.add);
   validateClosedProjectRules(workspace, previousWorkspace, collector.add);
   validateReferenceRules(workspace, collector.add);
