@@ -19,21 +19,51 @@ const legalTransitions = [
   ["validating", "validation_satisfied", "closing"],
   ["validating", "abandon_confirmed", "closing"],
   ["closing", "project_closed", "closed"],
-] as const;
+] as const satisfies readonly (readonly [
+  LifecycleStage,
+  LifecycleEvent,
+  LifecycleStage,
+])[];
 
-const lifecycleEvents = [
-  "brief_completed",
-  "brief_became_incomplete",
-  "bet_placed",
-  "bet_replaced",
-  "first_project_work_committed",
-  "closure_requested",
-  "validation_requested",
-  "appetite_expired",
-  "validation_satisfied",
-  "abandon_confirmed",
-  "project_closed",
-] as const satisfies readonly LifecycleEvent[];
+const lifecycleEventFlags = {
+  brief_completed: true,
+  brief_became_incomplete: true,
+  bet_placed: true,
+  bet_replaced: true,
+  first_project_work_committed: true,
+  closure_requested: true,
+  validation_requested: true,
+  appetite_expired: true,
+  validation_satisfied: true,
+  abandon_confirmed: true,
+  project_closed: true,
+} satisfies Record<LifecycleEvent, true>;
+
+const lifecycleStageFlags = {
+  direction: true,
+  awaiting_bet: true,
+  planning: true,
+  executing: true,
+  validating: true,
+  closing: true,
+  closed: true,
+} satisfies Record<LifecycleStage, true>;
+
+const lifecycleEvents = Object.keys(lifecycleEventFlags) as LifecycleEvent[];
+const lifecycleStages = Object.keys(lifecycleStageFlags) as LifecycleStage[];
+
+function transitionKey(stage: LifecycleStage, event: LifecycleEvent): string {
+  return `${stage}:${event}`;
+}
+
+const legalTransitionKeys = new Set(
+  legalTransitions.map(([stage, event]) => transitionKey(stage, event)),
+);
+const illegalTransitions = lifecycleStages.flatMap((stage) =>
+  lifecycleEvents
+    .filter((event) => !legalTransitionKeys.has(transitionKey(stage, event)))
+    .map((event) => [stage, event] as const),
+);
 
 function buildLifecycleProject(
   stage: LifecycleStage,
@@ -66,15 +96,18 @@ function expectIllegalTransition(
   event: LifecycleEvent,
 ): void {
   const originalProject = structuredClone(project);
+  let result: ReturnType<typeof transitionLifecycle> | undefined;
 
-  const result = transitionLifecycle(project, event);
+  expect(() => {
+    result = transitionLifecycle(project, event);
+  }).not.toThrow();
 
   expect(result).toEqual({
     ok: false,
     code: "ILLEGAL_LIFECYCLE_TRANSITION",
     project,
   });
-  expect(result.project).toBe(project);
+  expect(result?.project).toBe(project);
   expect(project).toEqual(originalProject);
 }
 
@@ -102,6 +135,18 @@ describe("transitionLifecycle", () => {
     );
   });
 
+  describe("complete illegal transition matrix", () => {
+    it.each(illegalTransitions)(
+      "%s + %s rejects without mutating the project",
+      (stage, event) => {
+        expectIllegalTransition(
+          buildLifecycleProject(stage, "bet-1"),
+          event,
+        );
+      },
+    );
+  });
+
   it("rejects a direct skip from direction to executing", () => {
     expectIllegalTransition(
       buildLifecycleProject("direction", "bet-1"),
@@ -116,17 +161,29 @@ describe("transitionLifecycle", () => {
     );
   });
 
-  it.each(lifecycleEvents)(
-    "rejects %s for a closed project and leaves it unchanged",
-    (event) => {
-      expectIllegalTransition(buildLifecycleProject("closed", "bet-1"), event);
-    },
-  );
-
   it("rejects an untyped set_stage-style runtime event", () => {
     const event = "set_stage" as LifecycleEvent;
 
     expectIllegalTransition(buildLifecycleProject("direction", "bet-1"), event);
+  });
+
+  it.each(["__proto__", "constructor", "toString"] as const)(
+    "rejects the prototype-chain runtime event %s",
+    (event) => {
+      expectIllegalTransition(
+        buildLifecycleProject("direction", "bet-1"),
+        event as LifecycleEvent,
+      );
+    },
+  );
+
+  it("rejects a malformed runtime stage without throwing", () => {
+    const project = {
+      ...buildLifecycleProject("direction", "bet-1"),
+      stage: "malformed_stage",
+    } as unknown as ProjectV2;
+
+    expectIllegalTransition(project, "brief_completed");
   });
 
   it.each([

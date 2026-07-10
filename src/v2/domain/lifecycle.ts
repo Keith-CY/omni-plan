@@ -54,7 +54,20 @@ export function transitionLifecycle(
   project: ProjectV2,
   event: LifecycleEvent,
 ): LifecycleTransitionResult {
-  const nextStage = transitions[project.stage][event];
+  const row = transitions[project.stage];
+
+  if (
+    row === undefined ||
+    !Object.prototype.hasOwnProperty.call(row, event)
+  ) {
+    return {
+      ok: false,
+      code: "ILLEGAL_LIFECYCLE_TRANSITION",
+      project,
+    };
+  }
+
+  const nextStage = row[event];
 
   if (nextStage === undefined) {
     return {
