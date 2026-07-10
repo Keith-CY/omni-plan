@@ -357,14 +357,29 @@ function planScopeIsStructurallyValid(
   }
   const workItemsById = indexById(workspace.workItems);
   const committedScopeIds = new Set(bet.committedScope.map(({ id }) => id));
-  return Object.keys(plan.workItemRevisions).every((workItemId) => {
-    const workItem = workItemsById.get(workItemId);
+  const workItemScopeIsValid = Object.keys(plan.workItemRevisions).every(
+    (workItemId) => {
+      const workItem = workItemsById.get(workItemId);
+      return (
+        workItem !== undefined &&
+        workItem.projectId === plan.projectId &&
+        Object.prototype.hasOwnProperty.call(plan.scopeMapping, workItemId) &&
+        plan.scopeMapping[workItemId] === workItem.betScopeId &&
+        committedScopeIds.has(workItem.betScopeId)
+      );
+    },
+  );
+  if (!workItemScopeIsValid) {
+    return false;
+  }
+
+  const dependenciesById = indexById(workspace.dependencies);
+  return Object.keys(plan.dependencyRevisions).every((dependencyId) => {
+    const dependency = dependenciesById.get(dependencyId);
     return (
-      workItem !== undefined &&
-      workItem.projectId === plan.projectId &&
-      Object.prototype.hasOwnProperty.call(plan.scopeMapping, workItemId) &&
-      plan.scopeMapping[workItemId] === workItem.betScopeId &&
-      committedScopeIds.has(workItem.betScopeId)
+      dependency !== undefined &&
+      dependency.projectId === plan.projectId &&
+      dependency.revision === plan.dependencyRevisions[dependencyId]
     );
   });
 }
@@ -403,13 +418,30 @@ function isFrozenHistoricalPlan(
 
   const currentWorkItemsById = indexById(workspace.workItems);
   const previousWorkItemsById = indexById(previousWorkspace.workItems);
-  return Object.keys(plan.workItemRevisions).every((workItemId) => {
-    const currentWorkItem = currentWorkItemsById.get(workItemId);
-    const previousWorkItem = previousWorkItemsById.get(workItemId);
+  const referencedWorkItemsAreFrozen = Object.keys(plan.workItemRevisions).every(
+    (workItemId) => {
+      const currentWorkItem = currentWorkItemsById.get(workItemId);
+      const previousWorkItem = previousWorkItemsById.get(workItemId);
+      return (
+        currentWorkItem !== undefined &&
+        previousWorkItem !== undefined &&
+        sameStructure(currentWorkItem, previousWorkItem)
+      );
+    },
+  );
+  if (!referencedWorkItemsAreFrozen) {
+    return false;
+  }
+
+  const currentDependenciesById = indexById(workspace.dependencies);
+  const previousDependenciesById = indexById(previousWorkspace.dependencies);
+  return Object.keys(plan.dependencyRevisions).every((dependencyId) => {
+    const currentDependency = currentDependenciesById.get(dependencyId);
+    const previousDependency = previousDependenciesById.get(dependencyId);
     return (
-      currentWorkItem !== undefined &&
-      previousWorkItem !== undefined &&
-      sameStructure(currentWorkItem, previousWorkItem)
+      currentDependency !== undefined &&
+      previousDependency !== undefined &&
+      sameStructure(currentDependency, previousDependency)
     );
   });
 }

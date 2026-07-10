@@ -128,6 +128,29 @@ function buildRebetPausedWorkspaces(): {
   candidate: WorkspaceV2;
 } {
   const previous = buildValidWorkspace();
+  previous.dependencies = [
+    {
+      id: "dependency-history",
+      projectId: "project-1",
+      fromId: "work-item-1",
+      toId: "work-item-1",
+      type: "FS",
+      lagSeconds: 0,
+      revision: 1,
+    },
+    {
+      id: "dependency-unrelated",
+      projectId: "project-1",
+      fromId: "work-item-1",
+      toId: "work-item-1",
+      type: "SS",
+      lagSeconds: 300,
+      revision: 1,
+    },
+  ];
+  previous.planVersions[0].dependencyRevisions = {
+    "dependency-history": 1,
+  };
   previous.actuals = [
     {
       id: "actual-history",
@@ -187,6 +210,7 @@ function buildRebetPausedWorkspaces(): {
       "bet-1",
       "plan-1",
       "work-item-1",
+      "dependency-history",
       "actual-history",
       "commitment-history",
     ],
@@ -488,6 +512,90 @@ describe("validateWorkspaceInvariants Bet rules", () => {
     expect(
       validateWorkspaceInvariants(candidate, NOW, previous).filter(({ code }) =>
         ["BET_REQUIRED", "BET_EXPIRED", "SCOPE_OUTSIDE_BET"].includes(code),
+      ),
+    ).toEqual([]);
+  });
+
+  it("tracks the active Plan's ProjectDependency revision in the Re-bet fixture", () => {
+    const { previous } = buildRebetPausedWorkspaces();
+    const dependency = previous.dependencies.find(
+      ({ id }) => id === "dependency-history",
+    );
+
+    expect(previous.planVersions[0].dependencyRevisions).toEqual({
+      "dependency-history": 1,
+    });
+    expect(dependency?.revision).toBe(1);
+  });
+
+  it.each(["atomic", "persisted"] as const)(
+    "rejects a referenced ProjectDependency revision change during an %s Re-bet pause",
+    (mode) => {
+      const { previous, candidate } =
+        mode === "atomic"
+          ? buildRebetPausedWorkspaces()
+          : buildPersistedRebetPausedWorkspaces();
+      const dependency = candidate.dependencies.find(
+        ({ id }) => id === "dependency-history",
+      );
+      if (dependency === undefined) {
+        throw new Error("Expected dependency-history fixture");
+      }
+      dependency.lagSeconds = 900;
+      dependency.revision += 1;
+
+      expect(
+        validateWorkspaceInvariants(candidate, NOW, previous),
+      ).toContainEqual(
+        expect.objectContaining({
+          code: "BET_REQUIRED",
+          gate: "plan:plan-1:current_bet",
+        }),
+      );
+    },
+  );
+
+  it("rejects deletion of a ProjectDependency referenced by the frozen Plan", () => {
+    const { previous, candidate } = buildRebetPausedWorkspaces();
+    candidate.dependencies = candidate.dependencies.filter(
+      ({ id }) => id !== "dependency-history",
+    );
+
+    expect(
+      violationsWithCode(candidate, "ENTITY_NOT_FOUND", previous),
+    ).toContainEqual(
+      expect.objectContaining({
+        gate:
+          "reference:PlanVersion:plan-1:dependencyRevisions:dependency-history",
+      }),
+    );
+  });
+
+  it("keeps a Re-bet pause valid when unchanged dependencies are reordered", () => {
+    const { previous, candidate } = buildPersistedRebetPausedWorkspaces();
+    candidate.dependencies.reverse();
+
+    expect(
+      validateWorkspaceInvariants(candidate, NOW, previous).filter(({ code }) =>
+        ["BET_REQUIRED", "SCOPE_OUTSIDE_BET"].includes(code),
+      ),
+    ).toEqual([]);
+  });
+
+  it("ignores changes to dependencies not referenced by the frozen Plan", () => {
+    const { previous, candidate } = buildPersistedRebetPausedWorkspaces();
+    const dependency = candidate.dependencies.find(
+      ({ id }) => id === "dependency-unrelated",
+    );
+    if (dependency === undefined) {
+      throw new Error("Expected dependency-unrelated fixture");
+    }
+    dependency.lagSeconds = 600;
+    dependency.revision += 1;
+
+    expect(
+      validateWorkspaceInvariants(candidate, NOW, previous).filter(({ code }) =>
+        ["BET_REQUIRED", "SCOPE_OUTSIDE_BET"].includes(code),
       ),
     ).toEqual([]);
   });
