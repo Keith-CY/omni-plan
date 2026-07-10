@@ -278,21 +278,54 @@ function findValidCurrentBet(
     : undefined;
 }
 
+function betDataWithoutInvalidation(
+  bet: BetVersion,
+): Omit<BetVersion, "invalidatedAt" | "invalidationReason"> {
+  const comparable = { ...bet };
+  delete comparable.invalidatedAt;
+  delete comparable.invalidationReason;
+  return comparable;
+}
+
 function isIntentionallyPausedForRebet(
+  workspace: WorkspaceV2,
+  previousWorkspace: WorkspaceV2 | undefined,
   project: ProjectV2,
   betsById: ReadonlyMap<Id, BetVersion>,
 ): boolean {
   if (
+    previousWorkspace === undefined ||
     !project.holds.some(({ type }) => type === "rebet_required") ||
     project.activeBetId === undefined
   ) {
     return false;
   }
-  const retainedBet = betsById.get(project.activeBetId);
+
+  const previousProject = indexById(previousWorkspace.projects).get(project.id);
+  if (
+    previousProject === undefined ||
+    previousProject.stage !== project.stage ||
+    previousProject.activeBetId !== project.activeBetId
+  ) {
+    return false;
+  }
+
+  const previousBet = indexById(previousWorkspace.bets).get(project.activeBetId);
+  const candidateBet = betsById.get(project.activeBetId);
   return (
-    retainedBet !== undefined &&
-    retainedBet.projectId === project.id &&
-    retainedBet.invalidatedAt !== undefined
+    previousBet !== undefined &&
+    previousBet.projectId === project.id &&
+    previousBet.invalidatedAt === undefined &&
+    candidateBet !== undefined &&
+    candidateBet.projectId === project.id &&
+    candidateBet.invalidatedAt !== undefined &&
+    sameStructure(
+      betDataWithoutInvalidation(candidateBet),
+      betDataWithoutInvalidation(previousBet),
+    ) &&
+    !workspace.bets.some(
+      (bet) => bet.projectId === project.id && bet.invalidatedAt === undefined,
+    )
   );
 }
 
@@ -327,7 +360,12 @@ function isFrozenHistoricalPlan(
 ): boolean {
   if (
     previousWorkspace === undefined ||
-    !isIntentionallyPausedForRebet(project, betsById)
+    !isIntentionallyPausedForRebet(
+      workspace,
+      previousWorkspace,
+      project,
+      betsById,
+    )
   ) {
     return false;
   }
@@ -337,6 +375,8 @@ function isFrozenHistoricalPlan(
   if (
     previousProject?.activePlanVersionId !== plan.id ||
     previousPlan === undefined ||
+    plan.betId !== project.activeBetId ||
+    previousPlan.betId !== previousProject.activeBetId ||
     !sameStructure(plan, previousPlan) ||
     !planScopeIsStructurallyValid(previousWorkspace, previousPlan)
   ) {
@@ -391,7 +431,12 @@ function validateBetRules(
     }
 
     const validActiveBet = findValidCurrentBet(project, betsById);
-    const rebetPaused = isIntentionallyPausedForRebet(project, betsById);
+    const rebetPaused = isIntentionallyPausedForRebet(
+      workspace,
+      previousWorkspace,
+      project,
+      betsById,
+    );
     if (
       activeBetStages.has(project.stage) &&
       validActiveBet === undefined &&
@@ -467,7 +512,12 @@ function validateBetRules(
     ) {
       const previousActual = previousActualsById.get(actual.id);
       if (
-        isIntentionallyPausedForRebet(project, betsById) &&
+        isIntentionallyPausedForRebet(
+          workspace,
+          previousWorkspace,
+          project,
+          betsById,
+        ) &&
         previousActual !== undefined &&
         sameStructure(actual, previousActual)
       ) {
@@ -500,7 +550,12 @@ function validateBetRules(
           slot.id,
         );
         if (
-          isIntentionallyPausedForRebet(project, betsById) &&
+          isIntentionallyPausedForRebet(
+            workspace,
+            previousWorkspace,
+            project,
+            betsById,
+          ) &&
           previousSlot !== undefined &&
           sameStructure(slot, previousSlot)
         ) {

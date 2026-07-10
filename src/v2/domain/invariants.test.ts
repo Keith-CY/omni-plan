@@ -419,6 +419,68 @@ describe("validateWorkspaceInvariants Bet rules", () => {
     ).toEqual([]);
   });
 
+  it("rejects a Re-bet pause that swaps the retained active Bet pointer", () => {
+    const { previous, candidate } = buildRebetPausedWorkspaces();
+    candidate.bets.push({
+      ...structuredClone(candidate.bets[0]),
+      id: "bet-substituted",
+      version: 2,
+      supersedesId: "bet-1",
+    });
+    candidate.projects[0].activeBetId = "bet-substituted";
+
+    const gates = violationsWithCode(candidate, "BET_REQUIRED", previous).map(
+      ({ gate }) => gate,
+    );
+
+    expect(gates).toContain("project:project-1:current_bet");
+    expect(gates).toContain("plan:plan-1:current_bet");
+  });
+
+  it("rejects a Re-bet pause while an unselected current Bet exists", () => {
+    const { previous, candidate } = buildRebetPausedWorkspaces();
+    const replacementBet = structuredClone(candidate.bets[0]);
+    replacementBet.id = "bet-replacement";
+    replacementBet.version = 2;
+    replacementBet.supersedesId = "bet-1";
+    delete replacementBet.invalidatedAt;
+    delete replacementBet.invalidationReason;
+    candidate.bets.push(replacementBet);
+
+    expect(
+      violationsWithCode(candidate, "BET_REQUIRED", previous),
+    ).toContainEqual(
+      expect.objectContaining({
+        code: "BET_REQUIRED",
+        gate: "project:project-1:current_bet",
+      }),
+    );
+  });
+
+  it("rejects a Re-bet pause that mutates retained Bet data beyond invalidation", () => {
+    const { previous, candidate } = buildRebetPausedWorkspaces();
+    candidate.bets[0].briefHash = "mutated-brief-hash";
+
+    expect(
+      violationsWithCode(candidate, "BET_REQUIRED", previous),
+    ).toContainEqual(
+      expect.objectContaining({
+        code: "BET_REQUIRED",
+        gate: "project:project-1:current_bet",
+      }),
+    );
+  });
+
+  it("accepts the atomic pause when only Bet invalidation fields and the hold change", () => {
+    const { previous, candidate } = buildRebetPausedWorkspaces();
+
+    expect(
+      validateWorkspaceInvariants(candidate, NOW, previous).filter(({ code }) =>
+        ["BET_REQUIRED", "BET_EXPIRED", "SCOPE_OUTSIDE_BET"].includes(code),
+      ),
+    ).toEqual([]);
+  });
+
   it("requires a current Bet for a new Actual during a Re-bet pause", () => {
     const { previous, candidate } = buildRebetPausedWorkspaces();
     candidate.actuals.push({
