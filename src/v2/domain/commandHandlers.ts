@@ -41,12 +41,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function isNonblankString(value: unknown): value is string {
-  return typeof value === "string" && value.trim().length > 0;
+function isString(value: unknown): value is string {
+  return typeof value === "string";
 }
 
-function isFiniteNonnegativeNumber(value: unknown): value is number {
-  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
 }
 
 function isWeekday(value: unknown): value is number {
@@ -54,15 +54,15 @@ function isWeekday(value: unknown): value is number {
 }
 
 function isMinute(value: unknown): value is number {
-  return Number.isInteger(value) && Number(value) >= 0 && Number(value) <= 1_440;
+  return isFiniteNumber(value);
 }
 
 function isCapacityProfile(value: unknown): value is CapacityProfile {
   if (
     !isRecord(value) ||
-    !isNonblankString(value.timeZone) ||
-    !isNonblankString(value.updatedAt) ||
-    !isNonblankString(value.updatedBy) ||
+    !isString(value.timeZone) ||
+    !isString(value.updatedAt) ||
+    !isString(value.updatedBy) ||
     !Array.isArray(value.weeklyWindows) ||
     !Array.isArray(value.dailyBudgets) ||
     !Array.isArray(value.unavailableBlocks)
@@ -81,16 +81,16 @@ function isCapacityProfile(value: unknown): value is CapacityProfile {
     (budget) =>
       isRecord(budget) &&
       isWeekday(budget.weekday) &&
-      isFiniteNonnegativeNumber(budget.deepSeconds) &&
-      isFiniteNonnegativeNumber(budget.mediumSeconds) &&
-      isFiniteNonnegativeNumber(budget.shallowSeconds),
+      isFiniteNumber(budget.deepSeconds) &&
+      isFiniteNumber(budget.mediumSeconds) &&
+      isFiniteNumber(budget.shallowSeconds),
   );
   const blocksAreValid = value.unavailableBlocks.every(
     (block) =>
       isRecord(block) &&
-      isNonblankString(block.id) &&
-      isNonblankString(block.start) &&
-      isNonblankString(block.finish),
+      isString(block.id) &&
+      isString(block.start) &&
+      isString(block.finish),
   );
 
   return windowsAreValid && budgetsAreValid && blocksAreValid;
@@ -129,10 +129,10 @@ export async function applyCommandHandler(
 
     case "capture_inbox": {
       if (
-        !isNonblankString(command.id) ||
-        !isNonblankString(command.text) ||
+        !isString(command.id) ||
+        !isString(command.text) ||
         (command.desiredDate !== undefined &&
-          !isNonblankString(command.desiredDate))
+          !isString(command.desiredDate))
       ) {
         return invalidPayload(workspace, context, command.type);
       }

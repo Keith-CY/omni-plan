@@ -513,6 +513,38 @@ describe("executeCommand applied receipts", () => {
     await expectCanonicalReceiptHashes(result.receipt, command);
   });
 
+  it("defers semantic capacity rules while accepting a structurally typed profile", async () => {
+    const deferredProfile: CapacityProfile = {
+      timeZone: "",
+      weeklyWindows: [
+        { weekday: 6, startMinute: -60, finishMinute: 2_000 },
+      ],
+      dailyBudgets: [
+        {
+          weekday: 6,
+          deepSeconds: -1,
+          mediumSeconds: 0,
+          shallowSeconds: 0,
+        },
+      ],
+      unavailableBlocks: [{ id: "", start: "", finish: "" }],
+      updatedAt: "",
+      updatedBy: "",
+    };
+    const workspace = buildWorkspaceV2("workspace-1");
+
+    const result = await executeCommand(
+      workspace,
+      { type: "configure_capacity", profile: deferredProfile },
+      buildContext(),
+    );
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("Expected typed profile to apply");
+    expect(result.workspace.capacityProfile).toEqual(deferredProfile);
+    expect(result.workspace.revision).toBe(1);
+  });
+
   it("captures only an InboxItem and emits the exact creation diff", async () => {
     const workspace = buildWorkspaceV2("workspace-1");
     const command = {
@@ -605,6 +637,19 @@ describe("executeCommand applied receipts", () => {
       name: "non-string Inbox text",
       command: { type: "capture_inbox", id: "inbox-invalid", text: null },
       gate: "command_payload:capture_inbox",
+    },
+    {
+      name: "non-finite capacity number",
+      command: {
+        type: "configure_capacity",
+        profile: {
+          ...PROFILE,
+          dailyBudgets: [
+            { ...PROFILE.dailyBudgets[0], deepSeconds: Number.NaN },
+          ],
+        },
+      },
+      gate: "command_payload:configure_capacity",
     },
   ])("rejects a malformed runtime payload: $name", async ({ command, gate }) => {
     const workspace = buildWorkspaceV2("workspace-1");
@@ -910,7 +955,10 @@ describe("executeCommand rejection precedence and atomicity", () => {
     const result = rejected(
       await executeCommand(
         workspace,
-        { type: "configure_capacity", profile: PROFILE },
+        {
+          type: "configure_capacity",
+          profile: null,
+        } as unknown as V2Command,
         buildContext({ expectedRevision: 3 }),
       ),
     );
