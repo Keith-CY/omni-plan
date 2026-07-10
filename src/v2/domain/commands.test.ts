@@ -447,6 +447,39 @@ describe("V2Command public contract", () => {
       EXPECTED_COMMAND_TYPES,
     );
   });
+
+  it.each(ALL_COMMANDS)(
+    "accepts the typed sample structure for $type",
+    async (command) => {
+      const isSystemCommand = [
+        "record_bet_boundary",
+        "mark_review_overdue",
+        "create_review",
+      ].includes(command.type);
+      const context = isSystemCommand
+        ? buildContext({
+            actorId: "system-1",
+            actorKind: "system",
+            origin: "agent",
+            source: {
+              sourceId: "clock-1",
+              verified: true,
+              capabilities: ["system_time"],
+            },
+          })
+        : buildContext();
+
+      const result = await executeCommand(
+        buildWorkspaceV2("workspace-1"),
+        structuredClone(command),
+        context,
+      );
+
+      if (!result.ok) {
+        expect(result.rejection.code).not.toBe("INVALID_COMMAND");
+      }
+    },
+  );
 });
 
 describe("executeCommand applied receipts", () => {
@@ -700,6 +733,138 @@ describe("executeCommand applied receipts", () => {
       rejectionCode: "INVALID_COMMAND",
       revision: 0,
       diff: [],
+    });
+  });
+
+  it.each([
+    { name: "null command", command: null },
+    { name: "missing command type", command: {} },
+    { name: "object-valued command type", command: { type: { x: 1 } } },
+  ])(
+    "normalizes the receipt type for an invalid runtime envelope: $name",
+    async ({ command }) => {
+      const workspace = buildWorkspaceV2("workspace-1");
+
+      const result = rejected(
+        await executeCommand(
+          workspace,
+          command as unknown as V2Command,
+          buildContext(),
+        ),
+      );
+
+      expect(result.workspace).toBe(workspace);
+      expect(result.rejection).toMatchObject({
+        code: "INVALID_COMMAND",
+        gate: "command_type:invalid_command",
+      });
+      expect(result.receipt).toMatchObject({
+        commandType: "invalid_command",
+        status: "rejected",
+        rejectionCode: "INVALID_COMMAND",
+        revision: 0,
+        diff: [],
+      });
+      expect(typeof result.receipt.commandType).toBe("string");
+    },
+  );
+
+  it.each([
+    { type: "record_actual", actual: null },
+    { type: "close_project", projectId: "project-1", decision: null },
+    { type: "propose_replan", proposal: null },
+  ])(
+    "rejects malformed nested payloads for known command $type without throwing",
+    async (command) => {
+      const workspace = buildWorkspaceV2("workspace-1");
+
+      const result = rejected(
+        await executeCommand(
+          workspace,
+          command as unknown as V2Command,
+          buildContext(),
+        ),
+      );
+
+      expect(result.workspace).toBe(workspace);
+      expect(result.rejection).toMatchObject({
+        code: "INVALID_COMMAND",
+        gate: `command_payload:${command.type}`,
+        permittedNextCommand: command.type,
+      });
+      expect(result.receipt).toMatchObject({
+        commandType: command.type,
+        status: "rejected",
+        rejectionCode: "INVALID_COMMAND",
+        revision: 0,
+        diff: [],
+      });
+    },
+  );
+
+  it("rejects a malformed system command after system authorization", async () => {
+    const workspace = buildWorkspaceV2("workspace-1");
+    const command = {
+      type: "create_review",
+      review: null,
+    } as unknown as V2Command;
+
+    const result = rejected(
+      await executeCommand(
+        workspace,
+        command,
+        buildContext({
+          actorId: "system-1",
+          actorKind: "system",
+          origin: "agent",
+          source: {
+            sourceId: "clock-1",
+            verified: true,
+            capabilities: ["system_time"],
+          },
+        }),
+      ),
+    );
+
+    expect(result.rejection).toMatchObject({
+      code: "INVALID_COMMAND",
+      gate: "command_payload:create_review",
+      permittedNextCommand: "create_review",
+    });
+    expect(result.receipt).toMatchObject({
+      commandType: "create_review",
+      rejectionCode: "INVALID_COMMAND",
+    });
+  });
+
+  it("checks source authority before rejecting a malformed known payload", async () => {
+    const workspace = buildWorkspaceV2("workspace-1");
+    const command = {
+      type: "record_actual",
+      actual: null,
+    } as unknown as V2Command;
+
+    const result = rejected(
+      await executeCommand(
+        workspace,
+        command,
+        buildContext({
+          source: {
+            sourceId: "unverified",
+            verified: false,
+            capabilities: [],
+          },
+        }),
+      ),
+    );
+
+    expect(result.rejection).toMatchObject({
+      code: "SOURCE_NOT_AUTHORIZED",
+      gate: "verified_source",
+    });
+    expect(result.receipt).toMatchObject({
+      commandType: "record_actual",
+      rejectionCode: "SOURCE_NOT_AUTHORIZED",
     });
   });
 

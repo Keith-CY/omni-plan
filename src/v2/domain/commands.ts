@@ -12,6 +12,7 @@ import {
 } from "./invariants";
 import {
   authorizeCommand,
+  authorizeCommandIdentity,
   type AuthorizationContext,
 } from "./policy";
 import { stableHash } from "./stableHash";
@@ -214,6 +215,282 @@ function isKnownCommandType(value: unknown): value is V2Command["type"] {
     typeof value === "string" &&
     knownCommandTypes.has(value)
   );
+}
+
+function isRecordValue(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function isStringValue(value: unknown): value is string {
+  return typeof value === "string";
+}
+
+function isFiniteNumberValue(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function isOptionalStringValue(value: unknown): boolean {
+  return value === undefined || isStringValue(value);
+}
+
+function isStringArrayValue(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every(isStringValue);
+}
+
+function isWeekdayValue(value: unknown): boolean {
+  return Number.isInteger(value) && Number(value) >= 0 && Number(value) <= 6;
+}
+
+function isCapacityProfileValue(value: unknown): value is CapacityProfile {
+  if (
+    !isRecordValue(value) ||
+    !isStringValue(value.timeZone) ||
+    !isStringValue(value.updatedAt) ||
+    !isStringValue(value.updatedBy) ||
+    !Array.isArray(value.weeklyWindows) ||
+    !Array.isArray(value.dailyBudgets) ||
+    !Array.isArray(value.unavailableBlocks)
+  ) {
+    return false;
+  }
+
+  return (
+    value.weeklyWindows.every(
+      (window) =>
+        isRecordValue(window) &&
+        isWeekdayValue(window.weekday) &&
+        isFiniteNumberValue(window.startMinute) &&
+        isFiniteNumberValue(window.finishMinute),
+    ) &&
+    value.dailyBudgets.every(
+      (budget) =>
+        isRecordValue(budget) &&
+        isWeekdayValue(budget.weekday) &&
+        isFiniteNumberValue(budget.deepSeconds) &&
+        isFiniteNumberValue(budget.mediumSeconds) &&
+        isFiniteNumberValue(budget.shallowSeconds),
+    ) &&
+    value.unavailableBlocks.every(
+      (block) =>
+        isRecordValue(block) &&
+        isStringValue(block.id) &&
+        isStringValue(block.start) &&
+        isStringValue(block.finish),
+    )
+  );
+}
+
+function isTargetValue(
+  value: unknown,
+  projectIdRequired: boolean,
+): boolean {
+  if (!isRecordValue(value)) return false;
+  if (value.kind === "action") {
+    return isStringValue(value.actionId);
+  }
+  if (value.kind === "work_item") {
+    return (
+      isStringValue(value.workItemId) &&
+      (projectIdRequired
+        ? isStringValue(value.projectId)
+        : isOptionalStringValue(value.projectId))
+    );
+  }
+  return false;
+}
+
+function isCommitmentSlotValue(value: unknown): boolean {
+  return (
+    isRecordValue(value) &&
+    isStringValue(value.id) &&
+    isTargetValue(value.target, true)
+  );
+}
+
+function areCommitmentSlotsValue(value: unknown): boolean {
+  return Array.isArray(value) && value.every(isCommitmentSlotValue);
+}
+
+function isProjectDraftValue(value: unknown): boolean {
+  return isRecordValue(value) && isStringValue(value.id);
+}
+
+function isDecisionValue(
+  value: unknown,
+): value is Record<string, unknown> & {
+  id: string;
+  projectId: string;
+  followUpProjectId?: string;
+} {
+  return (
+    isRecordValue(value) &&
+    isStringValue(value.id) &&
+    isStringValue(value.projectId) &&
+    isOptionalStringValue(value.followUpProjectId)
+  );
+}
+
+function isStructurallyValidCommand(value: unknown): value is V2Command {
+  if (!isRecordValue(value) || !isKnownCommandType(value.type)) {
+    return false;
+  }
+
+  switch (value.type) {
+    case "configure_capacity":
+      return isCapacityProfileValue(value.profile);
+    case "capture_inbox":
+      return (
+        isStringValue(value.id) &&
+        isStringValue(value.text) &&
+        isOptionalStringValue(value.desiredDate)
+      );
+    case "confirm_action_triage":
+      return (
+        isStringValue(value.inboxItemId) &&
+        isRecordValue(value.action) &&
+        isStringValue(value.action.id)
+      );
+    case "confirm_project_triage":
+      return (
+        isStringValue(value.inboxItemId) &&
+        isProjectDraftValue(value.project)
+      );
+    case "update_project_metadata":
+      return isStringValue(value.projectId);
+    case "update_action":
+      return isStringValue(value.actionId) && isRecordValue(value.patch);
+    case "complete_action":
+      return (
+        isStringValue(value.actionId) &&
+        isFiniteNumberValue(value.actualSeconds) &&
+        isStringValue(value.outcomeNote)
+      );
+    case "promote_action_to_project":
+      return (
+        isStringValue(value.actionId) && isProjectDraftValue(value.project)
+      );
+    case "update_direction":
+      return (
+        isStringValue(value.projectId) &&
+        isRecordValue(value.brief) &&
+        isStringValue(value.brief.id) &&
+        isStringValue(value.brief.projectId)
+      );
+    case "place_bet":
+      return (
+        isStringValue(value.projectId) &&
+        isStringValue(value.betId) &&
+        isStringValue(value.start)
+      );
+    case "create_work_item":
+      return (
+        isStringValue(value.projectId) &&
+        isRecordValue(value.workItem) &&
+        isStringValue(value.workItem.id) &&
+        isStringValue(value.workItem.projectId) &&
+        isStringValue(value.workItem.betScopeId)
+      );
+    case "update_work_item":
+      return (
+        isStringValue(value.projectId) &&
+        isStringValue(value.workItemId) &&
+        isRecordValue(value.patch) &&
+        isOptionalStringValue(value.patch.betScopeId)
+      );
+    case "propose_replan":
+      return (
+        isRecordValue(value.proposal) &&
+        isStringValue(value.proposal.id) &&
+        isStringValue(value.proposal.baseCommitmentId) &&
+        areCommitmentSlotsValue(value.proposal.proposedSlots)
+      );
+    case "commit_today":
+      return (
+        isRecordValue(value.commitment) &&
+        isStringValue(value.commitment.id) &&
+        isStringValue(value.commitment.localDate) &&
+        areCommitmentSlotsValue(value.commitment.slots)
+      );
+    case "accept_replan":
+      return (
+        isStringValue(value.proposalId) &&
+        isStringValue(value.commitmentId)
+      );
+    case "record_actual":
+      return (
+        isRecordValue(value.actual) &&
+        isStringValue(value.actual.id) &&
+        isTargetValue(value.actual.target, false)
+      );
+    case "attach_evidence":
+      return (
+        isRecordValue(value.evidence) &&
+        isStringValue(value.evidence.id) &&
+        isStringValue(value.evidence.projectId) &&
+        isOptionalStringValue(value.evidence.workItemId)
+      );
+    case "approve_evidence_exception":
+      return (
+        isRecordValue(value.exception) &&
+        isStringValue(value.exception.id) &&
+        isStringValue(value.exception.projectId) &&
+        isStringValue(value.exception.requirementId)
+      );
+    case "resolve_evidence_exception":
+      return (
+        isStringValue(value.exceptionId) && isStringValue(value.resolution)
+      );
+    case "request_validation":
+    case "satisfy_validation":
+      return isStringValue(value.projectId);
+    case "record_bet_boundary":
+      return (
+        isStringValue(value.projectId) &&
+        (value.boundary === "midpoint" || value.boundary === "expired") &&
+        isStringValue(value.triggerKey)
+      );
+    case "mark_review_overdue":
+      return (
+        isStringValue(value.reviewId) && isStringValue(value.triggerKey)
+      );
+    case "create_review":
+      return (
+        isRecordValue(value.review) &&
+        isStringValue(value.review.id) &&
+        isStringValue(value.review.triggerKey) &&
+        isStringArrayValue(value.review.affectedProjectIds) &&
+        isStringArrayValue(value.review.affectedRecordIds)
+      );
+    case "complete_review":
+      return (
+        isStringValue(value.reviewId) && isRecordValue(value.conclusion)
+      );
+    case "resolve_sync_conflict":
+      return (
+        isStringValue(value.reviewId) &&
+        isRecordValue(value.resolution) &&
+        isStringValue(value.resolution.conflictId) &&
+        isOptionalStringValue(value.resolution.reappliedCommandId)
+      );
+    case "close_project":
+      return isStringValue(value.projectId) && isDecisionValue(value.decision);
+    case "abandon_project":
+      return (
+        isStringValue(value.projectId) &&
+        isDecisionValue(value.decision) &&
+        value.decision.outcome === "abandoned"
+      );
+    case "archive_project":
+      return (
+        isStringValue(value.projectId) && typeof value.archived === "boolean"
+      );
+  }
+}
+
+function normalizedCommandType(value: unknown): string {
+  return isRecordValue(value) && isStringValue(value.type)
+    ? value.type
+    : "invalid_command";
 }
 
 export interface CommandContext {
@@ -1046,7 +1323,8 @@ type ReceiptBase = Omit<CommandReceipt, "receiptHash">;
 
 async function buildReceipt(
   baseRevision: number,
-  command: V2Command,
+  commandPayload: unknown,
+  commandType: string,
   context: CommandContext,
   status: CommandReceipt["status"],
   revision: number,
@@ -1054,14 +1332,13 @@ async function buildReceipt(
   rejectionCode?: RejectionCode,
 ): Promise<CommandReceipt> {
   const commandId = context.commandId;
-  const commandType = command.type;
   const actorId = context.actorId;
   const actorKind = context.actorKind;
   const origin = context.origin;
   const createdAt = context.now;
   const sourceSnapshot = structuredClone(context.source);
   const diffSnapshot = structuredClone(diff);
-  const payloadHash = await stableHash(command as unknown as JsonValue);
+  const payloadHash = await stableHash(toJsonValue(commandPayload));
   const base: ReceiptBase = {
     id: commandId,
     commandId,
@@ -1108,7 +1385,8 @@ function rejectionFromInvariant(
 
 async function rejectedResult(
   workspace: WorkspaceV2,
-  command: V2Command,
+  commandPayload: unknown,
+  commandType: string,
   context: CommandContext,
   rejection: CommandRejection,
   baseRevision: number,
@@ -1118,7 +1396,8 @@ async function rejectedResult(
     workspace,
     receipt: await buildReceipt(
       baseRevision,
-      command,
+      commandPayload,
+      commandType,
       context,
       "rejected",
       baseRevision,
@@ -1134,7 +1413,8 @@ export async function executeCommand(
   command: V2Command,
   context: CommandContext,
 ): Promise<CommandResult> {
-  const commandSnapshot = structuredClone(command);
+  const commandSnapshot: unknown = structuredClone(command);
+  const commandType = normalizedCommandType(commandSnapshot);
   const contextSnapshot = structuredClone(context);
   const baseRevision = workspace.revision;
   const rejectionContext = {
@@ -1147,6 +1427,7 @@ export async function executeCommand(
     return rejectedResult(
       workspace,
       commandSnapshot,
+      commandType,
       contextSnapshot,
       createCommandRejection("REVISION_CONFLICT", rejectionContext),
       baseRevision,
@@ -1161,29 +1442,63 @@ export async function executeCommand(
     return rejectedResult(
       workspace,
       commandSnapshot,
+      commandType,
       contextSnapshot,
       createCommandRejection("DUPLICATE_COMMAND", rejectionContext),
       baseRevision,
     );
   }
 
-  const runtimeCommandType = (commandSnapshot as { type?: unknown }).type;
-  if (!isKnownCommandType(runtimeCommandType)) {
+  if (!isKnownCommandType(commandType)) {
     return rejectedResult(
       workspace,
       commandSnapshot,
+      commandType,
       contextSnapshot,
       createCommandRejection("INVALID_COMMAND", rejectionContext, {
         reason: "The command type is not recognized.",
-        gate: `command_type:${String(runtimeCommandType)}`,
+        gate: `command_type:${commandType}`,
         permittedNextCommand: "use_supported_command",
       }),
       baseRevision,
     );
   }
 
+  const identityRejection = authorizeCommandIdentity(commandType, {
+    actorKind: contextSnapshot.actorKind,
+    origin: contextSnapshot.origin,
+    source: contextSnapshot.source,
+    workspaceRevision: baseRevision,
+    projectHolds: [],
+  });
+  if (identityRejection !== undefined) {
+    return rejectedResult(
+      workspace,
+      commandSnapshot,
+      commandType,
+      contextSnapshot,
+      identityRejection,
+      baseRevision,
+    );
+  }
+
+  if (!isStructurallyValidCommand(commandSnapshot)) {
+    return rejectedResult(
+      workspace,
+      commandSnapshot,
+      commandType,
+      contextSnapshot,
+      createCommandRejection("INVALID_COMMAND", rejectionContext, {
+        reason: `The ${commandType} payload is invalid.`,
+        gate: `command_payload:${commandType}`,
+        permittedNextCommand: commandType,
+      }),
+      baseRevision,
+    );
+  }
+
   const authorizationRejection = authorizeCommand(
-    runtimeCommandType,
+    commandType,
     buildAuthorizationContext(
       workspace,
       commandSnapshot,
@@ -1194,6 +1509,7 @@ export async function executeCommand(
     return rejectedResult(
       workspace,
       commandSnapshot,
+      commandType,
       contextSnapshot,
       authorizationRejection,
       baseRevision,
@@ -1210,6 +1526,7 @@ export async function executeCommand(
     return rejectedResult(
       workspace,
       commandSnapshot,
+      commandType,
       contextSnapshot,
       handlerResult.rejection,
       baseRevision,
@@ -1226,6 +1543,7 @@ export async function executeCommand(
     return rejectedResult(
       workspace,
       commandSnapshot,
+      commandType,
       contextSnapshot,
       rejectionFromInvariant(
         invariantViolation,
@@ -1241,6 +1559,7 @@ export async function executeCommand(
   const receipt = await buildReceipt(
     baseRevision,
     commandSnapshot,
+    commandType,
     contextSnapshot,
     "applied",
     nextRevision,

@@ -1,6 +1,6 @@
 import { createCommandRejection, type CommandRejection } from "./errors";
 import type { CommandContext, V2Command } from "./commands";
-import type { CapacityProfile, WorkspaceV2 } from "./types";
+import type { WorkspaceV2 } from "./types";
 
 export type CommandHandlerResult =
   | { ok: true; workspace: WorkspaceV2 }
@@ -37,77 +37,6 @@ function notImplemented(
   return rejection(workspace, context, "COMMAND_NOT_IMPLEMENTED");
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
-function isString(value: unknown): value is string {
-  return typeof value === "string";
-}
-
-function isFiniteNumber(value: unknown): value is number {
-  return typeof value === "number" && Number.isFinite(value);
-}
-
-function isWeekday(value: unknown): value is number {
-  return Number.isInteger(value) && Number(value) >= 0 && Number(value) <= 6;
-}
-
-function isMinute(value: unknown): value is number {
-  return isFiniteNumber(value);
-}
-
-function isCapacityProfile(value: unknown): value is CapacityProfile {
-  if (
-    !isRecord(value) ||
-    !isString(value.timeZone) ||
-    !isString(value.updatedAt) ||
-    !isString(value.updatedBy) ||
-    !Array.isArray(value.weeklyWindows) ||
-    !Array.isArray(value.dailyBudgets) ||
-    !Array.isArray(value.unavailableBlocks)
-  ) {
-    return false;
-  }
-
-  const windowsAreValid = value.weeklyWindows.every(
-    (window) =>
-      isRecord(window) &&
-      isWeekday(window.weekday) &&
-      isMinute(window.startMinute) &&
-      isMinute(window.finishMinute),
-  );
-  const budgetsAreValid = value.dailyBudgets.every(
-    (budget) =>
-      isRecord(budget) &&
-      isWeekday(budget.weekday) &&
-      isFiniteNumber(budget.deepSeconds) &&
-      isFiniteNumber(budget.mediumSeconds) &&
-      isFiniteNumber(budget.shallowSeconds),
-  );
-  const blocksAreValid = value.unavailableBlocks.every(
-    (block) =>
-      isRecord(block) &&
-      isString(block.id) &&
-      isString(block.start) &&
-      isString(block.finish),
-  );
-
-  return windowsAreValid && budgetsAreValid && blocksAreValid;
-}
-
-function invalidPayload(
-  workspace: WorkspaceV2,
-  context: CommandContext,
-  commandType: "configure_capacity" | "capture_inbox",
-): CommandHandlerResult {
-  return rejection(workspace, context, "INVALID_COMMAND", {
-    reason: `The ${commandType} payload is invalid.`,
-    gate: `command_payload:${commandType}`,
-    permittedNextCommand: commandType,
-  });
-}
-
 export async function applyCommandHandler(
   workspace: WorkspaceV2,
   command: V2Command,
@@ -115,9 +44,6 @@ export async function applyCommandHandler(
 ): Promise<CommandHandlerResult> {
   switch (command.type) {
     case "configure_capacity": {
-      if (!isCapacityProfile(command.profile)) {
-        return invalidPayload(workspace, context, command.type);
-      }
       return {
         ok: true,
         workspace: {
@@ -128,14 +54,6 @@ export async function applyCommandHandler(
     }
 
     case "capture_inbox": {
-      if (
-        !isString(command.id) ||
-        !isString(command.text) ||
-        (command.desiredDate !== undefined &&
-          !isString(command.desiredDate))
-      ) {
-        return invalidPayload(workspace, context, command.type);
-      }
       if (workspace.inboxItems.some(({ id }) => id === command.id)) {
         return rejection(workspace, context, "ENTITY_ALREADY_EXISTS", {
           reason: `InboxItem ${command.id} already exists.`,

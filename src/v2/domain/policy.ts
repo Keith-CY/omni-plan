@@ -476,7 +476,7 @@ export function findBlockingHold(
     );
 }
 
-export function authorizeCommand(
+export function authorizeCommandIdentity(
   commandType: string,
   context: AuthorizationContext,
 ): CommandRejection | undefined {
@@ -485,9 +485,16 @@ export function authorizeCommand(
     return sourceRejection;
   }
 
-  const actorRejection = authorizeActor(commandType, context);
-  if (actorRejection !== undefined) {
-    return actorRejection;
+  return authorizeActor(commandType, context);
+}
+
+export function authorizeCommand(
+  commandType: string,
+  context: AuthorizationContext,
+): CommandRejection | undefined {
+  const identityRejection = authorizeCommandIdentity(commandType, context);
+  if (identityRejection !== undefined) {
+    return identityRejection;
   }
 
   if (context.projectHolds === undefined) {
