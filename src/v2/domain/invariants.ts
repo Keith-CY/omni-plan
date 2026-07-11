@@ -1774,6 +1774,24 @@ function validateReferenceRules(
         baseline.projectId,
       );
     }
+    if (baseline.approvedByDecisionId !== undefined) {
+      const approval = legacyAuditRecordsById.get(
+        baseline.approvedByDecisionId,
+      );
+      if (
+        approval === undefined ||
+        approval.projectId !== baseline.projectId ||
+        (approval.recordType !== "decision" &&
+          approval.recordType !== "audit_decision")
+      ) {
+        add(
+          "ENTITY_NOT_FOUND",
+          `Baseline ${baseline.id} approval must reference a same-project legacy Decision or Audit Decision ${baseline.approvedByDecisionId}.`,
+          `reference:Baseline:${baseline.id}:approvedByDecisionId:${baseline.approvedByDecisionId}`,
+          "repair_workspace_reference",
+        );
+      }
+    }
   }
 
   for (const decision of sortedById(workspace.closeDecisions)) {

@@ -16,7 +16,9 @@ import {
 } from "./commands";
 import { resolvePlanningContext } from "./planning";
 import type {
+  Action,
   BetScope,
+  LegacyAuditRecord,
   ProjectDependency,
   ProjectWorkItem,
   WorkspaceV2,
@@ -629,6 +631,250 @@ describe("Baseline capture and structural command validation", () => {
     expect(result.workspace.baselines[0].plannedStartByItem).not.toBe(
       baseline.plannedStartByItem,
     );
+  });
+
+  it.each([
+    {
+      name: "noncanonical capture timestamp",
+      baseline: { ...BASELINE, capturedAt: "2026-07-11" },
+    },
+    {
+      name: "invalid planned start",
+      baseline: {
+        ...BASELINE,
+        plannedStartByItem: { [WORK_ITEM.id]: "not-a-date" },
+      },
+    },
+    {
+      name: "noncanonical planned finish",
+      baseline: {
+        ...BASELINE,
+        plannedFinishByItem: {
+          [WORK_ITEM.id]: "2026-07-11T17:00:00Z",
+        },
+      },
+    },
+    {
+      name: "mismatched Work Item key sets",
+      baseline: { ...BASELINE, plannedFinishByItem: {} },
+    },
+    {
+      name: "finish before start",
+      baseline: {
+        ...BASELINE,
+        plannedStartByItem: { [WORK_ITEM.id]: BET_END },
+        plannedFinishByItem: { [WORK_ITEM.id]: NOW },
+      },
+    },
+    {
+      name: "negative planned work",
+      baseline: {
+        ...BASELINE,
+        plannedWorkSecondsByItem: { [WORK_ITEM.id]: -1 },
+      },
+    },
+  ])("rejects a Baseline with $name", async ({ baseline }) => {
+    const workspace = activeWorkspace({ workItems: [WORK_ITEM] });
+
+    const result = rejected(
+      await executeCommand(
+        workspace,
+        { type: "capture_baseline", baseline },
+        context(workspace, `invalid-baseline-${baseline.id}`),
+      ),
+    );
+
+    expect(result.rejection.code).toBe("INVALID_COMMAND");
+    expect(result.workspace).toBe(workspace);
+  });
+
+  it("structurally rejects nonfinite planned work", async () => {
+    const workspace = activeWorkspace({ workItems: [WORK_ITEM] });
+
+    const result = rejected(
+      await executeCommand(
+        workspace,
+        {
+          type: "capture_baseline",
+          baseline: {
+            ...BASELINE,
+            plannedWorkSecondsByItem: { [WORK_ITEM.id]: Number.POSITIVE_INFINITY },
+          },
+        },
+        context(workspace, "nonfinite-baseline"),
+      ),
+    );
+
+    expect(result.rejection).toMatchObject({
+      code: "INVALID_COMMAND",
+      gate: "command_payload:capture_baseline",
+    });
+  });
+
+  function legacyDecision(
+    overrides: Partial<LegacyAuditRecord> = {},
+  ): LegacyAuditRecord {
+    return {
+      id: "legacy-decision-1",
+      projectId: "project-1",
+      recordType: "decision",
+      sourcePayload: {},
+      sourceChecksum: "decision-checksum",
+      ...overrides,
+    };
+  }
+
+  it.each(["decision", "audit_decision"] as const)(
+    "accepts same-project legacy %s Baseline approval provenance",
+    async (recordType) => {
+      const decision = legacyDecision({ recordType });
+      const workspace = activeWorkspace({
+        workItems: [WORK_ITEM],
+        legacyAuditRecords: [decision],
+      });
+
+      const result = await executeCommand(
+        workspace,
+        {
+          type: "capture_baseline",
+          baseline: { ...BASELINE, approvedByDecisionId: decision.id },
+        },
+        context(workspace, `baseline-${recordType}`),
+      );
+
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.workspace.baselines[0].approvedByDecisionId).toBe(
+          decision.id,
+        );
+      }
+    },
+  );
+
+  it.each([
+    {
+      name: "nonexistent decision",
+      records: [] as LegacyAuditRecord[],
+      approvedByDecisionId: "legacy-missing",
+    },
+    {
+      name: "wrong legacy record type",
+      records: [legacyDecision({ recordType: "audit_gate" })],
+      approvedByDecisionId: "legacy-decision-1",
+    },
+  ])("rejects $name as Baseline approval provenance", async ({ records, approvedByDecisionId }) => {
+    const workspace = activeWorkspace({
+      workItems: [WORK_ITEM],
+      legacyAuditRecords: records,
+    });
+
+    const result = rejected(
+      await executeCommand(
+        workspace,
+        {
+          type: "capture_baseline",
+          baseline: { ...BASELINE, approvedByDecisionId },
+        },
+        context(workspace, `baseline-${approvedByDecisionId}`),
+      ),
+    );
+
+    expect(result.rejection.code).toBe("ENTITY_NOT_FOUND");
+    expect(result.rejection.gate).toBe(
+      `baseline:${BASELINE.id}:approved_by_decision`,
+    );
+  });
+
+  it("rejects cross-project legacy Baseline approval provenance", async () => {
+    const otherBrief = buildDirectionBrief({
+      id: "brief-2",
+      projectId: "project-2",
+      createdAt: NOW,
+      updatedAt: NOW,
+    });
+    const decision = legacyDecision({ projectId: "project-2" });
+    const workspace = activeWorkspace({
+      workItems: [WORK_ITEM],
+      projects: [
+        ...activeWorkspace().projects,
+        buildProjectV2({
+          id: "project-2",
+          activeDirectionBriefId: otherBrief.id,
+          createdAt: NOW,
+          updatedAt: NOW,
+        }),
+      ],
+      directionBriefs: [...activeWorkspace().directionBriefs, otherBrief],
+      legacyAuditRecords: [decision],
+    });
+
+    const result = rejected(
+      await executeCommand(
+        workspace,
+        {
+          type: "capture_baseline",
+          baseline: { ...BASELINE, approvedByDecisionId: decision.id },
+        },
+        context(workspace, "baseline-cross-project-decision"),
+      ),
+    );
+
+    expect(result.rejection).toMatchObject({
+      code: "ENTITY_NOT_FOUND",
+      gate: `baseline:${BASELINE.id}:approved_by_decision`,
+    });
+  });
+
+  it("rejects an Action ID as Baseline approval provenance", async () => {
+    const action: Action = {
+      id: "action-approval",
+      inboxItemId: "inbox-action-approval",
+      title: "Not an approval decision",
+      revision: 1,
+      status: "open",
+      eligibility: {
+        singleSession: true,
+        estimateSeconds: 60,
+        dependencyIds: [],
+        requiresMilestoneEvidence: false,
+        outcomeCount: 1,
+        solutionKnown: true,
+      },
+      attention: "shallow",
+      createdAt: NOW,
+      updatedAt: NOW,
+    };
+    const workspace = activeWorkspace({
+      workItems: [WORK_ITEM],
+      inboxItems: [
+        {
+          id: action.inboxItemId,
+          originalText: action.title,
+          sourceId: "source-1",
+          actorId: "human-1",
+          capturedAt: NOW,
+          triageStatus: "action",
+          actionId: action.id,
+        },
+      ],
+      actions: [action],
+    });
+
+    const result = rejected(
+      await executeCommand(
+        workspace,
+        {
+          type: "capture_baseline",
+          baseline: { ...BASELINE, approvedByDecisionId: action.id },
+        },
+        context(workspace, "baseline-action-approval"),
+      ),
+    );
+
+    expect(result.rejection).toMatchObject({
+      code: "ACTION_PROMOTION_REQUIRED",
+      permittedNextCommand: "promote_action_to_project",
+    });
   });
 
   it.each([

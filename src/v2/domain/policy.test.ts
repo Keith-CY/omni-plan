@@ -286,6 +286,9 @@ describe("authorizeCommand authority matrix", () => {
     "propose_replan",
     "upsert_dependency",
     "remove_dependency",
+    "remove_work_item",
+    "capture_baseline",
+    "complete_work_item",
   ] as const;
   const systemOnly = [
     "record_bet_boundary",
@@ -570,6 +573,9 @@ describe("findBlockingHold", () => {
     "request_validation",
     "satisfy_validation",
     "archive_project",
+    "remove_work_item",
+    "capture_baseline",
+    "complete_work_item",
   ])(
     "blocks project mutation %s during migration review",
     (commandType) => {
@@ -610,13 +616,16 @@ describe("findBlockingHold", () => {
     "accept_replan",
     "record_actual",
     "attach_evidence",
+    "remove_work_item",
+    "capture_baseline",
+    "complete_work_item",
   ])("blocks plan or execution write %s while re-betting", (commandType) => {
     expect(
       findBlockingHold(commandType, [buildHold("rebet_required")])?.type,
     ).toBe("rebet_required");
   });
 
-  it.each(["record_actual", "attach_evidence"])(
+  it.each(["record_actual", "attach_evidence", "complete_work_item"])(
     "allows existing committed work to %s while review is overdue",
     (commandType) => {
       expect(
@@ -630,7 +639,7 @@ describe("findBlockingHold", () => {
     },
   );
 
-  it.each(["record_actual", "attach_evidence"])(
+  it.each(["record_actual", "attach_evidence", "complete_work_item"])(
     "blocks %s while review is overdue unless the target was committed",
     (commandType) => {
       expect(
@@ -653,6 +662,8 @@ describe("findBlockingHold", () => {
     "update_work_item",
     "upsert_dependency",
     "remove_dependency",
+    "remove_work_item",
+    "capture_baseline",
     "commit_today",
     "accept_replan",
   ])("blocks new or expanded work %s while review is overdue", (commandType) => {

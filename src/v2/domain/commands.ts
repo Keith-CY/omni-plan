@@ -240,6 +240,10 @@ function isRecordValue(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
+function hasOwnField(value: Record<string, unknown>, field: string): boolean {
+  return Object.prototype.hasOwnProperty.call(value, field);
+}
+
 function isStringValue(value: unknown): value is string {
   return typeof value === "string";
 }
@@ -512,17 +516,19 @@ function isWorkItemPatchValue(value: unknown): boolean {
   if (!isRecordValue(value)) return false;
   return (
     isOptionalStringValue(value.parentId) &&
-    (value.kind === undefined ||
+    (!hasOwnField(value, "kind") ||
       isOneOf(value.kind, ["phase", "task", "milestone", "hammock"])) &&
-    isOptionalStringValue(value.title) &&
-    isOptionalStringValue(value.outline) &&
-    isOptionalFiniteNumberValue(value.durationSeconds) &&
-    (value.estimate === undefined || isEstimateValue(value.estimate)) &&
+    (!hasOwnField(value, "title") || isStringValue(value.title)) &&
+    (!hasOwnField(value, "outline") || isStringValue(value.outline)) &&
+    (!hasOwnField(value, "durationSeconds") ||
+      isFiniteNumberValue(value.durationSeconds)) &&
+    (!hasOwnField(value, "estimate") || isEstimateValue(value.estimate)) &&
     (value.constraint === undefined || isConstraintValue(value.constraint)) &&
-    (value.assignmentIds === undefined ||
+    (!hasOwnField(value, "assignmentIds") ||
       (Array.isArray(value.assignmentIds) &&
         value.assignmentIds.every(isAssignmentValue))) &&
-    isOptionalFiniteNumberValue(value.percentComplete) &&
+    (!hasOwnField(value, "percentComplete") ||
+      isFiniteNumberValue(value.percentComplete)) &&
     isOptionalBooleanValue(value.isKeyTask) &&
     isOptionalBooleanValue(value.isScopeExpansion) &&
     isOptionalBooleanValue(value.isFastDelivery) &&
@@ -536,7 +542,7 @@ function isWorkItemPatchValue(value: unknown): boolean {
     (value.resultStatus === undefined ||
       isOneOf(value.resultStatus, ["completed", "learned", "blocked"])) &&
     isOptionalStringValue(value.outcomeNote) &&
-    isOptionalStringValue(value.betScopeId)
+    (!hasOwnField(value, "betScopeId") || isStringValue(value.betScopeId))
   );
 }
 
@@ -1016,6 +1022,41 @@ function effectiveCommitmentForLocalDate(
   );
 }
 
+function localDateAt(value: ISODate, timeZone: string): string | undefined {
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return undefined;
+  try {
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).formatToParts(date);
+    const part = (type: Intl.DateTimeFormatPartTypes) =>
+      parts.find((candidate) => candidate.type === type)?.value;
+    const year = part("year");
+    const month = part("month");
+    const day = part("day");
+    return year === undefined || month === undefined || day === undefined
+      ? undefined
+      : `${year}-${month}-${day}`;
+  } catch {
+    return undefined;
+  }
+}
+
+function soleEffectiveCommitmentForNow(
+  workspace: WorkspaceV2,
+  now: ISODate,
+): DailyCommitment | undefined {
+  const current = effectiveDailyCommitments(workspace).filter(
+    (commitment) =>
+      localDateAt(now, commitment.capacitySnapshot.timeZone) ===
+      commitment.localDate,
+  );
+  return current.length === 1 ? current[0] : undefined;
+}
+
 function affectedExistingProjectIds(
   workspace: WorkspaceV2,
   command: V2Command,
@@ -1465,6 +1506,7 @@ function affectedRecordIds(
 function targetWasCommitted(
   workspace: WorkspaceV2,
   command: V2Command,
+  now: ISODate,
 ): boolean | undefined {
   let targetId: Id | undefined;
   let targetKind: "action" | "work_item" | undefined;
@@ -1482,9 +1524,22 @@ function targetWasCommitted(
       targetId = command.evidence.workItemId;
       break;
     case "complete_work_item":
-      targetKind = "work_item";
-      targetId = command.workItemId;
-      break;
+      {
+        const workItems = workspace.workItems.filter(
+          ({ id, projectId }) =>
+            id === command.workItemId && projectId === command.projectId,
+        );
+        const commitment = soleEffectiveCommitmentForNow(workspace, now);
+        if (workItems.length !== 1 || commitment === undefined) return false;
+        const workItem = workItems[0];
+        return commitment.slots.some(
+          ({ target, targetRevision }) =>
+            target.kind === "work_item" &&
+            target.projectId === command.projectId &&
+            target.workItemId === workItem.id &&
+            targetRevision === workItem.revision,
+        );
+      }
     case "configure_capacity":
     case "capture_inbox":
     case "confirm_action_triage":
@@ -1594,7 +1649,7 @@ function buildAuthorizationContext(
     workspaceRevision: workspace.revision,
     projectHolds,
     affectedRecordIds: affectedRecordIds(workspace, command),
-    targetWasCommitted: targetWasCommitted(workspace, command),
+    targetWasCommitted: targetWasCommitted(workspace, command, context.now),
     deterministicTriggerKey: deterministicTriggerKey(command),
   };
 }

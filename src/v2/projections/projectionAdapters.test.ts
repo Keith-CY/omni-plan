@@ -4,7 +4,13 @@ import { calculateEvm } from "@/domain/evm";
 import { runMonteCarlo } from "@/domain/monteCarlo";
 import { generateRecurringOccurrences } from "@/domain/recurring";
 import { scheduleProject } from "@/domain/scheduler";
-import type { Baseline, Resource } from "@/domain/types";
+import type {
+  Baseline,
+  Dependency,
+  Project,
+  Resource,
+  WorkItem,
+} from "@/domain/types";
 
 import {
   buildBetVersion,
@@ -122,6 +128,66 @@ const SECOND_ITEM: ProjectWorkItem = {
   percentComplete: 0,
   revision: 1,
   repeatRule: undefined,
+};
+
+const V1_PROJECT: Project = {
+  id: "project-1",
+  name: "Executable project",
+  status: "active",
+  mode: "build",
+  priority: 7,
+  northStar: "The correct next step is visible within one minute.",
+  currentOutcome: "Operators cannot see the next executable step.",
+  horizon: END,
+  start: START,
+  reviewCadenceDays: 7,
+};
+
+const V1_FIRST_ITEM: WorkItem = {
+  id: "work-1",
+  projectId: "project-1",
+  kind: "task",
+  title: "Shape the plan",
+  outline: "1",
+  durationSeconds: 3_600,
+  estimate: {
+    optimisticSeconds: 1_800,
+    mostLikelySeconds: 3_600,
+    pessimisticSeconds: 7_200,
+  },
+  assignmentIds: [
+    { resourceId: "resource-1", attention: "deep", effortSeconds: 3_600 },
+  ],
+  percentComplete: 50,
+  repeatRule: {
+    cadence: "weekly",
+    count: 2,
+    startMode: "fixed-time",
+    startAt: START,
+  },
+  shapeUpScopeId: "scope-1",
+};
+
+const V1_SECOND_ITEM: WorkItem = {
+  id: "work-2",
+  projectId: "project-1",
+  kind: "task",
+  title: "Validate the plan",
+  outline: "2",
+  durationSeconds: 1_800,
+  estimate: { mostLikelySeconds: 1_800 },
+  assignmentIds: [],
+  percentComplete: 0,
+  shapeUpScopeId: "scope-1",
+};
+
+const V1_DEPENDENCY: Dependency = {
+  id: "dependency-1",
+  projectId: "project-1",
+  fromId: "work-1",
+  toId: "work-2",
+  type: "FS",
+  lagSeconds: 0,
 };
 
 const RESOURCE: Resource = {
@@ -284,21 +350,23 @@ function scheduleSummary(result: NonNullable<ReturnType<typeof scheduleV2Project
 describe("scheduler projection parity", () => {
   it("projects V2 records into the existing scheduler without changing results", () => {
     const source = workspace();
-    const project = projectToSchedulerInput(source, source.projects[0]);
-    expect(project).toBeDefined();
-    if (project === undefined) throw new Error("Expected scheduler project");
-
     const expected = scheduleProject(
-      project,
-      source.workItems.map(workItemToSchedulerInput),
-      source.dependencies.map(({ revision: _revision, ...dependency }) => dependency),
+      V1_PROJECT,
+      [V1_FIRST_ITEM, V1_SECOND_ITEM],
+      [V1_DEPENDENCY],
     );
     const actual = scheduleV2Project(source, PROJECT.id, MIDPOINT);
 
+    expect(projectToSchedulerInput(source, source.projects[0])).toEqual(
+      V1_PROJECT,
+    );
+    expect(source.workItems.map(workItemToSchedulerInput)).toEqual([
+      V1_FIRST_ITEM,
+      V1_SECOND_ITEM,
+    ]);
     expect(actual).toBeDefined();
     if (actual === undefined) throw new Error("Expected V2 schedule");
     expect(scheduleSummary(actual)).toEqual(scheduleSummary(expected));
-    expect(project.start).toBe(START);
   });
 
   it("surfaces unsupported cross-project dependency edges explicitly", () => {
@@ -331,6 +399,22 @@ describe("scheduler projection parity", () => {
 });
 
 describe("executable projection policy", () => {
+  it("fails closed when a Project has more than one uninvalidated Bet", () => {
+    const duplicateCurrentBet: BetVersion = {
+      ...structuredClone(BET),
+      id: "bet-duplicate-current",
+      version: 2,
+      supersedesId: BET.id,
+    };
+    const source = workspace({
+      bets: [structuredClone(BET), duplicateCurrentBet],
+    });
+
+    expect(projectToSchedulerInput(source, source.projects[0])).toBeUndefined();
+    expect(scheduleV2Project(source, PROJECT.id, MIDPOINT)).toBeUndefined();
+    expect(scheduleExecutablePortfolio(source, MIDPOINT)).toEqual([]);
+  });
+
   it.each([
     ["unbet", { projects: [{ ...PROJECT, activeBetId: undefined }], bets: [] }],
     ["expired", {}],
@@ -359,6 +443,168 @@ describe("executable projection policy", () => {
     expect(result.items.map(({ workItem }) => workItem.id)).toEqual([
       FIRST_ITEM.id,
     ]);
+  });
+
+  it("selects one current commitment fork deterministically", () => {
+    const template = workspace().dailyCommitments[0];
+    const retainedBranch = {
+      ...structuredClone(template),
+      id: "branch-a",
+      version: 2,
+      slots: [
+        {
+          ...structuredClone(COMMITTED_SLOT),
+          id: "slot-retained",
+          target: {
+            kind: "work_item" as const,
+            workItemId: SECOND_ITEM.id,
+            projectId: PROJECT.id,
+          },
+          targetRevision: SECOND_ITEM.revision,
+        },
+      ],
+    };
+    const discardedBranch = {
+      ...structuredClone(template),
+      id: "branch-b",
+      version: 2,
+      slots: [
+        {
+          ...structuredClone(COMMITTED_SLOT),
+          id: "slot-discarded",
+          targetRevision: FIRST_ITEM.revision,
+        },
+      ],
+    };
+    const scheduleIds = (commitments: WorkspaceV2["dailyCommitments"]) => {
+      const source = workspace({
+        projects: [{ ...PROJECT, holds: [hold("review_overdue")] }],
+        dailyCommitments: commitments,
+      });
+      return scheduleExecutablePortfolio(source, MIDPOINT)[0].items.map(
+        ({ workItem }) => workItem.id,
+      );
+    };
+
+    expect(scheduleIds([retainedBranch, discardedBranch])).toEqual([
+      SECOND_ITEM.id,
+    ]);
+    expect(scheduleIds([discardedBranch, retainedBranch])).toEqual([
+      SECOND_ITEM.id,
+    ]);
+  });
+
+  it("selects one current commitment across snapshot time zones by instant", () => {
+    const template = workspace().dailyCommitments[0];
+    const retained = {
+      ...structuredClone(template),
+      id: "commitment-retained-by-instant",
+      version: 2,
+      committedAt: "2026-07-11T10:30:00.000Z",
+      slots: [
+        {
+          ...structuredClone(COMMITTED_SLOT),
+          id: "slot-retained-by-instant",
+          target: {
+            kind: "work_item" as const,
+            workItemId: SECOND_ITEM.id,
+            projectId: PROJECT.id,
+          },
+          targetRevision: SECOND_ITEM.revision,
+        },
+      ],
+    };
+    const discarded = {
+      ...structuredClone(template),
+      id: "commitment-discarded-by-instant",
+      localDate: "2026-07-12",
+      version: 2,
+      committedAt: "2026-07-11T20:00:00.000+10:00",
+      capacitySnapshot: {
+        ...structuredClone(template.capacitySnapshot),
+        timeZone: "Pacific/Kiritimati",
+      },
+      slots: [
+        {
+          ...structuredClone(COMMITTED_SLOT),
+          id: "slot-discarded-by-instant",
+        },
+      ],
+    };
+    const source = workspace({
+      projects: [{ ...PROJECT, holds: [hold("review_overdue")] }],
+      dailyCommitments: [discarded, retained],
+    });
+
+    const [result] = scheduleExecutablePortfolio(source, MIDPOINT);
+
+    expect(result.items.map(({ workItem }) => workItem.id)).toEqual([
+      SECOND_ITEM.id,
+    ]);
+  });
+
+  it("does not resurrect a losing fork when its winner is no longer current", () => {
+    const template = workspace().dailyCommitments[0];
+    const winner = {
+      ...structuredClone(template),
+      id: "fork-winner-not-current",
+      version: 2,
+      capacitySnapshot: {
+        ...structuredClone(template.capacitySnapshot),
+        timeZone: "Pacific/Kiritimati",
+      },
+      slots: [
+        {
+          ...structuredClone(COMMITTED_SLOT),
+          id: "slot-winner-not-current",
+          target: {
+            kind: "work_item" as const,
+            workItemId: SECOND_ITEM.id,
+            projectId: PROJECT.id,
+          },
+          targetRevision: SECOND_ITEM.revision,
+        },
+      ],
+    };
+    const losingFork = {
+      ...structuredClone(template),
+      id: "fork-loser-current",
+      version: 1,
+      slots: [
+        {
+          ...structuredClone(COMMITTED_SLOT),
+          id: "slot-loser-current",
+        },
+      ],
+    };
+    const source = workspace({
+      projects: [{ ...PROJECT, holds: [hold("review_overdue")] }],
+      dailyCommitments: [losingFork, winner],
+    });
+
+    const [result] = scheduleExecutablePortfolio(source, MIDPOINT);
+
+    expect(result.items).toEqual([]);
+  });
+
+  it("excludes a Work Item whose committed revision is stale", () => {
+    const staleCommitment = {
+      ...structuredClone(workspace().dailyCommitments[0]),
+      slots: [
+        {
+          ...structuredClone(COMMITTED_SLOT),
+          targetRevision: FIRST_ITEM.revision - 1,
+        },
+      ],
+    };
+    const source = workspace({
+      projects: [{ ...PROJECT, holds: [hold("review_overdue")] }],
+      dailyCommitments: [staleCommitment],
+    });
+
+    const [result] = scheduleExecutablePortfolio(source, MIDPOINT);
+
+    expect(result.items).toEqual([]);
   });
 
   it("does not treat an earlier local day's commitment as today's committed work", () => {
@@ -529,6 +775,216 @@ describe("recurring and reporting adapters", () => {
         MIDPOINT,
       ),
     );
+  });
+
+  it.each([
+    {
+      name: "captured timestamp",
+      build: () => ({ ...structuredClone(BASELINE), capturedAt: "not-a-date" }),
+    },
+    {
+      name: "planned start timestamp",
+      build: () => ({
+        ...structuredClone(BASELINE),
+        plannedStartByItem: {
+          ...BASELINE.plannedStartByItem,
+          [FIRST_ITEM.id]: "not-a-date",
+        },
+      }),
+    },
+    {
+      name: "planned finish timestamp",
+      build: () => ({
+        ...structuredClone(BASELINE),
+        plannedFinishByItem: {
+          ...BASELINE.plannedFinishByItem,
+          [FIRST_ITEM.id]: "not-a-date",
+        },
+      }),
+    },
+    {
+      name: "mismatched item keys",
+      build: () => ({
+        ...structuredClone(BASELINE),
+        plannedFinishByItem: { [FIRST_ITEM.id]: MIDPOINT },
+      }),
+    },
+    {
+      name: "finish before start",
+      build: () => ({
+        ...structuredClone(BASELINE),
+        plannedStartByItem: {
+          ...BASELINE.plannedStartByItem,
+          [FIRST_ITEM.id]: MIDPOINT,
+        },
+        plannedFinishByItem: {
+          ...BASELINE.plannedFinishByItem,
+          [FIRST_ITEM.id]: START,
+        },
+      }),
+    },
+    {
+      name: "negative planned work",
+      build: () => ({
+        ...structuredClone(BASELINE),
+        plannedWorkSecondsByItem: {
+          ...BASELINE.plannedWorkSecondsByItem,
+          [FIRST_ITEM.id]: -1,
+        },
+      }),
+    },
+    {
+      name: "nonfinite planned work",
+      build: () => ({
+        ...structuredClone(BASELINE),
+        plannedWorkSecondsByItem: {
+          ...BASELINE.plannedWorkSecondsByItem,
+          [FIRST_ITEM.id]: Number.NaN,
+        },
+      }),
+    },
+  ])("ignores an imported Baseline with invalid $name", ({ build }) => {
+    const candidate = build();
+    const invalid = {
+      ...candidate,
+      id: "baseline-invalid",
+      capturedAt:
+        candidate.capturedAt === "not-a-date"
+          ? "not-a-date"
+          : "2026-07-12T09:00:00.000Z",
+    } satisfies Baseline;
+    const source = workspace({
+      baselines: [structuredClone(BASELINE), invalid],
+    });
+
+    expect(selectV2Baseline(source, PROJECT.id)).toEqual(BASELINE);
+    const evm = calculateV2Evm(source, PROJECT.id, MIDPOINT);
+    expect(evm).toBeDefined();
+    expect(
+      evm === undefined
+        ? []
+        : [
+            evm.plannedValue,
+            evm.earnedValue,
+            evm.actualCost,
+            evm.schedulePerformanceIndex,
+            evm.costPerformanceIndex,
+            evm.estimateAtCompletion,
+          ].every(Number.isFinite),
+    ).toBe(true);
+  });
+
+  it("selects equivalent Baseline capture instants by stable ID", () => {
+    const baselineA = {
+      ...structuredClone(BASELINE),
+      id: "baseline-a",
+      capturedAt: START,
+    };
+    const baselineZ = {
+      ...structuredClone(BASELINE),
+      id: "baseline-z",
+      capturedAt: "2026-07-11T18:00:00.000+09:00",
+    };
+    const selectedId = (baselines: Baseline[]) =>
+      selectV2Baseline(workspace({ baselines }), PROJECT.id)?.id;
+
+    expect(selectedId([baselineA, baselineZ])).toBe(baselineA.id);
+    expect(selectedId([baselineZ, baselineA])).toBe(baselineA.id);
+  });
+
+  it("aggregates incremental Work Item actuals independent of input order", () => {
+    const events: WorkspaceV2["actuals"] = [
+      {
+        id: "actual-a",
+        revision: 1,
+        target: { kind: "work_item", workItemId: FIRST_ITEM.id },
+        actualStart: "2026-07-11T09:15:00.000Z",
+        actualFinish: "2026-07-11T10:00:00.000Z",
+        actualWorkSeconds: 600,
+        remainingWorkSeconds: 3_000,
+        actualCost: 10,
+        recordedAt: "2026-07-11T10:00:00.000Z",
+      },
+      {
+        id: "actual-b",
+        revision: 2,
+        target: { kind: "work_item", workItemId: FIRST_ITEM.id },
+        actualStart: START,
+        actualFinish: "2026-07-11T10:30:00.000Z",
+        actualWorkSeconds: 1_200,
+        remainingWorkSeconds: 1_200,
+        actualCost: 30,
+        recordedAt: MIDPOINT,
+      },
+      {
+        id: "actual-c",
+        revision: 2,
+        target: { kind: "work_item", workItemId: FIRST_ITEM.id },
+        actualFinish: END,
+        actualWorkSeconds: 300,
+        remainingWorkSeconds: 999,
+        actualCost: 5,
+        recordedAt: "2026-07-11T20:00:00.000+09:00",
+      },
+      {
+        id: "actual-action",
+        revision: 1,
+        target: { kind: "action", actionId: "action-1" },
+        actualWorkSeconds: 900,
+        remainingWorkSeconds: 0,
+        actualCost: 15,
+        recordedAt: MIDPOINT,
+      },
+    ];
+    const forward = workspace({ actuals: events });
+    const reverse = workspace({ actuals: [...events].reverse() });
+    const expected = [
+      {
+        workItemId: FIRST_ITEM.id,
+        actualStart: START,
+        actualFinish: END,
+        actualWorkSeconds: 2_100,
+        remainingWorkSeconds: 1_200,
+        actualCost: 45,
+        recordedAt: MIDPOINT,
+      },
+    ];
+
+    expect(actualsForProjectReporting(forward, PROJECT.id)).toEqual(expected);
+    expect(actualsForProjectReporting(reverse, PROJECT.id)).toEqual(expected);
+    expect(calculateV2Evm(forward, PROJECT.id, MIDPOINT)).toEqual(
+      calculateV2Evm(reverse, PROJECT.id, MIDPOINT),
+    );
+  });
+
+  it("sums each Actual event using the V1 EVM-effective cost", () => {
+    const source = workspace({
+      actuals: [
+        {
+          id: "actual-explicit-cost",
+          revision: 1,
+          target: { kind: "work_item", workItemId: FIRST_ITEM.id },
+          actualWorkSeconds: 1_800,
+          remainingWorkSeconds: 1_800,
+          actualCost: 60,
+          recordedAt: START,
+        },
+        {
+          id: "actual-work-fallback",
+          revision: 2,
+          target: { kind: "work_item", workItemId: FIRST_ITEM.id },
+          actualWorkSeconds: 1_800,
+          remainingWorkSeconds: 0,
+          actualCost: 0,
+          recordedAt: MIDPOINT,
+        },
+      ],
+    });
+
+    expect(actualsForProjectReporting(source, PROJECT.id)[0]?.actualCost).toBe(
+      60.5,
+    );
+    expect(calculateV2Evm(source, PROJECT.id, MIDPOINT)?.actualCost).toBe(60.5);
   });
 
   it("delegates deterministic Monte Carlo through preserved V2 IDs", () => {

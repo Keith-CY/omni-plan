@@ -1,4 +1,4 @@
-import { scheduleProject } from "@/domain/scheduler";
+import { schedulePortfolio, scheduleProject } from "@/domain/scheduler";
 import type {
   Dependency,
   Project,
@@ -24,12 +24,13 @@ function activeBet(
   project: ProjectV2,
 ): BetVersion | undefined {
   if (project.activeBetId === undefined) return undefined;
-  return workspace.bets.find(
+  const currentBets = workspace.bets.filter(
     (candidate) =>
-      candidate.id === project.activeBetId &&
-      candidate.projectId === project.id &&
-      candidate.invalidatedAt === undefined,
+      candidate.projectId === project.id && candidate.invalidatedAt === undefined,
   );
+  return currentBets.length === 1 && currentBets[0].id === project.activeBetId
+    ? currentBets[0]
+    : undefined;
 }
 
 export function projectToSchedulerInput(
@@ -107,6 +108,53 @@ function localDateAt(value: string, timeZone: string): string | undefined {
   }
 }
 
+function compareText(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function canonicalValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalValue);
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(
+      Object.keys(value)
+        .sort(compareText)
+        .filter((key) => (value as Record<string, unknown>)[key] !== undefined)
+        .map((key) => [
+          key,
+          canonicalValue((value as Record<string, unknown>)[key]),
+        ]),
+    );
+  }
+  return value;
+}
+
+function compareCommitmentRecency(
+  left: DailyCommitment,
+  right: DailyCommitment,
+): number {
+  const leftCommittedAt = Date.parse(left.committedAt);
+  const rightCommittedAt = Date.parse(right.committedAt);
+  const leftHasValidTime = Number.isFinite(leftCommittedAt);
+  const rightHasValidTime = Number.isFinite(rightCommittedAt);
+  const timeOrder =
+    leftHasValidTime && rightHasValidTime
+      ? rightCommittedAt - leftCommittedAt
+      : leftHasValidTime
+        ? -1
+        : rightHasValidTime
+          ? 1
+          : 0;
+  return (
+    right.version - left.version ||
+    timeOrder ||
+    compareText(left.id, right.id) ||
+    compareText(
+      JSON.stringify(canonicalValue(left)),
+      JSON.stringify(canonicalValue(right)),
+    )
+  );
+}
+
 function currentCommitments(
   workspace: WorkspaceV2,
   now: string,
@@ -116,12 +164,24 @@ function currentCommitments(
       .map(({ supersedesId }) => supersedesId)
       .filter((id): id is string => id !== undefined),
   );
-  return workspace.dailyCommitments.filter(
+  const winnersByLocalDate = new Map<string, DailyCommitment>();
+  for (const commitment of workspace.dailyCommitments) {
+    if (supersededIds.has(commitment.id)) continue;
+    const currentWinner = winnersByLocalDate.get(commitment.localDate);
+    if (
+      currentWinner === undefined ||
+      compareCommitmentRecency(commitment, currentWinner) < 0
+    ) {
+      winnersByLocalDate.set(commitment.localDate, commitment);
+    }
+  }
+  const candidates = [...winnersByLocalDate.values()].filter(
     (commitment) =>
-      !supersededIds.has(commitment.id) &&
       localDateAt(now, commitment.capacitySnapshot.timeZone) ===
-        commitment.localDate,
+      commitment.localDate,
   );
+  const current = [...candidates].sort(compareCommitmentRecency)[0];
+  return current === undefined ? [] : [current];
 }
 
 function committedWorkItemIds(
@@ -137,6 +197,27 @@ function committedWorkItemIds(
       ),
     ),
   );
+}
+
+function committedWorkItemRevisions(
+  commitments: DailyCommitment[],
+  projectId: string,
+): Map<string, Set<number>> {
+  const revisions = new Map<string, Set<number>>();
+  for (const commitment of commitments) {
+    for (const slot of commitment.slots) {
+      if (
+        slot.target.kind !== "work_item" ||
+        slot.target.projectId !== projectId
+      ) {
+        continue;
+      }
+      const itemRevisions = revisions.get(slot.target.workItemId) ?? new Set();
+      itemRevisions.add(slot.targetRevision);
+      revisions.set(slot.target.workItemId, itemRevisions);
+    }
+  }
+  return revisions;
 }
 
 function projectIsExecutable(
@@ -224,8 +305,13 @@ function scheduledWorkItems(
 
   const commitments = currentCommitments(workspace, now);
   if (project.holds.some(({ type }) => type === "review_overdue")) {
-    const committedIds = committedWorkItemIds(commitments, project.id);
-    items = items.filter(({ id }) => committedIds.has(id));
+    const committedRevisions = committedWorkItemRevisions(
+      commitments,
+      project.id,
+    );
+    items = items.filter(({ id, revision }) =>
+      committedRevisions.get(id)?.has(revision),
+    );
   }
 
   const conflictingCommitmentIds = new Set(
@@ -250,11 +336,18 @@ function scheduledWorkItems(
   return items;
 }
 
-function scheduleEligibleProject(
+interface ExecutableSchedulerProjection {
+  project: Project;
+  workItems: WorkItem[];
+  dependencies: Dependency[];
+  unsupported: string[];
+}
+
+function executableSchedulerProjection(
   workspace: WorkspaceV2,
   project: ProjectV2,
   now: string,
-): ScheduleResult | undefined {
+): ExecutableSchedulerProjection | undefined {
   const bet = activeBet(workspace, project);
   const projectedProject = projectToSchedulerInput(workspace, project);
   if (
@@ -273,17 +366,29 @@ function scheduleEligibleProject(
       itemIds.has(dependency.fromId) &&
       itemIds.has(dependency.toId),
   );
+  return {
+    project: projectedProject,
+    workItems: items.map(workItemToSchedulerInput),
+    dependencies: dependencies.map(dependencyToSchedulerInput),
+    unsupported: unsupportedCrossProjectDependencies(workspace, project.id),
+  };
+}
+
+function scheduleEligibleProject(
+  workspace: WorkspaceV2,
+  project: ProjectV2,
+  now: string,
+): ScheduleResult | undefined {
+  const projection = executableSchedulerProjection(workspace, project, now);
+  if (projection === undefined) return undefined;
   const result = scheduleProject(
-    projectedProject,
-    items.map(workItemToSchedulerInput),
-    dependencies.map(dependencyToSchedulerInput),
+    projection.project,
+    projection.workItems,
+    projection.dependencies,
   );
   return {
     ...result,
-    unsupported: [
-      ...result.unsupported,
-      ...unsupportedCrossProjectDependencies(workspace, project.id),
-    ],
+    unsupported: [...result.unsupported, ...projection.unsupported],
   };
 }
 
@@ -302,10 +407,28 @@ export function scheduleExecutablePortfolio(
   workspace: WorkspaceV2,
   now: string,
 ): ScheduleResult[] {
-  return [...workspace.projects]
+  const projections = [...workspace.projects]
     .sort((left, right) => left.id.localeCompare(right.id))
     .flatMap((project) => {
-      const result = scheduleEligibleProject(workspace, project, now);
-      return result === undefined ? [] : [result];
+      const projection = executableSchedulerProjection(
+        workspace,
+        project,
+        now,
+      );
+      return projection === undefined ? [] : [projection];
     });
+  const unsupportedByProject = new Map(
+    projections.map(({ project, unsupported }) => [project.id, unsupported]),
+  );
+  return schedulePortfolio(
+    projections.map(({ project }) => project),
+    projections.flatMap(({ workItems }) => workItems),
+    projections.flatMap(({ dependencies }) => dependencies),
+  ).map((result) => ({
+    ...result,
+    unsupported: [
+      ...result.unsupported,
+      ...(unsupportedByProject.get(result.projectId) ?? []),
+    ],
+  }));
 }

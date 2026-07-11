@@ -322,6 +322,9 @@ function actionIdentityCandidates(command: V2Command): string[] {
       return [
         command.baseline.id,
         command.baseline.projectId,
+        ...(command.baseline.approvedByDecisionId === undefined
+          ? []
+          : [command.baseline.approvedByDecisionId]),
         ...Object.keys(command.baseline.plannedStartByItem),
         ...Object.keys(command.baseline.plannedFinishByItem),
         ...Object.keys(command.baseline.plannedWorkSecondsByItem),
@@ -1741,6 +1744,67 @@ export async function applyCommandHandler(
     }
 
     case "capture_baseline": {
+      if (!isCanonicalIsoTimestamp(command.baseline.capturedAt)) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason: "Baseline capture time must be a canonical ISO timestamp.",
+          gate: `baseline:${command.baseline.id}:captured_at`,
+          permittedNextCommand: "capture_baseline",
+        });
+      }
+      const startIds = Object.keys(
+        command.baseline.plannedStartByItem,
+      ).sort();
+      const finishIds = Object.keys(
+        command.baseline.plannedFinishByItem,
+      ).sort();
+      const workIds = Object.keys(
+        command.baseline.plannedWorkSecondsByItem,
+      ).sort();
+      if (
+        JSON.stringify(startIds) !== JSON.stringify(finishIds) ||
+        JSON.stringify(startIds) !== JSON.stringify(workIds)
+      ) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason:
+            "Baseline planned start, finish, and work maps must contain the same Work Item IDs.",
+          gate: `baseline:${command.baseline.id}:item_keys`,
+          permittedNextCommand: "capture_baseline",
+        });
+      }
+      for (const workItemId of startIds) {
+        const start = command.baseline.plannedStartByItem[workItemId];
+        const finish = command.baseline.plannedFinishByItem[workItemId];
+        const plannedWork =
+          command.baseline.plannedWorkSecondsByItem[workItemId];
+        if (!isCanonicalIsoTimestamp(start)) {
+          return rejection(workspace, context, "INVALID_COMMAND", {
+            reason: `Baseline planned start for Work Item ${workItemId} must be a canonical ISO timestamp.`,
+            gate: `baseline:${command.baseline.id}:item:${workItemId}:planned_start`,
+            permittedNextCommand: "capture_baseline",
+          });
+        }
+        if (!isCanonicalIsoTimestamp(finish)) {
+          return rejection(workspace, context, "INVALID_COMMAND", {
+            reason: `Baseline planned finish for Work Item ${workItemId} must be a canonical ISO timestamp.`,
+            gate: `baseline:${command.baseline.id}:item:${workItemId}:planned_finish`,
+            permittedNextCommand: "capture_baseline",
+          });
+        }
+        if (Date.parse(finish) < Date.parse(start)) {
+          return rejection(workspace, context, "INVALID_COMMAND", {
+            reason: `Baseline planned finish for Work Item ${workItemId} cannot precede its planned start.`,
+            gate: `baseline:${command.baseline.id}:item:${workItemId}:range`,
+            permittedNextCommand: "capture_baseline",
+          });
+        }
+        if (!Number.isFinite(plannedWork) || plannedWork < 0) {
+          return rejection(workspace, context, "INVALID_COMMAND", {
+            reason: `Baseline planned work for Work Item ${workItemId} must be finite and nonnegative.`,
+            gate: `baseline:${command.baseline.id}:item:${workItemId}:planned_work`,
+            permittedNextCommand: "capture_baseline",
+          });
+        }
+      }
       const access = resolvePlanningContext(
         workspace,
         command.baseline.projectId,
@@ -1749,6 +1813,23 @@ export async function applyCommandHandler(
       );
       if (!access.ok) {
         return planningAccessRejection(workspace, context, access);
+      }
+      if (command.baseline.approvedByDecisionId !== undefined) {
+        const approval = workspace.legacyAuditRecords.find(
+          ({ id }) => id === command.baseline.approvedByDecisionId,
+        );
+        if (
+          approval === undefined ||
+          approval.projectId !== access.project.id ||
+          (approval.recordType !== "decision" &&
+            approval.recordType !== "audit_decision")
+        ) {
+          return rejection(workspace, context, "ENTITY_NOT_FOUND", {
+            reason: `Baseline ${command.baseline.id} approval must reference a same-project legacy Decision or Audit Decision.`,
+            gate: `baseline:${command.baseline.id}:approved_by_decision`,
+            permittedNextCommand: "capture_baseline",
+          });
+        }
       }
       const collision = entityIdCollision(workspace, command.baseline.id, [
         { entity: "CommandReceipt", id: context.commandId },

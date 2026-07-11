@@ -2275,6 +2275,23 @@ describe("validateWorkspaceInvariants dangling references", () => {
       },
     },
     {
+      name: "Baseline approval decision provenance",
+      gate:
+        "reference:Baseline:baseline-orphan:approvedByDecisionId:legacy-missing",
+      mutate: (workspace) => {
+        workspace.baselines.push({
+          id: "baseline-orphan",
+          projectId: "project-1",
+          name: "Orphan approval",
+          capturedAt: CREATED_AT,
+          plannedStartByItem: {},
+          plannedFinishByItem: {},
+          plannedWorkSecondsByItem: {},
+          approvedByDecisionId: "legacy-missing",
+        });
+      },
+    },
+    {
       name: "Close Project",
       gate: "reference:CloseDecision:close-orphan:projectId",
       mutate: (workspace) => {
@@ -2401,6 +2418,94 @@ describe("validateWorkspaceInvariants dangling references", () => {
     expect(referenceViolations.every((violation) =>
       violation.permittedNextCommand === "repair_workspace_reference"
     )).toBe(true);
+  });
+});
+
+describe("validateWorkspaceInvariants Baseline approval provenance", () => {
+  function legacyDecision(
+    overrides: Partial<LegacyAuditRecord> = {},
+  ): LegacyAuditRecord {
+    return {
+      id: "legacy-decision-1",
+      projectId: "project-1",
+      recordType: "decision",
+      sourcePayload: {},
+      sourceChecksum: "checksum",
+      ...overrides,
+    };
+  }
+
+  function addBaseline(
+    workspace: WorkspaceV2,
+    approvedByDecisionId: string,
+  ): void {
+    workspace.baselines.push({
+      id: "baseline-provenance",
+      projectId: "project-1",
+      name: "Approved Baseline",
+      capturedAt: CREATED_AT,
+      plannedStartByItem: { "work-item-1": CREATED_AT },
+      plannedFinishByItem: { "work-item-1": FUTURE },
+      plannedWorkSecondsByItem: { "work-item-1": 3_600 },
+      approvedByDecisionId,
+    });
+  }
+
+  it.each(["decision", "audit_decision"] as const)(
+    "accepts a same-project legacy %s",
+    (recordType) => {
+      const workspace = buildValidWorkspace();
+      const record = legacyDecision({ recordType });
+      workspace.legacyAuditRecords.push(record);
+      addBaseline(workspace, record.id);
+
+      expect(
+        violationsWithCode(workspace, "ENTITY_NOT_FOUND").filter(
+          ({ gate }) => gate?.includes("approvedByDecisionId"),
+        ),
+      ).toEqual([]);
+    },
+  );
+
+  it("rejects a same-project legacy record of the wrong type", () => {
+    const workspace = buildValidWorkspace();
+    const record = legacyDecision({ recordType: "audit_gate" });
+    workspace.legacyAuditRecords.push(record);
+    addBaseline(workspace, record.id);
+
+    expect(violationsWithCode(workspace, "ENTITY_NOT_FOUND")).toContainEqual(
+      expect.objectContaining({
+        gate: `reference:Baseline:baseline-provenance:approvedByDecisionId:${record.id}`,
+      }),
+    );
+  });
+
+  it("rejects a legacy decision from another Project", () => {
+    const workspace = buildValidWorkspace();
+    const otherBrief = buildDirectionBrief({
+      id: "brief-2",
+      projectId: "project-2",
+      createdAt: CREATED_AT,
+      updatedAt: CREATED_AT,
+    });
+    workspace.projects.push(
+      buildProjectV2({
+        id: "project-2",
+        activeDirectionBriefId: otherBrief.id,
+        createdAt: CREATED_AT,
+        updatedAt: CREATED_AT,
+      }),
+    );
+    workspace.directionBriefs.push(otherBrief);
+    const record = legacyDecision({ projectId: "project-2" });
+    workspace.legacyAuditRecords.push(record);
+    addBaseline(workspace, record.id);
+
+    expect(violationsWithCode(workspace, "ENTITY_NOT_FOUND")).toContainEqual(
+      expect.objectContaining({
+        gate: `reference:Baseline:baseline-provenance:approvedByDecisionId:${record.id}`,
+      }),
+    );
   });
 });
 

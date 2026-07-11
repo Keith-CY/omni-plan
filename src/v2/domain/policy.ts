@@ -59,6 +59,9 @@ const projectDrafts = new Set([
   "propose_replan",
   "upsert_dependency",
   "remove_dependency",
+  "remove_work_item",
+  "capture_baseline",
+  "complete_work_item",
 ]);
 
 const automaticCapabilities = {
@@ -100,6 +103,9 @@ const projectMutationCommands = new Set([
   "propose_replan",
   "upsert_dependency",
   "remove_dependency",
+  "remove_work_item",
+  "capture_baseline",
+  "complete_work_item",
   "commit_today",
   "accept_replan",
   "record_actual",
@@ -126,6 +132,9 @@ const rebetBlockedCommands = new Set([
   "update_work_item",
   "upsert_dependency",
   "remove_dependency",
+  "remove_work_item",
+  "capture_baseline",
+  "complete_work_item",
   "propose_replan",
   "commit_today",
   "accept_replan",
@@ -141,6 +150,8 @@ const overdueReviewBlockedCommands = new Set([
   "update_work_item",
   "upsert_dependency",
   "remove_dependency",
+  "remove_work_item",
+  "capture_baseline",
   "commit_today",
   "accept_replan",
 ]);
@@ -449,7 +460,8 @@ function isBlockingHold(
     case "review_overdue":
       if (
         commandType === "record_actual" ||
-        commandType === "attach_evidence"
+        commandType === "attach_evidence" ||
+        commandType === "complete_work_item"
       ) {
         return targetWasCommitted !== true;
       }

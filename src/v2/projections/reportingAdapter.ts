@@ -15,6 +15,48 @@ import {
   workItemsInActiveBet,
 } from "./schedulerAdapter";
 
+function compareText(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function parsedTimestamp(value: string): number | undefined {
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? timestamp : undefined;
+}
+
+function compareActualRecency(
+  left: WorkspaceV2["actuals"][number],
+  right: WorkspaceV2["actuals"][number],
+): number {
+  const leftTimestamp = parsedTimestamp(left.recordedAt);
+  const rightTimestamp = parsedTimestamp(right.recordedAt);
+  if (leftTimestamp !== rightTimestamp) {
+    if (leftTimestamp === undefined) return 1;
+    if (rightTimestamp === undefined) return -1;
+    return rightTimestamp - leftTimestamp;
+  }
+  return right.revision - left.revision || compareText(left.id, right.id);
+}
+
+function boundaryTimestamp(
+  values: Array<string | undefined>,
+  direction: "earliest" | "latest",
+): string | undefined {
+  return values
+    .flatMap((value) => {
+      if (value === undefined) return [];
+      const timestamp = parsedTimestamp(value);
+      return timestamp === undefined ? [] : [{ timestamp, value }];
+    })
+    .sort((left, right) => {
+      const timestampOrder =
+        direction === "earliest"
+          ? left.timestamp - right.timestamp
+          : right.timestamp - left.timestamp;
+      return timestampOrder || compareText(left.value, right.value);
+    })[0]?.value;
+}
+
 function reportingInputs(workspace: WorkspaceV2, projectId: string) {
   const project = workspace.projects.find(({ id }) => id === projectId);
   if (project === undefined) return undefined;
@@ -45,28 +87,92 @@ export function actualsForProjectReporting(
       .filter((item) => item.projectId === projectId)
       .map(({ id }) => id),
   );
-  return workspace.actuals.flatMap((actual) => {
+  const eventsByWorkItem = new Map<
+    string,
+    Array<WorkspaceV2["actuals"][number]>
+  >();
+  for (const actual of workspace.actuals) {
     if (
       actual.target.kind !== "work_item" ||
       !workItemIds.has(actual.target.workItemId)
     ) {
-      return [];
+      continue;
     }
-    return [
-      {
-        workItemId: actual.target.workItemId,
-        ...(actual.actualStart === undefined
-          ? {}
-          : { actualStart: actual.actualStart }),
-        ...(actual.actualFinish === undefined
-          ? {}
-          : { actualFinish: actual.actualFinish }),
-        actualWorkSeconds: actual.actualWorkSeconds,
-        remainingWorkSeconds: actual.remainingWorkSeconds,
-        actualCost: actual.actualCost,
-        recordedAt: actual.recordedAt,
-      },
-    ];
+    const events = eventsByWorkItem.get(actual.target.workItemId) ?? [];
+    events.push(actual);
+    eventsByWorkItem.set(actual.target.workItemId, events);
+  }
+
+  return [...eventsByWorkItem.entries()]
+    .sort(([left], [right]) => compareText(left, right))
+    .map(([workItemId, events]) => {
+      const latest = [...events].sort(compareActualRecency)[0];
+      const actualStart = boundaryTimestamp(
+        events.map(({ actualStart }) => actualStart),
+        "earliest",
+      );
+      const actualFinish = boundaryTimestamp(
+        events.map(({ actualFinish }) => actualFinish),
+        "latest",
+      );
+      return {
+        workItemId,
+        ...(actualStart === undefined ? {} : { actualStart }),
+        ...(actualFinish === undefined ? {} : { actualFinish }),
+        actualWorkSeconds: events.reduce(
+          (total, actual) => total + actual.actualWorkSeconds,
+          0,
+        ),
+        remainingWorkSeconds: latest.remainingWorkSeconds,
+        actualCost: events.reduce(
+          (total, actual) =>
+            total +
+            (actual.actualCost || actual.actualWorkSeconds / 3_600),
+          0,
+        ),
+        recordedAt: latest.recordedAt,
+      };
+    });
+}
+
+function sameSortedKeys(
+  left: Record<string, unknown>,
+  right: Record<string, unknown>,
+): boolean {
+  const leftKeys = Object.keys(left).sort(compareText);
+  const rightKeys = Object.keys(right).sort(compareText);
+  return (
+    leftKeys.length === rightKeys.length &&
+    leftKeys.every((key, index) => key === rightKeys[index])
+  );
+}
+
+function isValidReportingBaseline(baseline: Baseline): boolean {
+  if (parsedTimestamp(baseline.capturedAt) === undefined) return false;
+  if (
+    !sameSortedKeys(
+      baseline.plannedStartByItem,
+      baseline.plannedFinishByItem,
+    ) ||
+    !sameSortedKeys(
+      baseline.plannedStartByItem,
+      baseline.plannedWorkSecondsByItem,
+    )
+  ) {
+    return false;
+  }
+
+  return Object.keys(baseline.plannedStartByItem).every((workItemId) => {
+    const start = parsedTimestamp(baseline.plannedStartByItem[workItemId]);
+    const finish = parsedTimestamp(baseline.plannedFinishByItem[workItemId]);
+    const workSeconds = baseline.plannedWorkSecondsByItem[workItemId];
+    return (
+      start !== undefined &&
+      finish !== undefined &&
+      finish >= start &&
+      Number.isFinite(workSeconds) &&
+      workSeconds >= 0
+    );
   });
 }
 
@@ -75,11 +181,17 @@ export function selectV2Baseline(
   projectId: string,
 ): Baseline | undefined {
   const baseline = workspace.baselines
-    .filter((candidate) => candidate.projectId === projectId)
+    .filter(
+      (candidate) =>
+        candidate.projectId === projectId &&
+        isValidReportingBaseline(candidate),
+    )
     .sort(
-      (left, right) =>
-        right.capturedAt.localeCompare(left.capturedAt) ||
-        left.id.localeCompare(right.id),
+      (left, right) => {
+        const capturedAtOrder =
+          Date.parse(right.capturedAt) - Date.parse(left.capturedAt);
+        return capturedAtOrder || compareText(left.id, right.id);
+      },
     )[0];
   return baseline === undefined ? undefined : structuredClone(baseline);
 }

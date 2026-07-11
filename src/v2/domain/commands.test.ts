@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { Evidence } from "@/domain/types";
 
 import {
+  buildBetVersion,
   buildCapacityProfile,
   buildDirectionBrief,
   buildInboxItem,
@@ -542,6 +543,67 @@ describe("V2Command public contract", () => {
       }
     },
   );
+
+  it("rejects an explicitly undefined required Work Item patch field without throwing", async () => {
+    const brief = buildDirectionBrief({
+      id: "brief-1",
+      projectId: "project-1",
+      appetiteSeconds: 3_600,
+      firstScope: [
+        { id: "scope-1", title: "Scope", description: "Committed scope" },
+      ],
+      createdAt: NOW,
+      updatedAt: NOW,
+    });
+    const bet = buildBetVersion({
+      id: "bet-1",
+      projectId: "project-1",
+      briefId: brief.id,
+      briefSnapshot: structuredClone(brief),
+      committedScope: structuredClone(brief.firstScope),
+      appetiteStart: NOW,
+      appetiteEnd: LATER,
+      actorId: "human-1",
+      approvedAt: NOW,
+    });
+    const workspace = buildProjectWorkspace(undefined, {
+      projects: [
+        buildProjectV2({
+          id: "project-1",
+          stage: "planning",
+          activeDirectionBriefId: brief.id,
+          activeBetId: bet.id,
+          createdAt: NOW,
+          updatedAt: NOW,
+        }),
+      ],
+      directionBriefs: [brief],
+      bets: [bet],
+      workItems: [WORK_ITEM],
+    });
+    const command = {
+      type: "update_work_item",
+      projectId: "project-1",
+      workItemId: WORK_ITEM.id,
+      patch: { assignmentIds: undefined },
+    } as unknown as V2Command;
+
+    const pending = executeCommand(
+      workspace,
+      command,
+      buildContext({ expectedRevision: workspace.revision }),
+    );
+
+    await expect(pending).resolves.toMatchObject({
+      ok: false,
+      workspace,
+      rejection: {
+        code: "INVALID_COMMAND",
+        gate: "command_payload:update_work_item",
+      },
+    });
+    expect(workspace.workItems).toEqual([WORK_ITEM]);
+  });
 });
 
 describe("executeCommand applied receipts", () => {
@@ -1550,6 +1612,193 @@ describe("executeCommand trusted policy projection", () => {
       hold: "review_overdue",
     });
     expect(committed.rejection.code).toBe("COMMAND_NOT_IMPLEMENTED");
+  });
+
+  it("allows only committed Work Items to complete during overdue review", async () => {
+    const commitment: DailyCommitment = {
+      id: "commitment-completion",
+      localDate: "2026-07-11",
+      version: 1,
+      proposalHash: "proposal-completion",
+      capacitySnapshot: buildCapacityProfile({
+        updatedAt: NOW,
+        updatedBy: "human-1",
+      }),
+      slots: [COMMITMENT_SLOT],
+      actorId: "human-1",
+      committedAt: NOW,
+    };
+    const uncommittedWorkspace = buildProjectWorkspace("review_overdue", {
+      workItems: [WORK_ITEM],
+    });
+    const committedWorkspace = buildProjectWorkspace("review_overdue", {
+      workItems: [WORK_ITEM],
+      dailyCommitments: [commitment],
+    });
+    const command = {
+      type: "complete_work_item",
+      projectId: "project-1",
+      workItemId: WORK_ITEM.id,
+      resultStatus: "completed",
+      outcomeNote: "Committed outcome delivered.",
+    } as const satisfies V2Command;
+    const commandContext = buildContext({ expectedRevision: 11 });
+
+    const uncommitted = rejected(
+      await executeCommand(uncommittedWorkspace, command, commandContext),
+    );
+    const committed = rejected(
+      await executeCommand(committedWorkspace, command, {
+        ...commandContext,
+        commandId: "command-complete-committed",
+      }),
+    );
+
+    expect(uncommitted.rejection).toMatchObject({
+      code: "HOLD_BLOCKS_COMMAND",
+      hold: "review_overdue",
+    });
+    expect(committed.rejection.code).toBe("BET_REQUIRED");
+  });
+
+  it("blocks Work Item completion when its effective commitment is from yesterday", async () => {
+    const yesterday: DailyCommitment = {
+      id: "commitment-yesterday",
+      localDate: "2026-07-10",
+      version: 1,
+      proposalHash: "proposal-yesterday",
+      capacitySnapshot: buildCapacityProfile({
+        timeZone: "Asia/Tokyo",
+        updatedAt: NOW,
+        updatedBy: "human-1",
+      }),
+      slots: [COMMITMENT_SLOT],
+      actorId: "human-1",
+      committedAt: "2026-07-10T09:00:00.000Z",
+    };
+    const workspace = buildProjectWorkspace("review_overdue", {
+      workItems: [WORK_ITEM],
+      dailyCommitments: [yesterday],
+    });
+
+    const result = rejected(
+      await executeCommand(
+        workspace,
+        {
+          type: "complete_work_item",
+          projectId: "project-1",
+          workItemId: WORK_ITEM.id,
+          resultStatus: "completed",
+          outcomeNote: "Too late for yesterday's commitment.",
+        },
+        buildContext({
+          commandId: "complete-yesterday",
+          expectedRevision: workspace.revision,
+        }),
+      ),
+    );
+
+    expect(result.rejection).toMatchObject({
+      code: "HOLD_BLOCKS_COMMAND",
+      hold: "review_overdue",
+    });
+  });
+
+  it("blocks Work Item completion when the current slot has a stale revision", async () => {
+    const commitment: DailyCommitment = {
+      id: "commitment-stale",
+      localDate: "2026-07-11",
+      version: 1,
+      proposalHash: "proposal-stale",
+      capacitySnapshot: buildCapacityProfile({
+        timeZone: "UTC",
+        updatedAt: NOW,
+        updatedBy: "human-1",
+      }),
+      slots: [{ ...COMMITMENT_SLOT, targetRevision: WORK_ITEM.revision - 1 }],
+      actorId: "human-1",
+      committedAt: NOW,
+    };
+    const workspace = buildProjectWorkspace("review_overdue", {
+      workItems: [WORK_ITEM],
+      dailyCommitments: [commitment],
+    });
+
+    const result = rejected(
+      await executeCommand(
+        workspace,
+        {
+          type: "complete_work_item",
+          projectId: "project-1",
+          workItemId: WORK_ITEM.id,
+          resultStatus: "completed",
+          outcomeNote: "Stale committed revision.",
+        },
+        buildContext({
+          commandId: "complete-stale",
+          expectedRevision: workspace.revision,
+        }),
+      ),
+    );
+
+    expect(result.rejection).toMatchObject({
+      code: "HOLD_BLOCKS_COMMAND",
+      hold: "review_overdue",
+    });
+  });
+
+  it("uses the deterministic fork winner for overdue-review completion", async () => {
+    const winner: DailyCommitment = {
+      id: "commitment-a",
+      localDate: "2026-07-11",
+      version: 2,
+      proposalHash: "proposal-a",
+      capacitySnapshot: buildCapacityProfile({
+        timeZone: "UTC",
+        updatedAt: NOW,
+        updatedBy: "human-1",
+      }),
+      slots: [{ ...COMMITMENT_SLOT, targetRevision: WORK_ITEM.revision - 1 }],
+      actorId: "human-1",
+      committedAt: NOW,
+    };
+    const losingFork: DailyCommitment = {
+      ...structuredClone(winner),
+      id: "commitment-z",
+      proposalHash: "proposal-z",
+      slots: [COMMITMENT_SLOT],
+    };
+    const command = {
+      type: "complete_work_item",
+      projectId: "project-1",
+      workItemId: WORK_ITEM.id,
+      resultStatus: "completed",
+      outcomeNote: "Only the winning fork authorizes completion.",
+    } as const satisfies V2Command;
+
+    for (const [index, commitments] of [
+      [winner, losingFork],
+      [losingFork, winner],
+    ].entries()) {
+      const workspace = buildProjectWorkspace("review_overdue", {
+        workItems: [WORK_ITEM],
+        dailyCommitments: commitments,
+      });
+      const result = rejected(
+        await executeCommand(
+          workspace,
+          command,
+          buildContext({
+            commandId: `complete-fork-${index}`,
+            expectedRevision: workspace.revision,
+          }),
+        ),
+      );
+      expect(result.rejection).toMatchObject({
+        code: "HOLD_BLOCKS_COMMAND",
+        hold: "review_overdue",
+      });
+    }
   });
 
   it("blocks project metadata mutation during migration review before the handler", async () => {
