@@ -3,11 +3,15 @@ import type { Id } from "@/domain/types";
 import type {
   BetVersion,
   CapacityProfile,
+  CloseDecision,
   DirectionBrief,
+  ExceptionRecord,
   InboxItem,
+  ProjectWorkItem,
   ProjectV2,
   WorkspaceV2,
 } from "../domain/types";
+import type { CommandContext } from "../domain/commands";
 import { createEmptyWorkspaceV2 } from "../domain/workspace";
 
 type BuilderInput<T, RequiredKeys extends keyof T> = Pick<T, RequiredKeys> &
@@ -108,6 +112,83 @@ export function buildCapacityProfile(
     weeklyWindows: [],
     dailyBudgets: [],
     unavailableBlocks: [],
+    ...withoutUndefined(input),
+  };
+}
+
+export function buildProjectWorkItem(
+  input: BuilderInput<ProjectWorkItem, "id" | "projectId" | "betScopeId">,
+): ProjectWorkItem {
+  return {
+    kind: "task",
+    title: "Property Work Item",
+    outline: "Exercise one bounded result.",
+    durationSeconds: 1_800,
+    estimate: { mostLikelySeconds: 1_800 },
+    assignmentIds: [],
+    percentComplete: 0,
+    revision: 1,
+    ...withoutUndefined(input),
+  };
+}
+
+export function buildCommandContext(
+  overrides: Partial<CommandContext> = {},
+): CommandContext {
+  return {
+    commandId: "property-command",
+    expectedRevision: 0,
+    actorId: "property-human",
+    actorKind: "human",
+    origin: "ui",
+    source: {
+      sourceId: "property-human-session",
+      verified: true,
+      capabilities: ["human_decision"],
+    },
+    now: "2026-07-11T00:00:00.000Z",
+    ...withoutUndefined(overrides),
+  };
+}
+
+export function buildCloseDecision(
+  input: BuilderInput<
+    CloseDecision,
+    "id" | "projectId" | "actorId" | "closedAt"
+  >,
+): CloseDecision {
+  return {
+    successComparison: "Compared the result with the success evidence.",
+    outcome: "achieved",
+    keyLearning: "The bounded lifecycle preserved its decisions.",
+    unfinishedDisposition: "historical_incomplete",
+    ...withoutUndefined(input),
+  };
+}
+
+export function buildExceptionRecord(
+  input: BuilderInput<
+    ExceptionRecord,
+    | "id"
+    | "projectId"
+    | "requirementId"
+    | "approvedBy"
+    | "createdAt"
+    | "reviewAt"
+    | "expiresAt"
+  >,
+): ExceptionRecord {
+  return {
+    rationale: "A bounded external dependency delays exact Evidence.",
+    knownConsequence: "Validation may not rely on this after expiry.",
+    history: [
+      {
+        action: "created",
+        actorId: input.approvedBy,
+        at: input.createdAt,
+        note: "Approved as a controlled evidence exception.",
+      },
+    ],
     ...withoutUndefined(input),
   };
 }

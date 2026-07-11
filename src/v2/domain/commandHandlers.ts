@@ -1381,6 +1381,13 @@ export async function applyCommandHandler(
         );
       }
       const project = workspace.projects[projectIndex];
+      if (project.stage === "closed") {
+        return rejection(workspace, context, "PROJECT_CLOSED", {
+          reason: `Closed Project ${project.id} cannot replace its Direction.`,
+          gate: `project:${project.id}:closed`,
+          permittedNextCommand: "create_follow_up_project",
+        });
+      }
       const briefIndex = workspace.directionBriefs.findIndex(
         ({ id }) => id === project.activeDirectionBriefId,
       );
@@ -2684,6 +2691,24 @@ export async function applyCommandHandler(
           command.commitment.id,
           "commit_today",
         );
+      }
+      const committedProjectIds = [
+        ...new Set(
+          command.commitment.slots.flatMap(({ target }) =>
+            target.kind === "work_item" ? [target.projectId] : [],
+          ),
+        ),
+      ].sort();
+      for (const projectId of committedProjectIds) {
+        const access = resolvePlanningContext(
+          workspace,
+          projectId,
+          context.now,
+          command.type,
+        );
+        if (!access.ok) {
+          return planningAccessRejection(workspace, context, access);
+        }
       }
       const capacityError = capacityErrorForSlots(
         workspace,

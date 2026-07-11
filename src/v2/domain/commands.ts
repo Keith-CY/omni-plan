@@ -2288,9 +2288,10 @@ export async function executeCommand(
     }
   }
 
-  const workspaceSnapshot = structuredClone(workspace);
+  const baselineSnapshot = structuredClone(workspace);
+  const handlerWorkspace = structuredClone(baselineSnapshot);
   const handlerResult = await applyCommandHandler(
-    workspaceSnapshot,
+    handlerWorkspace,
     commandSnapshot,
     contextSnapshot,
   );
@@ -2309,7 +2310,7 @@ export async function executeCommand(
   const [invariantViolation] = validateWorkspaceInvariants(
     candidate,
     contextSnapshot.now,
-    workspaceSnapshot,
+    baselineSnapshot,
   );
   if (invariantViolation !== undefined) {
     return rejectedResult(
@@ -2326,7 +2327,7 @@ export async function executeCommand(
     );
   }
 
-  const diff = computeAuditDiff(workspaceSnapshot, candidate);
+  const diff = computeAuditDiff(baselineSnapshot, candidate);
   const nextRevision = baseRevision + 1;
   const receipt = await buildReceipt(
     baseRevision,

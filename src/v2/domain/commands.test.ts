@@ -3461,11 +3461,19 @@ describe("executeCommand Direction and Bet", () => {
         ),
       );
 
-      expect(result.rejection).toMatchObject({
-        code: "ILLEGAL_LIFECYCLE_TRANSITION",
-        gate: `project:project-1:stage:${stage}`,
-        permittedNextCommand: "update_direction",
-      });
+      expect(result.rejection).toMatchObject(
+        stage === "closed"
+          ? {
+              code: "PROJECT_CLOSED",
+              gate: "project:project-1:closed",
+              permittedNextCommand: "create_follow_up_project",
+            }
+          : {
+              code: "ILLEGAL_LIFECYCLE_TRANSITION",
+              gate: `project:project-1:stage:${stage}`,
+              permittedNextCommand: "update_direction",
+            },
+      );
       expect(result.workspace).toBe(workspace);
     },
   );
