@@ -1493,6 +1493,13 @@ export async function applyCommandHandler(
       const projects = [...workspace.projects];
       projects[projectIndex] = {
         ...closeTransition.project,
+        holds: closeTransition.project.holds.filter(
+          ({ type, sourceId }) =>
+            !(
+              type === "rebet_required" &&
+              sourceId === boundaryBet?.id
+            ),
+        ),
         updatedAt: context.now,
       };
       return {

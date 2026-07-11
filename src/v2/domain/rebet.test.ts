@@ -730,7 +730,7 @@ describe("Bet appetite boundary", () => {
     }
   });
 
-  it("records late midpoint and repeated expiry without duplicating or rewriting the hold", async () => {
+  it("records a missed midpoint after expiry without rewriting the expiry hold", async () => {
     const expired = applied(
       await executeCommand(
         activeWorkspace("executing"),
@@ -760,23 +760,131 @@ describe("Bet appetite boundary", () => {
         }),
       ),
     );
-    const repeated = applied(
+    expect(lateMidpoint.workspace.projects[0].holds).toEqual([originalHold]);
+  });
+
+  it.each([
+    {
+      boundary: "midpoint",
+      firstAt: MIDPOINT,
+      replayAt: "2026-07-11T10:05:00.000Z",
+    },
+    {
+      boundary: "expired",
+      firstAt: APPETITE_END,
+      replayAt: "2026-07-11T11:05:00.000Z",
+    },
+  ] as const)(
+    "rejects a same-payload $boundary replay across command IDs without any state change",
+    async ({ boundary, firstAt, replayAt }) => {
+      const command = {
+        type: "record_bet_boundary",
+        projectId: "project-1",
+        boundary,
+        triggerKey: `bet-1:${boundary}`,
+      } as const satisfies V2Command;
+      const first = applied(
+        await executeCommand(
+          activeWorkspace("executing"),
+          command,
+          systemContext(firstAt, { commandId: `${boundary}-first` }),
+        ),
+      );
+      const beforeReplay = structuredClone(first.workspace);
+
+      const replay = rejected(
+        await executeCommand(
+          first.workspace,
+          command,
+          systemContext(replayAt, {
+            commandId: `${boundary}-replay-new-id`,
+            expectedRevision: first.workspace.revision,
+          }),
+        ),
+      );
+
+      expect(replay.rejection).toMatchObject({
+        code: "DUPLICATE_COMMAND",
+        gate: `command_payload:record_bet_boundary:${first.receipt.payloadHash}`,
+        permittedNextCommand: "read_existing_command_receipt",
+      });
+      expect(replay.workspace).toBe(first.workspace);
+      expect(replay.workspace).toEqual(beforeReplay);
+      expect(replay.workspace.revision).toBe(first.workspace.revision);
+      expect(replay.workspace.commandReceipts).toHaveLength(
+        first.workspace.commandReceipts.length,
+      );
+    },
+  );
+
+  it("keeps revision, source, and actor rejection precedence over payload replay detection", async () => {
+    const command = {
+      type: "record_bet_boundary",
+      projectId: "project-1",
+      boundary: "midpoint",
+      triggerKey: "bet-1:midpoint",
+    } as const satisfies V2Command;
+    const first = applied(
       await executeCommand(
-        lateMidpoint.workspace,
-        {
-          type: "record_bet_boundary",
-          projectId: "project-1",
-          boundary: "expired",
-          triggerKey: "bet-1:expired",
-        },
-        systemContext("2026-07-11T11:10:00.000Z", {
-          commandId: "repeated-expiry",
-          expectedRevision: lateMidpoint.workspace.revision,
-        }),
+        activeWorkspace("executing"),
+        command,
+        systemContext(MIDPOINT, { commandId: "precedence-first" }),
       ),
     );
 
-    expect(repeated.workspace.projects[0].holds).toEqual([originalHold]);
+    const stale = rejected(
+      await executeCommand(
+        first.workspace,
+        command,
+        systemContext("2026-07-11T10:05:00.000Z", {
+          commandId: "precedence-stale",
+          expectedRevision: 0,
+          source: {
+            sourceId: "unverified-clock",
+            verified: false,
+            capabilities: [],
+          },
+        }),
+      ),
+    );
+    expect(stale.rejection.code).toBe("REVISION_CONFLICT");
+
+    const unverified = rejected(
+      await executeCommand(
+        first.workspace,
+        command,
+        systemContext("2026-07-11T10:05:00.000Z", {
+          commandId: "precedence-source",
+          expectedRevision: first.workspace.revision,
+          source: {
+            sourceId: "unverified-clock",
+            verified: false,
+            capabilities: [],
+          },
+        }),
+      ),
+    );
+    expect(unverified.rejection.code).toBe("SOURCE_NOT_AUTHORIZED");
+
+    const wrongActor = rejected(
+      await executeCommand(
+        first.workspace,
+        command,
+        context({
+          commandId: "precedence-actor",
+          expectedRevision: first.workspace.revision,
+          actorKind: "human",
+          origin: "sync",
+          source: {
+            sourceId: "clock-for-wrong-actor",
+            verified: true,
+            capabilities: ["replay_receipt", "system_time"],
+          },
+          now: "2026-07-11T10:05:00.000Z",
+        }),
+      ),
+    );
+    expect(wrongActor.rejection.code).toBe("ACTOR_NOT_AUTHORIZED");
   });
 
   it.each(["request_validation", "satisfy_validation"] as const)(
@@ -1019,7 +1127,10 @@ describe("Bet appetite boundary", () => {
       ),
     );
 
-    expect(completed.workspace.projects[0].stage).toBe("closed");
+    expect(completed.workspace.projects[0]).toMatchObject({
+      stage: "closed",
+      holds: [],
+    });
     expect(completed.workspace.closeDecisions).toEqual([
       {
         id: "abandon-1",

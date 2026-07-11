@@ -1824,6 +1824,30 @@ export async function executeCommand(
     );
   }
 
+  if (commandType === "record_bet_boundary") {
+    const payloadHash = await stableHash(toJsonValue(commandSnapshot));
+    const appliedReplay = workspace.commandReceipts.find(
+      (receipt) =>
+        receipt.status === "applied" &&
+        receipt.commandType === commandType &&
+        receipt.payloadHash === payloadHash,
+    );
+    if (appliedReplay !== undefined) {
+      return rejectedResult(
+        workspace,
+        commandSnapshot,
+        commandType,
+        contextSnapshot,
+        createCommandRejection("DUPLICATE_COMMAND", rejectionContext, {
+          reason: `Applied command ${appliedReplay.commandId} already recorded this Bet boundary payload.`,
+          gate: `command_payload:${commandType}:${payloadHash}`,
+          permittedNextCommand: "read_existing_command_receipt",
+        }),
+        baseRevision,
+      );
+    }
+  }
+
   const workspaceSnapshot = structuredClone(workspace);
   const handlerResult = await applyCommandHandler(
     workspaceSnapshot,
