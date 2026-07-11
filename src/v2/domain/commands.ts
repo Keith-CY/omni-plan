@@ -1583,26 +1583,9 @@ function policyMutationTargetIds(
   }
 }
 
-function timestampIsEffectiveAt(
-  value: ISODate | undefined,
-  now: ISODate,
-): boolean {
-  if (value === undefined) return false;
-  const timestamp = Date.parse(value);
-  const evaluatedAt = Date.parse(now);
-  return (
-    Number.isFinite(timestamp) &&
-    Number.isFinite(evaluatedAt) &&
-    new Date(timestamp).toISOString() === value &&
-    new Date(evaluatedAt).toISOString() === now &&
-    timestamp <= evaluatedAt
-  );
-}
-
 function classifyWorkItemScopeExpansion(
   workspace: WorkspaceV2,
   command: Extract<V2Command, { type: "update_work_item" }>,
-  now: ISODate,
 ): boolean | undefined {
   const workItems = recordsWithId(workspace.workItems, command.workItemId);
   const projects = recordsWithId(workspace.projects, command.projectId);
@@ -1621,7 +1604,7 @@ function classifyWorkItemScopeExpansion(
   const bet = bets[0];
   if (
     bet.projectId !== project.id ||
-    timestampIsEffectiveAt(bet.invalidatedAt, now) ||
+    bet.invalidatedAt !== undefined ||
     !bet.committedScope.some(({ id }) => id === workItem.betScopeId)
   ) {
     return undefined;
@@ -1853,7 +1836,7 @@ function buildAuthorizationContext(
     }));
   const expandsScope =
     command.type === "update_work_item"
-      ? classifyWorkItemScopeExpansion(workspace, command, context.now)
+      ? classifyWorkItemScopeExpansion(workspace, command)
       : undefined;
 
   return {
@@ -2154,6 +2137,67 @@ async function rejectedResult(
     ),
     rejection,
   };
+}
+
+/**
+ * Persistence adapters use this helper when a command ID was already observed
+ * outside the current Workspace (for example in the append-only rejection
+ * receipt store). Keeping receipt construction here preserves the domain's
+ * canonical payload and receipt hashing rules.
+ */
+export async function duplicateCommandResult(
+  workspace: WorkspaceV2,
+  command: V2Command,
+  context: CommandContext,
+  existingReceipt?: CommandReceipt,
+): Promise<Extract<CommandResult, { ok: false }>> {
+  const commandSnapshot: unknown = structuredClone(command);
+  const contextSnapshot = structuredClone(context);
+  const commandType = normalizedCommandType(commandSnapshot);
+  return rejectedResult(
+    workspace,
+    commandSnapshot,
+    commandType,
+    contextSnapshot,
+    createCommandRejection(
+      "DUPLICATE_COMMAND",
+      {
+        actorKind: contextSnapshot.actorKind,
+        origin: contextSnapshot.origin,
+        workspaceRevision: workspace.revision,
+      },
+      existingReceipt === undefined
+        ? undefined
+        : {
+            reason: `Command ${contextSnapshot.commandId} already has a ${existingReceipt.status} receipt.`,
+            gate: `command_id:${contextSnapshot.commandId}`,
+            permittedNextCommand: "read_existing_command_receipt",
+          },
+    ),
+    workspace.revision,
+  );
+}
+
+/** Canonical CAS-loss rejection for persistence adapters. */
+export async function revisionConflictResult(
+  workspace: WorkspaceV2,
+  command: V2Command,
+  context: CommandContext,
+): Promise<Extract<CommandResult, { ok: false }>> {
+  const commandSnapshot: unknown = structuredClone(command);
+  const contextSnapshot = structuredClone(context);
+  return rejectedResult(
+    workspace,
+    commandSnapshot,
+    normalizedCommandType(commandSnapshot),
+    contextSnapshot,
+    createCommandRejection("REVISION_CONFLICT", {
+      actorKind: contextSnapshot.actorKind,
+      origin: contextSnapshot.origin,
+      workspaceRevision: workspace.revision,
+    }),
+    workspace.revision,
+  );
 }
 
 export async function executeCommand(

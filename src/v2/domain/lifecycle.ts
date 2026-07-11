@@ -157,19 +157,10 @@ export function evaluateBetBoundary(
     const matchingBets = betsById.get(project.activeBetId) ?? [];
     if (matchingBets.length !== 1) continue;
     const bet = matchingBets[0];
-    const invalidatedAt =
-      bet?.invalidatedAt === undefined
-        ? undefined
-        : Date.parse(bet.invalidatedAt);
-    const invalidationIsEffective =
-      invalidatedAt !== undefined &&
-      Number.isFinite(invalidatedAt) &&
-      new Date(invalidatedAt).toISOString() === bet?.invalidatedAt &&
-      invalidatedAt <= nowMilliseconds;
     if (
       bet === undefined ||
       bet.projectId !== project.id ||
-      invalidationIsEffective
+      bet.invalidatedAt !== undefined
     ) {
       continue;
     }

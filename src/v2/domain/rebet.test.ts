@@ -13,6 +13,7 @@ import {
   type DirectionBriefDraft,
   type V2Command,
 } from "./commands";
+import { validateWorkspaceInvariants } from "./invariants";
 import { evaluateBetBoundary } from "./lifecycle";
 import type {
   BetVersion,
@@ -176,6 +177,70 @@ function activeWorkspace(
     workItems: [structuredClone(WORK_ITEM)],
     ...overrides,
   });
+}
+
+function twoExpiredProjectsWorkspace(): WorkspaceV2 {
+  const workspace = activeWorkspace("executing");
+  const secondBrief: DirectionBrief = {
+    ...structuredClone(BRIEF),
+    id: "brief-2",
+    projectId: "project-2",
+    firstScope: [
+      {
+        id: "scope-2",
+        title: "Second guided project start",
+        description: "Direction through the second committed plan.",
+      },
+    ],
+  };
+  const secondBet: BetVersion = {
+    ...structuredClone(BET),
+    id: "bet-2",
+    projectId: "project-2",
+    briefId: secondBrief.id,
+    briefSnapshot: structuredClone(secondBrief),
+    committedScope: structuredClone(secondBrief.firstScope),
+  };
+  const secondWorkItem: ProjectWorkItem = {
+    ...structuredClone(WORK_ITEM),
+    id: "work-item-2",
+    projectId: "project-2",
+    betScopeId: "scope-2",
+  };
+
+  workspace.projects.push(
+    buildProjectV2({
+      id: "project-2",
+      name: "Second guided planning",
+      priority: 2,
+      notes: "Second project notes",
+      stage: "executing",
+      activeDirectionBriefId: secondBrief.id,
+      activeBetId: secondBet.id,
+      activePlanVersionId: "plan-2",
+      createdAt: APPROVED_AT,
+      updatedAt: APPROVED_AT,
+    }),
+  );
+  workspace.directionBriefs.push(secondBrief);
+  workspace.bets.push(secondBet);
+  workspace.planVersions.push({
+    id: "plan-2",
+    projectId: "project-2",
+    version: 1,
+    betId: secondBet.id,
+    workItemRevisions: { [secondWorkItem.id]: secondWorkItem.revision },
+    dependencyRevisions: {},
+    scopeMapping: { [secondWorkItem.id]: secondWorkItem.betScopeId },
+    scheduleHash: "plan-hash-2",
+    capacityIndependentDates: {
+      [secondWorkItem.id]: { start: APPROVED_AT, finish: MIDPOINT },
+    },
+    actorId: "human-1",
+    createdAt: APPROVED_AT,
+  });
+  workspace.workItems.push(secondWorkItem);
+  return workspace;
 }
 
 function rebetWorkspace(stage: LifecycleStage): WorkspaceV2 {
@@ -656,6 +721,91 @@ describe("Bet appetite boundary", () => {
       expect(result.workspace.reviews).toEqual([]);
     },
   );
+
+  it("catches up simultaneous expiries one canonical boundary at a time while unrelated commands stay blocked", async () => {
+    const firstExpiry = applied(
+      await executeCommand(
+        twoExpiredProjectsWorkspace(),
+        {
+          type: "record_bet_boundary",
+          projectId: "project-1",
+          boundary: "expired",
+          triggerKey: "bet-1:expired",
+        },
+        systemContext(APPETITE_END, {
+          commandId: "expire-project-1",
+        }),
+      ),
+    );
+
+    expect(firstExpiry.workspace.projects).toMatchObject([
+      {
+        id: "project-1",
+        stage: "validating",
+        activeBetId: "bet-1",
+        holds: [
+          {
+            type: "rebet_required",
+            sourceId: "bet-1",
+            affectedRecordIds: ["project-1", "bet-1"],
+            createdAt: APPETITE_END,
+          },
+        ],
+      },
+      {
+        id: "project-2",
+        stage: "executing",
+        activeBetId: "bet-2",
+        holds: [],
+      },
+    ]);
+
+    const unrelated = rejected(
+      await executeCommand(
+        firstExpiry.workspace,
+        {
+          type: "capture_inbox",
+          id: "unrelated-during-expiry-catch-up",
+          text: "This must wait for the remaining expiry boundary.",
+        },
+        context({
+          commandId: "unrelated-during-expiry-catch-up",
+          expectedRevision: firstExpiry.workspace.revision,
+          now: APPETITE_END,
+        }),
+      ),
+    );
+    expect(unrelated.rejection).toMatchObject({
+      code: "BET_EXPIRED",
+      gate: "bet:bet-2:appetite_end",
+      permittedNextCommand: "record_bet_boundary",
+    });
+    expect(unrelated.workspace).toBe(firstExpiry.workspace);
+
+    const secondExpiry = applied(
+      await executeCommand(
+        firstExpiry.workspace,
+        {
+          type: "record_bet_boundary",
+          projectId: "project-2",
+          boundary: "expired",
+          triggerKey: "bet-2:expired",
+        },
+        systemContext(APPETITE_END, {
+          commandId: "expire-project-2",
+          expectedRevision: firstExpiry.workspace.revision,
+        }),
+      ),
+    );
+
+    expect(secondExpiry.workspace.projects).toMatchObject([
+      { id: "project-1", stage: "validating", activeBetId: "bet-1" },
+      { id: "project-2", stage: "validating", activeBetId: "bet-2" },
+    ]);
+    expect(
+      validateWorkspaceInvariants(secondExpiry.workspace, APPETITE_END),
+    ).toEqual([]);
+  });
 
   it("blocks new scheduling and continuing execution immediately after expiry", async () => {
     const expired = applied(

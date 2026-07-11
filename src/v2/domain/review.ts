@@ -648,7 +648,7 @@ function weeklyReviewDraft(
   const activeProjectIds = new Set(activeProjects.map(({ id }) => id));
   const activeBets = workspace.bets.filter(
     (bet) =>
-      !optionalTimestampIsEffective(bet.invalidatedAt, now) &&
+      bet.invalidatedAt === undefined &&
       activeProjects.some(
         (project) =>
           project.id === bet.projectId && project.activeBetId === bet.id,

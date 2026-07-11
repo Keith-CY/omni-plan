@@ -456,6 +456,117 @@ function isFrozenHistoricalPlan(
   });
 }
 
+function isSameHold(
+  left: ProjectV2["holds"][number],
+  right: ProjectV2["holds"][number],
+): boolean {
+  return (
+    left.type === right.type &&
+    left.sourceId === right.sourceId &&
+    left.createdAt === right.createdAt &&
+    left.affectedRecordIds.length === right.affectedRecordIds.length &&
+    left.affectedRecordIds.every(
+      (recordId, index) => recordId === right.affectedRecordIds[index],
+    )
+  );
+}
+
+/**
+ * A command candidate is normally required to leave the whole Workspace valid.
+ * Catching up several Bet expiries is the one case that must make that progress
+ * one Project at a time. Keep the exception structural so no unrelated command
+ * can use another Project's expired Bet as a temporary invariant bypass.
+ */
+function isCanonicalExpiredBoundaryCatchUp(
+  workspace: WorkspaceV2,
+  previousWorkspace: WorkspaceV2 | undefined,
+  now: ISODate,
+): boolean {
+  if (previousWorkspace === undefined || !isCanonicalTimestamp(now)) {
+    return false;
+  }
+
+  const candidateProjectsById = indexById(workspace.projects);
+  const previousProjectsById = indexById(previousWorkspace.projects);
+  if (
+    workspace.projects.length !== previousWorkspace.projects.length ||
+    candidateProjectsById.size !== workspace.projects.length ||
+    previousProjectsById.size !== previousWorkspace.projects.length
+  ) {
+    return false;
+  }
+
+  const changedProjects: Array<{
+    candidate: ProjectV2;
+    previous: ProjectV2;
+  }> = [];
+  for (const previousProject of sortedById(previousWorkspace.projects)) {
+    const candidateProject = candidateProjectsById.get(previousProject.id);
+    if (candidateProject === undefined) {
+      return false;
+    }
+    if (!sameStructure(candidateProject, previousProject)) {
+      changedProjects.push({
+        candidate: candidateProject,
+        previous: previousProject,
+      });
+    }
+  }
+  if (changedProjects.length !== 1) {
+    return false;
+  }
+
+  const [{ candidate, previous }] = changedProjects;
+  if (
+    (previous.stage !== "planning" && previous.stage !== "executing") ||
+    previous.activeBetId === undefined
+  ) {
+    return false;
+  }
+  const matchingBets = previousWorkspace.bets.filter(
+    (bet) =>
+      bet.id === previous.activeBetId &&
+      bet.projectId === previous.id &&
+      bet.invalidatedAt === undefined,
+  );
+  if (
+    matchingBets.length !== 1 ||
+    !isAtOrBefore(matchingBets[0].appetiteEnd, now)
+  ) {
+    return false;
+  }
+
+  const bet = matchingBets[0];
+  const expectedHolds: ProjectV2["holds"] = [
+    ...previous.holds.filter(({ type }) => type !== "rebet_required"),
+    {
+      type: "rebet_required",
+      sourceId: bet.id,
+      affectedRecordIds: [previous.id, bet.id],
+      createdAt: now,
+    },
+  ];
+  const expectedProject: ProjectV2 = {
+    ...previous,
+    stage: "validating",
+    holds: expectedHolds,
+    updatedAt: now,
+  };
+  if (
+    !sameStructure(candidate, expectedProject) ||
+    candidate.holds.length !== expectedHolds.length ||
+    !candidate.holds.every((hold, index) =>
+      isSameHold(hold, expectedHolds[index]),
+    )
+  ) {
+    return false;
+  }
+
+  const { projects: _candidateProjects, ...candidateRest } = workspace;
+  const { projects: _previousProjects, ...previousRest } = previousWorkspace;
+  return sameStructure(candidateRest, previousRest);
+}
+
 function validateBetRules(
   workspace: WorkspaceV2,
   now: ISODate,
@@ -475,6 +586,8 @@ function validateBetRules(
   const previousCommitmentsById = indexById(
     previousWorkspace?.dailyCommitments ?? [],
   );
+  const canonicalExpiredBoundaryCatchUp =
+    isCanonicalExpiredBoundaryCatchUp(workspace, previousWorkspace, now);
 
   for (const project of sortedById(workspace.projects)) {
     const currentBets = sortedById(
@@ -552,7 +665,8 @@ function validateBetRules(
     if (
       project.stage === "executing" &&
       validActiveBet !== undefined &&
-      isAtOrBefore(validActiveBet.appetiteEnd, now)
+      isAtOrBefore(validActiveBet.appetiteEnd, now) &&
+      !canonicalExpiredBoundaryCatchUp
     ) {
       add(
         "BET_EXPIRED",

@@ -539,6 +539,26 @@ describe("weekly portfolio Review derivation", () => {
     expect(weekly?.affectedRecordIds).not.toContain("project-closed");
   });
 
+  it.each([
+    ["future", "2026-07-09T00:00:00.000Z"],
+    ["malformed", "not-a-timestamp"],
+  ] as const)(
+    "omits a %s-invalidated Bet from the weekly active-Bet rollup",
+    (_label, invalidatedAt) => {
+      const workspace = activeProjectWorkspace();
+      workspace.projects[0].holds = [];
+      workspace.syncConflicts = [];
+      workspace.bets[0].invalidatedAt = invalidatedAt;
+      workspace.bets[0].invalidationReason = "Immediate tombstone test.";
+
+      const weekly = deriveReviewQueue(workspace, NOW).find(
+        ({ triggerType }) => triggerType === "weekly",
+      );
+
+      expect(weekly?.affectedRecordIds).not.toContain("bet-1");
+    },
+  );
+
   it("still derives the fixed weekly occurrence for an empty active portfolio", () => {
     const workspace = buildWorkspaceV2("workspace-empty", {
       capacityProfile: profile("UTC"),
@@ -1053,12 +1073,12 @@ describe("event-triggered Review derivation", () => {
   });
 
   it.each([
-    ["future", "2026-07-09T00:00:00.000Z", true],
+    ["future", "2026-07-09T00:00:00.000Z", false],
     ["exact-now", NOW, false],
     ["past", "2026-07-07T00:00:00.000Z", false],
-    ["malformed", "not-a-timestamp", true],
+    ["malformed", "not-a-timestamp", false],
   ] as const)(
-    "treats %s Bet invalidation with canonical as-of semantics",
+    "treats %s Bet invalidation as an immediate tombstone",
     (_label, invalidatedAt, expectedActive) => {
       const workspace = activeProjectWorkspace();
       workspace.bets[0].invalidatedAt = invalidatedAt;
@@ -3216,6 +3236,26 @@ describe("Review policy recovery commands", () => {
     expect(missingBet.ok).toBe(false);
     if (missingBet.ok) throw new Error("Expected missing Bet fail closed");
     expect(missingBet.rejection.code).toBe("HOLD_BLOCKS_COMMAND");
+
+    for (const [label, invalidatedAt] of [
+      ["future", "2026-07-09T00:00:00.000Z"],
+      ["malformed", "not-a-timestamp"],
+    ] as const) {
+      const invalidatedBetWorkspace = overdueScopeWorkspace();
+      invalidatedBetWorkspace.bets[0].invalidatedAt = invalidatedAt;
+      invalidatedBetWorkspace.bets[0].invalidationReason =
+        "Immediate tombstone test.";
+      const invalidatedBet = await executeUpdate(
+        invalidatedBetWorkspace,
+        { title: `Cannot refine through ${label} Bet tombstone` },
+        `block-${label}-invalidated-bet`,
+      );
+      expect(invalidatedBet.ok).toBe(false);
+      if (invalidatedBet.ok) {
+        throw new Error(`Expected ${label} invalidated Bet to fail closed`);
+      }
+      expect(invalidatedBet.rejection.code).toBe("HOLD_BLOCKS_COMMAND");
+    }
   });
 });
 
