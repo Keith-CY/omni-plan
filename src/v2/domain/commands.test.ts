@@ -1287,9 +1287,9 @@ describe("executeCommand rejection precedence and atomicity", () => {
   it("returns COMMAND_NOT_IMPLEMENTED for a recognized human-authorized command", async () => {
     const workspace = buildWorkspaceV2("workspace-1");
     const command = {
-      type: "update_project_metadata",
+      type: "archive_project",
       projectId: "missing-project",
-      name: "Future handler",
+      archived: true,
     } as const satisfies V2Command;
 
     const result = rejected(
@@ -1905,7 +1905,7 @@ describe("executeCommand trusted policy projection", () => {
       }),
     );
 
-    expect(validResult.rejection.code).toBe("COMMAND_NOT_IMPLEMENTED");
+    expect(validResult.rejection.code).toBe("BET_REQUIRED");
     expect(missingResult.rejection).toMatchObject({
       code: "SOURCE_NOT_AUTHORIZED",
       gate: "deterministic_trigger_key",

@@ -1,4 +1,5 @@
-import type { LifecycleStage, ProjectV2 } from "./types";
+import type { ReviewDraft, V2Command } from "./commands";
+import type { LifecycleStage, ProjectV2, WorkspaceV2 } from "./types";
 
 export type LifecycleEvent =
   | "brief_completed"
@@ -20,6 +21,11 @@ export type LifecycleTransitionResult =
       code: "ILLEGAL_LIFECYCLE_TRANSITION";
       project: ProjectV2;
     };
+
+export interface BetBoundaryProposal {
+  command: Extract<V2Command, { type: "record_bet_boundary" }>;
+  review: ReviewDraft;
+}
 
 const transitions: Record<
   LifecycleStage,
@@ -89,4 +95,109 @@ export function transitionLifecycle(
     ok: true,
     project: { ...project, stage: nextStage },
   };
+}
+
+function compareText(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function boundaryTimestamp(
+  appetiteStart: string,
+  appetiteEnd: string,
+  boundary: "midpoint" | "expired",
+): string | undefined {
+  const start = Date.parse(appetiteStart);
+  const end = Date.parse(appetiteEnd);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
+    return undefined;
+  }
+
+  return boundary === "expired"
+    ? new Date(end).toISOString()
+    : new Date(start + (end - start) / 2).toISOString();
+}
+
+/**
+ * Derives deterministic system commands and Review drafts from Bet time.
+ * This projection never mutates the Workspace and never extends or replaces a Bet.
+ */
+export function evaluateBetBoundary(
+  workspace: WorkspaceV2,
+  now: string,
+): BetBoundaryProposal[] {
+  const nowMilliseconds = Date.parse(now);
+  if (!Number.isFinite(nowMilliseconds)) return [];
+
+  const betsById = new Map(workspace.bets.map((bet) => [bet.id, bet]));
+  const persistedTriggerKeys = new Set(
+    workspace.reviews.map(({ triggerKey }) => triggerKey),
+  );
+  const proposals: BetBoundaryProposal[] = [];
+
+  for (const project of [...workspace.projects].sort((left, right) =>
+    compareText(left.id, right.id),
+  )) {
+    if (
+      project.activeBetId === undefined ||
+      !["planning", "executing", "validating"].includes(project.stage)
+    ) {
+      continue;
+    }
+
+    const bet = betsById.get(project.activeBetId);
+    if (
+      bet === undefined ||
+      bet.projectId !== project.id ||
+      bet.invalidatedAt !== undefined
+    ) {
+      continue;
+    }
+
+    const midpoint = boundaryTimestamp(
+      bet.appetiteStart,
+      bet.appetiteEnd,
+      "midpoint",
+    );
+    const expired = boundaryTimestamp(
+      bet.appetiteStart,
+      bet.appetiteEnd,
+      "expired",
+    );
+    if (midpoint === undefined || expired === undefined) continue;
+
+    const reachedBoundaries: Array<"midpoint" | "expired"> = [];
+    if (nowMilliseconds >= Date.parse(midpoint)) {
+      reachedBoundaries.push("midpoint");
+    }
+    if (nowMilliseconds >= Date.parse(expired)) {
+      reachedBoundaries.push("expired");
+    }
+
+    for (const boundary of reachedBoundaries) {
+      const triggerKey = `${bet.id}:${boundary}`;
+      if (persistedTriggerKeys.has(triggerKey)) continue;
+      const dueAt = boundary === "expired" ? expired : midpoint;
+
+      proposals.push({
+        command: {
+          type: "record_bet_boundary",
+          projectId: project.id,
+          boundary,
+          triggerKey,
+        },
+        review: {
+          id: `review:${triggerKey}`,
+          kind: "event",
+          triggerKey,
+          triggerType:
+            boundary === "expired" ? "bet_expired" : "bet_midpoint",
+          affectedProjectIds: [project.id],
+          affectedRecordIds: [bet.id],
+          dueAt,
+        },
+      });
+    }
+  }
+
+  return proposals;
 }

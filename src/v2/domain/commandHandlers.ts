@@ -1,7 +1,11 @@
 import { createCommandRejection, type CommandRejection } from "./errors";
 import type { CommandContext, V2Command } from "./commands";
 import { evaluateActionEligibility } from "./actionPolicy";
-import { buildBetVersion, isDirectionComplete } from "./direction";
+import {
+  buildBetVersion,
+  isDirectionComplete,
+  isMaterialDirectionChange,
+} from "./direction";
 import { transitionLifecycle } from "./lifecycle";
 import type {
   Action,
@@ -787,7 +791,27 @@ export async function applyCommandHandler(
           permittedNextCommand: "update_direction",
         });
       }
-      if (project.stage !== "direction" && project.stage !== "awaiting_bet") {
+      const activeBetStage =
+        project.stage === "planning" ||
+        project.stage === "executing" ||
+        project.stage === "validating";
+      if (activeBetStage && project.activeBetId === undefined) {
+        return rejection(
+          workspace,
+          context,
+          "ILLEGAL_LIFECYCLE_TRANSITION",
+          {
+            reason: `Project ${project.id} cannot replace its active Direction draft from ${project.stage} without an active Bet.`,
+            gate: `project:${project.id}:stage:${project.stage}`,
+            permittedNextCommand: "update_direction",
+          },
+        );
+      }
+      if (
+        !activeBetStage &&
+        project.stage !== "direction" &&
+        project.stage !== "awaiting_bet"
+      ) {
         return rejection(
           workspace,
           context,
@@ -798,6 +822,161 @@ export async function applyCommandHandler(
             permittedNextCommand: "update_direction",
           },
         );
+      }
+
+      if (activeBetStage) {
+        const comparisonBrief: DirectionBrief = {
+          ...structuredClone(command.brief),
+          version: activeBrief.version + 1,
+          createdAt: context.now,
+          updatedAt: context.now,
+        };
+        if (!(await isMaterialDirectionChange(activeBrief, comparisonBrief))) {
+          const nextVersion =
+            Math.max(
+              0,
+              ...workspace.directionBriefs
+                .filter(({ projectId }) => projectId === project.id)
+                .map(({ version }) => version),
+            ) + 1;
+          const nextBriefId = `${project.id}:direction-brief:${nextVersion}`;
+          const collision = entityIdCollision(workspace, nextBriefId, [
+            { entity: "CommandReceipt", id: context.commandId },
+          ]);
+          if (collision !== undefined) {
+            return entityAlreadyExists(
+              workspace,
+              context,
+              collision,
+              nextBriefId,
+              "update_direction",
+            );
+          }
+          const editorialBrief: DirectionBrief = {
+            ...structuredClone(command.brief),
+            id: nextBriefId,
+            version: nextVersion,
+            createdAt: context.now,
+            updatedAt: context.now,
+          };
+          const projects = [...workspace.projects];
+          projects[projectIndex] = {
+            ...project,
+            activeDirectionBriefId: editorialBrief.id,
+            updatedAt: context.now,
+          };
+          return {
+            ok: true,
+            workspace: {
+              ...workspace,
+              projects,
+              directionBriefs: [
+                ...workspace.directionBriefs,
+                editorialBrief,
+              ],
+            },
+          };
+        }
+
+        if (project.activeBetId === undefined) {
+          return rejection(workspace, context, "BET_REQUIRED", {
+            reason: `Project ${project.id} has no Bet to invalidate.`,
+            gate: `project:${project.id}:current_bet`,
+            permittedNextCommand: "place_bet",
+          });
+        }
+        const betIndex = workspace.bets.findIndex(
+          ({ id }) => id === project.activeBetId,
+        );
+        const activeBet = workspace.bets[betIndex];
+        if (activeBet === undefined || activeBet.projectId !== project.id) {
+          return entityNotFound(
+            workspace,
+            context,
+            "BetVersion",
+            project.activeBetId,
+            "place_bet",
+          );
+        }
+
+        const nextVersion =
+          Math.max(
+            0,
+            ...workspace.directionBriefs
+              .filter(({ projectId }) => projectId === project.id)
+              .map(({ version }) => version),
+          ) + 1;
+        const nextBriefId = `${project.id}:direction-brief:${nextVersion}`;
+        const collision = entityIdCollision(workspace, nextBriefId, [
+          { entity: "CommandReceipt", id: context.commandId },
+        ]);
+        if (collision !== undefined) {
+          return entityAlreadyExists(
+            workspace,
+            context,
+            collision,
+            nextBriefId,
+            "update_direction",
+          );
+        }
+
+        const updatedBrief: DirectionBrief = {
+          ...structuredClone(command.brief),
+          id: nextBriefId,
+          version: nextVersion,
+          createdAt: context.now,
+          updatedAt: context.now,
+        };
+        const affectedRecordIds = [
+          project.id,
+          activeBrief.id,
+          updatedBrief.id,
+          activeBet.id,
+        ];
+        const projects = [...workspace.projects];
+        const existingRebetHold = project.holds.find(
+          ({ type, sourceId }) =>
+            type === "rebet_required" && sourceId === activeBet.id,
+        );
+        projects[projectIndex] = {
+          ...project,
+          holds:
+            activeBet.invalidatedAt !== undefined &&
+            existingRebetHold !== undefined
+              ? project.holds
+              : [
+                  ...project.holds.filter(
+                    ({ type }) => type !== "rebet_required",
+                  ),
+                  {
+                    type: "rebet_required",
+                    sourceId: activeBet.id,
+                    affectedRecordIds,
+                    createdAt: context.now,
+                  },
+                ],
+          activeDirectionBriefId: updatedBrief.id,
+          updatedAt: context.now,
+        };
+        const bets = [...workspace.bets];
+        bets[betIndex] =
+          activeBet.invalidatedAt === undefined
+            ? {
+                ...activeBet,
+                invalidatedAt: context.now,
+                invalidationReason: "Material Direction change requires Re-bet.",
+              }
+            : activeBet;
+
+        return {
+          ok: true,
+          workspace: {
+            ...workspace,
+            projects,
+            directionBriefs: [...workspace.directionBriefs, updatedBrief],
+            bets,
+          },
+        };
       }
 
       const complete = isDirectionComplete(command.brief);
@@ -869,14 +1048,28 @@ export async function applyCommandHandler(
         );
       }
       const project = workspace.projects[projectIndex];
-      const transition = transitionLifecycle(project, "bet_placed");
-      if (!transition.ok || project.activeBetId !== undefined) {
+      const projectBets = workspace.bets.filter(
+        ({ projectId }) => projectId === project.id,
+      );
+      const placingFirstBet = project.activeBetId === undefined;
+      const transition = transitionLifecycle(
+        project,
+        placingFirstBet ? "bet_placed" : "bet_replaced",
+      );
+      if (
+        !transition.ok ||
+        (placingFirstBet
+          ? project.stage !== "awaiting_bet"
+          : project.activeBetId === undefined)
+      ) {
         return rejection(
           workspace,
           context,
           "ILLEGAL_LIFECYCLE_TRANSITION",
           {
-            reason: `Project ${project.id} cannot place a first Bet from ${project.stage}.`,
+            reason: placingFirstBet
+              ? `Project ${project.id} cannot place a first Bet from ${project.stage}.`
+              : `Project ${project.id} cannot place a replacement Bet from ${project.stage}.`,
             gate: `project:${project.id}:stage:${project.stage}`,
             permittedNextCommand: "place_bet",
           },
@@ -914,7 +1107,7 @@ export async function applyCommandHandler(
           "place_bet",
         );
       }
-      if (workspace.bets.some((bet) => bet.projectId === project.id)) {
+      if (placingFirstBet && projectBets.length > 0) {
         return rejection(
           workspace,
           context,
@@ -956,30 +1149,98 @@ export async function applyCommandHandler(
         });
       }
 
+      const supersededBetIndex = placingFirstBet
+        ? -1
+        : workspace.bets.findIndex(({ id }) => id === project.activeBetId);
+      const supersededBet = workspace.bets[supersededBetIndex];
+      if (
+        !placingFirstBet &&
+        (supersededBet === undefined || supersededBet.projectId !== project.id)
+      ) {
+        return entityNotFound(
+          workspace,
+          context,
+          "BetVersion",
+          project.activeBetId!,
+          "place_bet",
+        );
+      }
       const bet = await buildBetVersion(brief, {
         id: command.betId,
-        version: 1,
+        version: placingFirstBet
+          ? 1
+          : Math.max(0, ...projectBets.map(({ version }) => version)) + 1,
         actorId: context.actorId,
         approvedAt: context.now,
+        ...(placingFirstBet
+          ? {}
+          : { supersedesId: project.activeBetId! }),
       });
       const projects = [...workspace.projects];
+      const transitionedProject = { ...transition.project };
+      if (!placingFirstBet) {
+        delete transitionedProject.activePlanVersionId;
+      }
       projects[projectIndex] = {
-        ...transition.project,
+        ...transitionedProject,
+        holds: placingFirstBet
+          ? transition.project.holds
+          : transition.project.holds.filter(
+              ({ type }) => type !== "rebet_required",
+            ),
         activeBetId: bet.id,
         updatedAt: context.now,
       };
+      const bets = [...workspace.bets];
+      if (
+        !placingFirstBet &&
+        supersededBet !== undefined &&
+        supersededBet.invalidatedAt === undefined
+      ) {
+        bets[supersededBetIndex] = {
+          ...supersededBet,
+          invalidatedAt: context.now,
+          invalidationReason: `Superseded by Re-bet ${bet.id}.`,
+        };
+      }
 
       return {
         ok: true,
         workspace: {
           ...workspace,
           projects,
-          bets: [...workspace.bets, bet],
+          bets: [...bets, bet],
         },
       };
     }
 
-    case "update_project_metadata":
+    case "update_project_metadata": {
+      const projectIndex = workspace.projects.findIndex(
+        ({ id }) => id === command.projectId,
+      );
+      if (projectIndex < 0) {
+        return entityNotFound(
+          workspace,
+          context,
+          "ProjectV2",
+          command.projectId,
+          "confirm_project_triage",
+        );
+      }
+      const project = workspace.projects[projectIndex];
+      const projects = [...workspace.projects];
+      projects[projectIndex] = {
+        ...project,
+        ...(command.name === undefined ? {} : { name: command.name }),
+        ...(command.priority === undefined
+          ? {}
+          : { priority: command.priority }),
+        ...(command.notes === undefined ? {} : { notes: command.notes }),
+        updatedAt: context.now,
+      };
+      return { ok: true, workspace: { ...workspace, projects } };
+    }
+
     case "create_work_item":
     case "update_work_item":
     case "propose_replan":
@@ -991,13 +1252,238 @@ export async function applyCommandHandler(
     case "resolve_evidence_exception":
     case "request_validation":
     case "satisfy_validation":
-    case "record_bet_boundary":
+      return notImplemented(workspace, context);
+
+    case "record_bet_boundary": {
+      const projectIndex = workspace.projects.findIndex(
+        ({ id }) => id === command.projectId,
+      );
+      if (projectIndex < 0) {
+        return entityNotFound(
+          workspace,
+          context,
+          "ProjectV2",
+          command.projectId,
+          "confirm_project_triage",
+        );
+      }
+      const project = workspace.projects[projectIndex];
+      if (project.activeBetId === undefined) {
+        return rejection(workspace, context, "BET_REQUIRED", {
+          reason: `Project ${project.id} has no active Bet boundary to record.`,
+          gate: `project:${project.id}:current_bet`,
+          permittedNextCommand: "place_bet",
+        });
+      }
+      const bet = workspace.bets.find(({ id }) => id === project.activeBetId);
+      if (
+        bet === undefined ||
+        bet.projectId !== project.id ||
+        bet.invalidatedAt !== undefined
+      ) {
+        return rejection(workspace, context, "BET_REQUIRED", {
+          reason: `Project ${project.id} has no current Bet boundary to record.`,
+          gate: `project:${project.id}:current_bet`,
+          permittedNextCommand: "place_bet",
+        });
+      }
+      const expectedTriggerKey = `${bet.id}:${command.boundary}`;
+      if (command.triggerKey !== expectedTriggerKey) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason: `Bet boundary trigger must be ${expectedTriggerKey}.`,
+          gate: `bet:${bet.id}:${command.boundary}:trigger_key`,
+          permittedNextCommand: "record_bet_boundary",
+        });
+      }
+      if (!isCanonicalIsoTimestamp(context.now)) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason: "Bet boundary time must be a canonical ISO timestamp.",
+          gate: `bet:${bet.id}:${command.boundary}:time`,
+          permittedNextCommand: "record_bet_boundary",
+        });
+      }
+      const start = Date.parse(bet.appetiteStart);
+      const end = Date.parse(bet.appetiteEnd);
+      const now = Date.parse(context.now);
+      const midpoint = start + (end - start) / 2;
+      if (
+        !Number.isFinite(start) ||
+        !Number.isFinite(end) ||
+        end <= start ||
+        (command.boundary === "midpoint"
+          ? now < midpoint
+          : now < end)
+      ) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason: `Bet ${bet.id} has not reached its ${command.boundary} boundary.`,
+          gate: `bet:${bet.id}:${command.boundary}`,
+          permittedNextCommand: "record_bet_boundary",
+        });
+      }
+      if (
+        project.stage !== "planning" &&
+        project.stage !== "executing" &&
+        project.stage !== "validating"
+      ) {
+        return rejection(
+          workspace,
+          context,
+          "ILLEGAL_LIFECYCLE_TRANSITION",
+          {
+            reason: `Project ${project.id} cannot record a Bet boundary from ${project.stage}.`,
+            gate: `project:${project.id}:stage:${project.stage}`,
+            permittedNextCommand: "record_bet_boundary",
+          },
+        );
+      }
+
+      if (command.boundary === "midpoint") {
+        return { ok: true, workspace };
+      }
+
+      let transitionedProject = project;
+      if (project.stage === "planning" || project.stage === "executing") {
+        const transition = transitionLifecycle(project, "appetite_expired");
+        if (!transition.ok) {
+          return rejection(
+            workspace,
+            context,
+            "ILLEGAL_LIFECYCLE_TRANSITION",
+            {
+              gate: `project:${project.id}:stage:${project.stage}`,
+              permittedNextCommand: "record_bet_boundary",
+            },
+          );
+        }
+        transitionedProject = transition.project;
+      }
+      const projects = [...workspace.projects];
+      const existingBoundaryHold = project.holds.find(
+        ({ type, sourceId }) =>
+          type === "rebet_required" && sourceId === bet.id,
+      );
+      projects[projectIndex] = {
+        ...transitionedProject,
+        holds:
+          existingBoundaryHold === undefined
+            ? [
+                ...project.holds.filter(
+                  ({ type }) => type !== "rebet_required",
+                ),
+                {
+                  type: "rebet_required",
+                  sourceId: bet.id,
+                  affectedRecordIds: [project.id, bet.id],
+                  createdAt: context.now,
+                },
+              ]
+            : project.holds,
+        updatedAt: context.now,
+      };
+      return { ok: true, workspace: { ...workspace, projects } };
+    }
+
     case "mark_review_overdue":
     case "create_review":
     case "complete_review":
     case "resolve_sync_conflict":
     case "close_project":
-    case "abandon_project":
+      return notImplemented(workspace, context);
+
+    case "abandon_project": {
+      const projectIndex = workspace.projects.findIndex(
+        ({ id }) => id === command.projectId,
+      );
+      if (projectIndex < 0) {
+        return entityNotFound(
+          workspace,
+          context,
+          "ProjectV2",
+          command.projectId,
+          "confirm_project_triage",
+        );
+      }
+      const project = workspace.projects[projectIndex];
+      if (
+        command.decision.projectId !== project.id ||
+        command.decision.successComparison.trim().length === 0 ||
+        command.decision.keyLearning.trim().length === 0 ||
+        (command.decision.unfinishedDisposition === "follow_up_project" &&
+          (command.decision.followUpProjectId === undefined ||
+            command.decision.followUpProjectId.trim().length === 0))
+      ) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason:
+            "Abandon requires a structured comparison, learning, and unfinished-work disposition.",
+          gate: `project:${project.id}:abandon_decision`,
+          permittedNextCommand: "abandon_project",
+        });
+      }
+      const collision = entityIdCollision(workspace, command.decision.id, [
+        { entity: "CommandReceipt", id: context.commandId },
+      ]);
+      if (collision !== undefined) {
+        return entityAlreadyExists(
+          workspace,
+          context,
+          collision,
+          command.decision.id,
+          "abandon_project",
+        );
+      }
+      const abandonTransition = transitionLifecycle(
+        project,
+        "abandon_confirmed",
+      );
+      if (!abandonTransition.ok) {
+        return rejection(
+          workspace,
+          context,
+          "ILLEGAL_LIFECYCLE_TRANSITION",
+          {
+            reason: `Project ${project.id} cannot be abandoned from ${project.stage}.`,
+            gate: `project:${project.id}:stage:${project.stage}`,
+            permittedNextCommand: "abandon_project",
+          },
+        );
+      }
+      const closeTransition = transitionLifecycle(
+        abandonTransition.project,
+        "project_closed",
+      );
+      if (!closeTransition.ok) {
+        return rejection(
+          workspace,
+          context,
+          "ILLEGAL_LIFECYCLE_TRANSITION",
+          {
+            gate: `project:${project.id}:stage:${abandonTransition.project.stage}`,
+            permittedNextCommand: "abandon_project",
+          },
+        );
+      }
+      const projects = [...workspace.projects];
+      projects[projectIndex] = {
+        ...closeTransition.project,
+        updatedAt: context.now,
+      };
+      return {
+        ok: true,
+        workspace: {
+          ...workspace,
+          projects,
+          closeDecisions: [
+            ...workspace.closeDecisions,
+            {
+              ...structuredClone(command.decision),
+              actorId: context.actorId,
+              closedAt: context.now,
+            },
+          ],
+        },
+      };
+    }
+
     case "archive_project":
       return notImplemented(workspace, context);
   }

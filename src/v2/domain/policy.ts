@@ -131,6 +131,8 @@ const rebetBlockedCommands = new Set([
   "accept_replan",
   "record_actual",
   "attach_evidence",
+  "request_validation",
+  "satisfy_validation",
 ]);
 
 const overdueReviewBlockedCommands = new Set([
