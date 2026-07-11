@@ -2981,10 +2981,12 @@ describe("executeCommand Direction and Bet", () => {
     ["agent", "agent", ["submit_proposal"]],
     ["agent", "import", ["import_portable", "submit_proposal"]],
     ["agent", "sync", ["replay_receipt", "submit_proposal"]],
+    ["agent", "migration", ["submit_proposal"]],
     ["system", "ui", []],
     ["system", "agent", []],
     ["system", "import", ["import_portable"]],
     ["system", "sync", ["replay_receipt"]],
+    ["system", "migration", []],
   ] as const)(
     "requires human confirmation for %s place_bet through authorized %s origin",
     async (actorKind, origin, capabilities) => {

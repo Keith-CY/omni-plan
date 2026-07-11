@@ -207,7 +207,9 @@ function authorizeSource(
     );
   }
 
-  if (context.origin === "migration") {
+  const nonHumanBetAttempt =
+    commandType === "place_bet" && context.actorKind !== "human";
+  if (context.origin === "migration" && !nonHumanBetAttempt) {
     return createCommandRejection(
       "SOURCE_NOT_AUTHORIZED",
       rejectionContext(context),
