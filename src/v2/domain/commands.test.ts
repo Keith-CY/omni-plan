@@ -16,6 +16,7 @@ import {
 } from "./commands";
 import { stableHash } from "./stableHash";
 import type {
+  Action,
   ActualV2,
   CapacityProfile,
   CommandReceipt,
@@ -1267,9 +1268,9 @@ describe("executeCommand rejection precedence and atomicity", () => {
   it("returns COMMAND_NOT_IMPLEMENTED for a recognized human-authorized command", async () => {
     const workspace = buildWorkspaceV2("workspace-1");
     const command = {
-      type: "update_action",
-      actionId: "missing-action",
-      patch: { title: "Future handler" },
+      type: "update_project_metadata",
+      projectId: "missing-project",
+      name: "Future handler",
     } as const satisfies V2Command;
 
     const result = rejected(
@@ -1890,5 +1891,603 @@ describe("executeCommand trusted policy projection", () => {
       code: "SOURCE_NOT_AUTHORIZED",
       gate: "deterministic_trigger_key",
     });
+  });
+});
+
+describe("executeCommand Action triage and promotion", () => {
+  const eligibility: Action["eligibility"] = {
+    singleSession: true,
+    estimateSeconds: 1_800,
+    dependencyIds: [],
+    requiresMilestoneEvidence: false,
+    outcomeCount: 1,
+    solutionKnown: true,
+  };
+
+  const actionDraft: Extract<
+    V2Command,
+    { type: "confirm_action_triage" }
+  >["action"] = {
+    id: "action-triaged",
+    title: "Prepare launch notes",
+    eligibility,
+    attention: "medium",
+    desiredDate: "2026-07-12T09:00:00.000Z",
+  };
+
+  function buildCapturedWorkspace(): WorkspaceV2 {
+    return buildWorkspaceV2("workspace-1", {
+      inboxItems: [
+        buildInboxItem({
+          id: "inbox-triage",
+          originalText: "Prepare launch notes",
+          sourceId: "capture-source",
+          actorId: "human-capture",
+          capturedAt: NOW,
+        }),
+      ],
+    });
+  }
+
+  function buildOpenActionWorkspace(): WorkspaceV2 {
+    const inboxItem = buildInboxItem({
+      id: "inbox-triage",
+      originalText: "Prepare launch notes",
+      sourceId: "capture-source",
+      actorId: "human-capture",
+      capturedAt: NOW,
+      triageStatus: "action",
+      actionId: "action-triaged",
+      recommendation: {
+        kind: "action",
+        ruleCodes: [],
+        explanation: "Fits the lightweight Action boundary.",
+      },
+    });
+    const action: Action = {
+      id: "action-triaged",
+      inboxItemId: inboxItem.id,
+      title: "Prepare launch notes",
+      revision: 3,
+      status: "open",
+      eligibility: structuredClone(eligibility),
+      attention: "medium",
+      desiredDate: "2026-07-12T09:00:00.000Z",
+      outcomeNote: "Existing outcome history",
+      createdAt: NOW,
+      updatedAt: NOW,
+    };
+    return buildWorkspaceV2("workspace-1", {
+      revision: 4,
+      inboxItems: [inboxItem],
+      actions: [action],
+      actuals: [
+        {
+          id: "actual-action-1",
+          revision: 1,
+          target: { kind: "action", actionId: action.id },
+          actualWorkSeconds: 300,
+          remainingWorkSeconds: 1_500,
+          actualCost: 0,
+          recordedAt: NOW,
+        },
+      ],
+    });
+  }
+
+  it("lets a human confirm an eligible Inbox item as an Action", async () => {
+    const workspace = buildCapturedWorkspace();
+    const command = {
+      type: "confirm_action_triage",
+      inboxItemId: "inbox-triage",
+      action: actionDraft,
+    } as const satisfies V2Command;
+
+    const result = await executeCommand(workspace, command, buildContext());
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("Expected Action triage to apply");
+    expect(result.workspace.actions).toEqual([
+      {
+        ...actionDraft,
+        inboxItemId: "inbox-triage",
+        revision: 1,
+        status: "open",
+        createdAt: NOW,
+        updatedAt: NOW,
+      },
+    ]);
+    expect(result.workspace.inboxItems[0]).toMatchObject({
+      id: "inbox-triage",
+      triageStatus: "action",
+      actionId: "action-triaged",
+      recommendation: {
+        kind: "action",
+        ruleCodes: [],
+        explanation: "Fits the lightweight Action boundary.",
+      },
+    });
+    expect(result.workspace.projects).toEqual([]);
+    expect(result.workspace.directionBriefs).toEqual([]);
+  });
+
+  it("rejects Action confirmation when deterministic policy recommends Project", async () => {
+    const workspace = buildCapturedWorkspace();
+    const command = {
+      type: "confirm_action_triage",
+      inboxItemId: "inbox-triage",
+      action: {
+        ...actionDraft,
+        eligibility: { ...eligibility, dependencyIds: ["dependency-1"] },
+      },
+    } as const satisfies V2Command;
+
+    const result = rejected(
+      await executeCommand(workspace, command, buildContext()),
+    );
+
+    expect(result.workspace).toBe(workspace);
+    expect(result.rejection).toMatchObject({
+      code: "ACTION_INELIGIBLE",
+      reason: "Has a dependency.",
+      gate: "action_eligibility:action-triaged",
+      permittedNextCommand: "confirm_project_triage",
+    });
+    expect(workspace.inboxItems[0].triageStatus).toBe("untriaged");
+    expect(workspace.actions).toEqual([]);
+  });
+
+  it("lets a human confirm an Inbox item as a Direction-stage Project", async () => {
+    const workspace = buildCapturedWorkspace();
+    const command = {
+      type: "confirm_project_triage",
+      inboxItemId: "inbox-triage",
+      project: {
+        id: "project-triaged",
+        name: "Launch project",
+        priority: 2,
+        notes: "Shape the launch",
+      },
+    } as const satisfies V2Command;
+
+    const result = await executeCommand(workspace, command, buildContext());
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("Expected Project triage to apply");
+    expect(result.workspace.projects).toEqual([
+      {
+        ...command.project,
+        stage: "direction",
+        holds: [],
+        activeDirectionBriefId: "project-triaged:direction-brief:1",
+        createdAt: NOW,
+        updatedAt: NOW,
+      },
+    ]);
+    expect(result.workspace.directionBriefs).toEqual([
+      {
+        id: "project-triaged:direction-brief:1",
+        projectId: "project-triaged",
+        version: 1,
+        audienceAndProblem: "",
+        successEvidence: "",
+        appetiteSeconds: 0,
+        validationMethod: "",
+        firstScope: [],
+        noGoOrKill: "",
+        advancedNotes: "",
+        createdAt: NOW,
+        updatedAt: NOW,
+      },
+    ]);
+    expect(result.workspace.inboxItems[0]).toMatchObject({
+      id: "inbox-triage",
+      triageStatus: "project",
+      projectId: "project-triaged",
+    });
+    expect(result.workspace.actions).toEqual([]);
+  });
+
+  it.each(["confirm_action_triage", "confirm_project_triage"] as const)(
+    "rejects Agent %s confirmation before the handler",
+    async (type) => {
+      const workspace = buildCapturedWorkspace();
+      const command: V2Command =
+        type === "confirm_action_triage"
+          ? { type, inboxItemId: "inbox-triage", action: actionDraft }
+          : {
+              type,
+              inboxItemId: "inbox-triage",
+              project: {
+                id: "project-triaged",
+                name: "Launch project",
+                priority: 2,
+                notes: "",
+              },
+            };
+
+      const result = rejected(
+        await executeCommand(
+          workspace,
+          command,
+          buildContext({
+            actorId: "agent-1",
+            actorKind: "agent",
+            origin: "agent",
+            source: {
+              sourceId: "agent-source",
+              verified: true,
+              capabilities: ["submit_proposal"],
+            },
+          }),
+        ),
+      );
+
+      expect(result.rejection).toMatchObject({
+        code: "HUMAN_CONFIRMATION_REQUIRED",
+        permittedNextCommand: type,
+      });
+      expect(result.workspace).toBe(workspace);
+    },
+  );
+
+  it.each([
+    {
+      name: "a dependency",
+      eligibility: { ...eligibility, dependencyIds: ["dependency-1"] },
+      reason: "Has a dependency.",
+    },
+    {
+      name: "milestone evidence",
+      eligibility: { ...eligibility, requiresMilestoneEvidence: true },
+      reason: "Requires milestone evidence.",
+    },
+    {
+      name: "multiple outcomes",
+      eligibility: { ...eligibility, outcomeCount: 2 },
+      reason: "Contains multiple outcomes.",
+    },
+    {
+      name: "an uncertain solution",
+      eligibility: { ...eligibility, solutionKnown: false },
+      reason: "Solution path is uncertain.",
+    },
+    {
+      name: "more than two hours",
+      eligibility: { ...eligibility, estimateSeconds: 7_201 },
+      reason: "Estimate exceeds two hours.",
+    },
+  ])(
+    "requires promotion when an Action update adds $name",
+    async ({ eligibility: nextEligibility, reason }) => {
+      const workspace = buildOpenActionWorkspace();
+      const command = {
+        type: "update_action",
+        actionId: "action-triaged",
+        patch: { eligibility: nextEligibility },
+      } as const satisfies V2Command;
+
+      const result = rejected(
+        await executeCommand(
+          workspace,
+          command,
+          buildContext({ expectedRevision: 4 }),
+        ),
+      );
+
+      expect(result.workspace).toBe(workspace);
+      expect(result.rejection).toMatchObject({
+        code: "ACTION_PROMOTION_REQUIRED",
+        reason,
+        gate: "action_eligibility:action-triaged",
+        permittedNextCommand: "promote_action_to_project",
+      });
+      expect(workspace.actions[0].revision).toBe(3);
+    },
+  );
+
+  it("applies an eligible Action update without rewriting history", async () => {
+    const workspace = buildOpenActionWorkspace();
+
+    const result = await executeCommand(
+      workspace,
+      {
+        type: "update_action",
+        actionId: "action-triaged",
+        patch: { title: "Updated launch notes", attention: "deep" },
+      },
+      buildContext({ expectedRevision: 4 }),
+    );
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("Expected eligible Action update");
+    expect(result.workspace.actions[0]).toMatchObject({
+      id: "action-triaged",
+      title: "Updated launch notes",
+      attention: "deep",
+      revision: 4,
+      outcomeNote: "Existing outcome history",
+      createdAt: NOW,
+      updatedAt: NOW,
+    });
+    expect(result.workspace.actuals).toEqual(workspace.actuals);
+    expect(workspace.actions[0].title).toBe("Prepare launch notes");
+  });
+
+  it("completes an Action with immutable actual and outcome history", async () => {
+    const workspace = buildOpenActionWorkspace();
+
+    const result = await executeCommand(
+      workspace,
+      {
+        type: "complete_action",
+        actionId: "action-triaged",
+        actualSeconds: 1_200,
+        outcomeNote: "Launch notes published",
+      },
+      buildContext({
+        commandId: "command-complete-action",
+        expectedRevision: 4,
+      }),
+    );
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("Expected Action completion");
+    expect(result.workspace.actions[0]).toMatchObject({
+      id: "action-triaged",
+      revision: 4,
+      status: "completed",
+      outcomeNote: "Launch notes published",
+      createdAt: NOW,
+      updatedAt: NOW,
+    });
+    expect(result.workspace.actuals).toEqual([
+      ...workspace.actuals,
+      {
+        id: "command-complete-action:actual",
+        revision: 1,
+        target: { kind: "action", actionId: "action-triaged" },
+        actualWorkSeconds: 1_200,
+        remainingWorkSeconds: 0,
+        actualCost: 0,
+        recordedAt: NOW,
+      },
+    ]);
+    expect(workspace.actions[0]).toMatchObject({
+      revision: 3,
+      status: "open",
+      outcomeNote: "Existing outcome history",
+    });
+  });
+
+  it.each([
+    {
+      name: "dependency network",
+      arrange: (workspace: WorkspaceV2) => {
+        workspace.dependencies.push({
+          id: "dependency-action",
+          projectId: "project-1",
+          fromId: "action-triaged",
+          toId: "work-item-2",
+          type: "FS",
+          lagSeconds: 0,
+          revision: 1,
+        });
+      },
+    },
+    {
+      name: "Gantt Work Item",
+      arrange: (workspace: WorkspaceV2) => {
+        workspace.workItems.push({ ...WORK_ITEM, id: "action-triaged" });
+      },
+    },
+    {
+      name: "Baseline",
+      arrange: (workspace: WorkspaceV2) => {
+        workspace.baselines.push({
+          id: "baseline-action",
+          projectId: "project-1",
+          name: "Invalid Action baseline",
+          capturedAt: NOW,
+          plannedStartByItem: { "action-triaged": NOW },
+          plannedFinishByItem: { "action-triaged": LATER },
+          plannedWorkSecondsByItem: { "action-triaged": 1_800 },
+        });
+      },
+    },
+    {
+      name: "project Evidence milestone",
+      arrange: (workspace: WorkspaceV2) => {
+        workspace.evidence.push({
+          ...EVIDENCE,
+          id: "evidence-action",
+          workItemId: "action-triaged",
+        });
+      },
+    },
+    {
+      name: "Bet",
+      arrange: (workspace: WorkspaceV2) => {
+        const brief = {
+          id: "brief-action",
+          projectId: "action-triaged",
+          version: 1,
+          audienceAndProblem: "",
+          successEvidence: "",
+          appetiteSeconds: 0,
+          validationMethod: "",
+          firstScope: [],
+          noGoOrKill: "",
+          advancedNotes: "",
+          createdAt: NOW,
+          updatedAt: NOW,
+        };
+        workspace.bets.push({
+          id: "bet-action",
+          projectId: "action-triaged",
+          version: 1,
+          briefId: brief.id,
+          briefHash: "brief-hash",
+          briefSnapshot: brief,
+          committedScope: [],
+          appetiteStart: NOW,
+          appetiteEnd: LATER,
+          actorId: "human-1",
+          approvedAt: NOW,
+        });
+      },
+    },
+    {
+      name: "Close decision",
+      arrange: (workspace: WorkspaceV2) => {
+        workspace.closeDecisions.push({
+          id: "close-action",
+          projectId: "action-triaged",
+          successComparison: "Invalid Action close",
+          outcome: "abandoned",
+          keyLearning: "Promote first",
+          unfinishedDisposition: "historical_incomplete",
+          actorId: "human-1",
+          closedAt: NOW,
+        });
+      },
+    },
+  ])(
+    "will not classify an ID already used by $name as an Action",
+    async ({ name, arrange }) => {
+      const workspace = buildCapturedWorkspace();
+      arrange(workspace);
+
+      const result = rejected(
+        await executeCommand(
+          workspace,
+          {
+            type: "confirm_action_triage",
+            inboxItemId: "inbox-triage",
+            action: actionDraft,
+          },
+          buildContext(),
+        ),
+      );
+
+      expect(result.rejection).toMatchObject({
+        code: "ACTION_INELIGIBLE",
+        reason: `Action ID action-triaged is already used by ${name}.`,
+        gate: "action_identity:action-triaged",
+        permittedNextCommand: "confirm_project_triage",
+      });
+      expect(result.workspace).toBe(workspace);
+    },
+  );
+
+  it.each([
+    {
+      name: "Gantt Work Item",
+      command: {
+        type: "create_work_item",
+        projectId: "project-1",
+        workItem: { ...WORK_ITEM, id: "action-triaged" },
+      },
+    },
+    {
+      name: "project Evidence milestone",
+      command: {
+        type: "attach_evidence",
+        evidence: { ...EVIDENCE, id: "evidence-action", workItemId: "action-triaged" },
+      },
+    },
+    {
+      name: "Bet",
+      command: {
+        type: "place_bet",
+        projectId: "action-triaged",
+        betId: "bet-action",
+        start: NOW,
+      },
+    },
+    {
+      name: "Close decision",
+      command: {
+        type: "close_project",
+        projectId: "action-triaged",
+        decision: {
+          id: "close-action",
+          projectId: "action-triaged",
+          successComparison: "Not a Project",
+          outcome: "abandoned",
+          keyLearning: "Promote first",
+          unfinishedDisposition: "historical_incomplete",
+        },
+      },
+    },
+  ] as const satisfies readonly { name: string; command: V2Command }[])(
+    "does not let an Action ID masquerade as a $name",
+    async ({ command }) => {
+      const workspace = buildOpenActionWorkspace();
+      const result = rejected(
+        await executeCommand(
+          workspace,
+          command,
+          buildContext({ expectedRevision: 4 }),
+        ),
+      );
+
+      expect(result.rejection).toMatchObject({
+        code: "ACTION_PROMOTION_REQUIRED",
+        gate: "action_identity:action-triaged",
+        permittedNextCommand: "promote_action_to_project",
+      });
+      expect(result.workspace).toBe(workspace);
+    },
+  );
+
+  it("promotes an Action without deleting capture, Action, actual, or outcome history", async () => {
+    const workspace = buildOpenActionWorkspace();
+    const original = structuredClone(workspace);
+    const command = {
+      type: "promote_action_to_project",
+      actionId: "action-triaged",
+      project: {
+        id: "project-promoted",
+        name: "Promoted launch",
+        priority: 3,
+        notes: "Now needs project structure",
+      },
+    } as const satisfies V2Command;
+
+    const result = await executeCommand(
+      workspace,
+      command,
+      buildContext({ expectedRevision: 4 }),
+    );
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("Expected Action promotion to apply");
+    expect(result.workspace.actions[0]).toMatchObject({
+      ...original.actions[0],
+      revision: 4,
+      status: "promoted",
+      promotedProjectId: "project-promoted",
+      outcomeNote: "Existing outcome history",
+      updatedAt: NOW,
+    });
+    expect(result.workspace.inboxItems[0]).toMatchObject({
+      id: original.inboxItems[0].id,
+      actionId: "action-triaged",
+      projectId: "project-promoted",
+      triageStatus: "project",
+    });
+    expect(result.workspace.actuals).toEqual(original.actuals);
+    expect(result.workspace.projects[0]).toMatchObject({
+      id: "project-promoted",
+      stage: "direction",
+      activeDirectionBriefId: "project-promoted:direction-brief:1",
+    });
+    expect(result.workspace.directionBriefs[0]).toMatchObject({
+      id: "project-promoted:direction-brief:1",
+      projectId: "project-promoted",
+      version: 1,
+    });
+    expect(workspace).toEqual(original);
   });
 });
