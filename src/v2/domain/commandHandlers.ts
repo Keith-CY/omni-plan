@@ -7,6 +7,10 @@ import {
   isMaterialDirectionChange,
 } from "./direction";
 import { transitionLifecycle } from "./lifecycle";
+import {
+  resolvePlanningContext,
+  type PlanningContextRejection,
+} from "./planning";
 import type {
   Action,
   DirectionBrief,
@@ -302,6 +306,26 @@ function actionIdentityCandidates(command: V2Command): string[] {
       ];
     case "update_work_item":
       return [command.projectId, command.workItemId];
+    case "upsert_dependency":
+      return [
+        command.dependency.id,
+        command.dependency.projectId,
+        command.dependency.fromId,
+        command.dependency.toId,
+      ];
+    case "remove_dependency":
+      return [command.dependencyId];
+    case "remove_work_item":
+    case "complete_work_item":
+      return [command.projectId, command.workItemId];
+    case "capture_baseline":
+      return [
+        command.baseline.id,
+        command.baseline.projectId,
+        ...Object.keys(command.baseline.plannedStartByItem),
+        ...Object.keys(command.baseline.plannedFinishByItem),
+        ...Object.keys(command.baseline.plannedWorkSecondsByItem),
+      ];
     case "propose_replan":
       return command.proposal.proposedSlots.flatMap(({ target }) =>
         target.kind === "work_item"
@@ -358,6 +382,33 @@ function actionIdentityMisuse(
 ): string | undefined {
   const actionIds = new Set(workspace.actions.map(({ id }) => id));
   return actionIdentityCandidates(command).find((id) => actionIds.has(id));
+}
+
+function planningAccessRejection(
+  workspace: WorkspaceV2,
+  context: CommandContext,
+  access: PlanningContextRejection,
+): CommandHandlerResult {
+  return rejection(workspace, context, access.code, {
+    reason: access.reason,
+    gate: access.gate,
+    permittedNextCommand: access.permittedNextCommand,
+    ...(access.hold === undefined ? {} : { hold: access.hold }),
+  });
+}
+
+function scopeOutsideBet(
+  workspace: WorkspaceV2,
+  context: CommandContext,
+  projectId: string,
+  betId: string,
+  scopeId: string,
+): CommandHandlerResult {
+  return rejection(workspace, context, "SCOPE_OUTSIDE_BET", {
+    reason: `Scope ${scopeId} is not committed by current Bet ${betId} for Project ${projectId}.`,
+    gate: `project:${projectId}:bet:${betId}:scope:${scopeId}`,
+    permittedNextCommand: "update_direction",
+  });
 }
 
 export async function applyCommandHandler(
@@ -1241,8 +1292,527 @@ export async function applyCommandHandler(
       return { ok: true, workspace: { ...workspace, projects } };
     }
 
-    case "create_work_item":
-    case "update_work_item":
+    case "create_work_item": {
+      const access = resolvePlanningContext(
+        workspace,
+        command.projectId,
+        context.now,
+        command.type,
+      );
+      if (!access.ok) {
+        return planningAccessRejection(workspace, context, access);
+      }
+      if (command.workItem.projectId !== access.project.id) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason: `Work Item ${command.workItem.id} must belong to Project ${access.project.id}.`,
+          gate: `work_item:${command.workItem.id}:project`,
+          permittedNextCommand: "create_work_item",
+        });
+      }
+      if (command.workItem.revision !== 1) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason: "A new Work Item must start at revision 1.",
+          gate: `work_item:${command.workItem.id}:revision`,
+          permittedNextCommand: "create_work_item",
+        });
+      }
+      const collision = entityIdCollision(workspace, command.workItem.id, [
+        { entity: "CommandReceipt", id: context.commandId },
+      ]);
+      if (collision !== undefined) {
+        return entityAlreadyExists(
+          workspace,
+          context,
+          collision,
+          command.workItem.id,
+          "create_work_item",
+        );
+      }
+      if (
+        !access.bet.committedScope.some(
+          ({ id }) => id === command.workItem.betScopeId,
+        )
+      ) {
+        return scopeOutsideBet(
+          workspace,
+          context,
+          access.project.id,
+          access.bet.id,
+          command.workItem.betScopeId,
+        );
+      }
+      return {
+        ok: true,
+        workspace: {
+          ...workspace,
+          workItems: [
+            ...workspace.workItems,
+            structuredClone(command.workItem),
+          ],
+        },
+      };
+    }
+
+    case "update_work_item": {
+      const access = resolvePlanningContext(
+        workspace,
+        command.projectId,
+        context.now,
+        command.type,
+      );
+      if (!access.ok) {
+        return planningAccessRejection(workspace, context, access);
+      }
+      const workItemIndex = workspace.workItems.findIndex(
+        ({ id }) => id === command.workItemId,
+      );
+      if (workItemIndex < 0) {
+        return entityNotFound(
+          workspace,
+          context,
+          "ProjectWorkItem",
+          command.workItemId,
+          "create_work_item",
+        );
+      }
+      const workItem = workspace.workItems[workItemIndex];
+      if (workItem.projectId !== access.project.id) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason: `Work Item ${workItem.id} does not belong to Project ${access.project.id}.`,
+          gate: `work_item:${workItem.id}:project`,
+          permittedNextCommand: "update_work_item",
+        });
+      }
+      const nextScopeId = command.patch.betScopeId ?? workItem.betScopeId;
+      if (
+        !access.bet.committedScope.some(({ id }) => id === nextScopeId)
+      ) {
+        return scopeOutsideBet(
+          workspace,
+          context,
+          access.project.id,
+          access.bet.id,
+          nextScopeId,
+        );
+      }
+      const workItems = [...workspace.workItems];
+      workItems[workItemIndex] = {
+        ...workItem,
+        ...structuredClone(command.patch),
+        id: workItem.id,
+        projectId: workItem.projectId,
+        revision: workItem.revision + 1,
+        betScopeId: nextScopeId,
+      };
+      return { ok: true, workspace: { ...workspace, workItems } };
+    }
+
+    case "complete_work_item": {
+      const access = resolvePlanningContext(
+        workspace,
+        command.projectId,
+        context.now,
+        command.type,
+      );
+      if (!access.ok) {
+        return planningAccessRejection(workspace, context, access);
+      }
+      const workItemIndex = workspace.workItems.findIndex(
+        ({ id }) => id === command.workItemId,
+      );
+      if (workItemIndex < 0) {
+        return entityNotFound(
+          workspace,
+          context,
+          "ProjectWorkItem",
+          command.workItemId,
+          "create_work_item",
+        );
+      }
+      const workItem = workspace.workItems[workItemIndex];
+      if (workItem.projectId !== access.project.id) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason: `Work Item ${workItem.id} does not belong to Project ${access.project.id}.`,
+          gate: `work_item:${workItem.id}:project`,
+          permittedNextCommand: "complete_work_item",
+        });
+      }
+      if (
+        !access.bet.committedScope.some(({ id }) => id === workItem.betScopeId)
+      ) {
+        return scopeOutsideBet(
+          workspace,
+          context,
+          access.project.id,
+          access.bet.id,
+          workItem.betScopeId,
+        );
+      }
+      const workItems = [...workspace.workItems];
+      workItems[workItemIndex] = {
+        ...workItem,
+        revision: workItem.revision + 1,
+        resultStatus: command.resultStatus,
+        outcomeNote: command.outcomeNote,
+      };
+      return { ok: true, workspace: { ...workspace, workItems } };
+    }
+
+    case "remove_work_item": {
+      const access = resolvePlanningContext(
+        workspace,
+        command.projectId,
+        context.now,
+        command.type,
+      );
+      if (!access.ok) {
+        return planningAccessRejection(workspace, context, access);
+      }
+      const workItem = workspace.workItems.find(
+        ({ id }) => id === command.workItemId,
+      );
+      if (workItem === undefined) {
+        return entityNotFound(
+          workspace,
+          context,
+          "ProjectWorkItem",
+          command.workItemId,
+          "create_work_item",
+        );
+      }
+      if (workItem.projectId !== access.project.id) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason: `Work Item ${workItem.id} does not belong to Project ${access.project.id}.`,
+          gate: `work_item:${workItem.id}:project`,
+          permittedNextCommand: "remove_work_item",
+        });
+      }
+      const linkedDependency = workspace.dependencies.find(
+        ({ fromId, toId }) => fromId === workItem.id || toId === workItem.id,
+      );
+      if (linkedDependency !== undefined) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason: `Work Item ${workItem.id} is linked by Dependency ${linkedDependency.id}; dependencies are never removed implicitly.`,
+          gate: `work_item:${workItem.id}:dependency:${linkedDependency.id}`,
+          permittedNextCommand: "remove_dependency",
+        });
+      }
+      const referencedByHistory =
+        workspace.planVersions.some(
+          (plan) =>
+            Object.prototype.hasOwnProperty.call(
+              plan.workItemRevisions,
+              workItem.id,
+            ) ||
+            Object.prototype.hasOwnProperty.call(plan.scopeMapping, workItem.id) ||
+            Object.prototype.hasOwnProperty.call(
+              plan.capacityIndependentDates,
+              workItem.id,
+            ),
+        ) ||
+        workspace.baselines.some(
+          (baseline) =>
+            Object.prototype.hasOwnProperty.call(
+              baseline.plannedStartByItem,
+              workItem.id,
+            ) ||
+            Object.prototype.hasOwnProperty.call(
+              baseline.plannedFinishByItem,
+              workItem.id,
+            ) ||
+            Object.prototype.hasOwnProperty.call(
+              baseline.plannedWorkSecondsByItem,
+              workItem.id,
+            ),
+        ) ||
+        workspace.evidence.some(({ workItemId }) => workItemId === workItem.id) ||
+        workspace.actuals.some(
+          ({ target }) =>
+            target.kind === "work_item" && target.workItemId === workItem.id,
+        ) ||
+        workspace.dailyCommitments.some((commitment) =>
+          commitment.slots.some(
+            ({ target }) =>
+              target.kind === "work_item" && target.workItemId === workItem.id,
+          ),
+        ) ||
+        workspace.replanProposals.some((proposal) =>
+          proposal.proposedSlots.some(
+            ({ target }) =>
+              target.kind === "work_item" && target.workItemId === workItem.id,
+          ),
+        ) ||
+        workspace.workItems.some(
+          (candidate) =>
+            candidate.id !== workItem.id &&
+            (candidate.parentId === workItem.id ||
+              candidate.hammockStartId === workItem.id ||
+              candidate.hammockFinishId === workItem.id),
+        );
+      if (referencedByHistory) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason: `Work Item ${workItem.id} is referenced by planning history and must keep its ID.`,
+          gate: `work_item:${workItem.id}:history`,
+          permittedNextCommand: "update_work_item",
+        });
+      }
+      return {
+        ok: true,
+        workspace: {
+          ...workspace,
+          workItems: workspace.workItems.filter(({ id }) => id !== workItem.id),
+        },
+      };
+    }
+
+    case "upsert_dependency": {
+      const access = resolvePlanningContext(
+        workspace,
+        command.dependency.projectId,
+        context.now,
+        command.type,
+      );
+      if (!access.ok) {
+        return planningAccessRejection(workspace, context, access);
+      }
+      const dependencyIndex = workspace.dependencies.findIndex(
+        ({ id }) => id === command.dependency.id,
+      );
+      const existingDependency = workspace.dependencies[dependencyIndex];
+      if (
+        existingDependency !== undefined &&
+        existingDependency.projectId !== command.dependency.projectId
+      ) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason: `Dependency ${existingDependency.id} cannot move between Projects.`,
+          gate: `dependency:${existingDependency.id}:project`,
+          permittedNextCommand: "upsert_dependency",
+        });
+      }
+      const fromItem = workspace.workItems.find(
+        ({ id }) => id === command.dependency.fromId,
+      );
+      const toItem = workspace.workItems.find(
+        ({ id }) => id === command.dependency.toId,
+      );
+      if (fromItem === undefined) {
+        return entityNotFound(
+          workspace,
+          context,
+          "ProjectWorkItem",
+          command.dependency.fromId,
+          "create_work_item",
+        );
+      }
+      if (toItem === undefined) {
+        return entityNotFound(
+          workspace,
+          context,
+          "ProjectWorkItem",
+          command.dependency.toId,
+          "create_work_item",
+        );
+      }
+      if (
+        fromItem.projectId !== access.project.id ||
+        toItem.projectId !== access.project.id
+      ) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason:
+            "Cross-project dependency edges are unsupported in OmniPlan V2; both endpoints must belong to the Dependency Project.",
+          gate: `dependency:${command.dependency.id}:cross_project`,
+          permittedNextCommand: "create_project_local_dependency",
+        });
+      }
+      if (fromItem.id === toItem.id) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason: "A Dependency cannot connect a Work Item to itself.",
+          gate: `dependency:${command.dependency.id}:self_edge`,
+          permittedNextCommand: "upsert_dependency",
+        });
+      }
+      for (const workItem of [fromItem, toItem]) {
+        if (
+          !access.bet.committedScope.some(
+            ({ id }) => id === workItem.betScopeId,
+          )
+        ) {
+          return scopeOutsideBet(
+            workspace,
+            context,
+            access.project.id,
+            access.bet.id,
+            workItem.betScopeId,
+          );
+        }
+      }
+      if (existingDependency === undefined) {
+        if (command.dependency.revision !== 1) {
+          return rejection(workspace, context, "INVALID_COMMAND", {
+            reason: "A new Dependency must start at revision 1.",
+            gate: `dependency:${command.dependency.id}:revision`,
+            permittedNextCommand: "upsert_dependency",
+          });
+        }
+        const collision = entityIdCollision(workspace, command.dependency.id, [
+          { entity: "CommandReceipt", id: context.commandId },
+        ]);
+        if (collision !== undefined) {
+          return entityAlreadyExists(
+            workspace,
+            context,
+            collision,
+            command.dependency.id,
+            "upsert_dependency",
+          );
+        }
+        return {
+          ok: true,
+          workspace: {
+            ...workspace,
+            dependencies: [
+              ...workspace.dependencies,
+              structuredClone(command.dependency),
+            ],
+          },
+        };
+      }
+      if (command.dependency.revision !== existingDependency.revision) {
+        return rejection(workspace, context, "REVISION_CONFLICT", {
+          reason: `Dependency ${existingDependency.id} is at revision ${existingDependency.revision}.`,
+          gate: `dependency:${existingDependency.id}:revision`,
+          permittedNextCommand: "upsert_dependency",
+        });
+      }
+      const dependencies = [...workspace.dependencies];
+      dependencies[dependencyIndex] = {
+        ...structuredClone(command.dependency),
+        id: existingDependency.id,
+        projectId: existingDependency.projectId,
+        revision: existingDependency.revision + 1,
+      };
+      return { ok: true, workspace: { ...workspace, dependencies } };
+    }
+
+    case "remove_dependency": {
+      const dependency = workspace.dependencies.find(
+        ({ id }) => id === command.dependencyId,
+      );
+      if (dependency === undefined) {
+        return entityNotFound(
+          workspace,
+          context,
+          "ProjectDependency",
+          command.dependencyId,
+          "upsert_dependency",
+        );
+      }
+      const access = resolvePlanningContext(
+        workspace,
+        dependency.projectId,
+        context.now,
+        command.type,
+      );
+      if (!access.ok) {
+        return planningAccessRejection(workspace, context, access);
+      }
+      const historicalPlan = workspace.planVersions.find((plan) =>
+        Object.prototype.hasOwnProperty.call(
+          plan.dependencyRevisions,
+          dependency.id,
+        ),
+      );
+      if (historicalPlan !== undefined) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason: `Dependency ${dependency.id} is preserved by Plan Version ${historicalPlan.id}.`,
+          gate: `dependency:${dependency.id}:history`,
+          permittedNextCommand: "upsert_dependency",
+        });
+      }
+      return {
+        ok: true,
+        workspace: {
+          ...workspace,
+          dependencies: workspace.dependencies.filter(
+            ({ id }) => id !== dependency.id,
+          ),
+        },
+      };
+    }
+
+    case "capture_baseline": {
+      const access = resolvePlanningContext(
+        workspace,
+        command.baseline.projectId,
+        context.now,
+        command.type,
+      );
+      if (!access.ok) {
+        return planningAccessRejection(workspace, context, access);
+      }
+      const collision = entityIdCollision(workspace, command.baseline.id, [
+        { entity: "CommandReceipt", id: context.commandId },
+      ]);
+      if (collision !== undefined) {
+        return entityAlreadyExists(
+          workspace,
+          context,
+          collision,
+          command.baseline.id,
+          "capture_baseline",
+        );
+      }
+      const workItemIds = [
+        ...new Set([
+          ...Object.keys(command.baseline.plannedStartByItem),
+          ...Object.keys(command.baseline.plannedFinishByItem),
+          ...Object.keys(command.baseline.plannedWorkSecondsByItem),
+        ]),
+      ].sort();
+      for (const workItemId of workItemIds) {
+        const workItem = workspace.workItems.find(({ id }) => id === workItemId);
+        if (workItem === undefined) {
+          return entityNotFound(
+            workspace,
+            context,
+            "ProjectWorkItem",
+            workItemId,
+            "create_work_item",
+          );
+        }
+        if (workItem.projectId !== access.project.id) {
+          return rejection(workspace, context, "INVALID_COMMAND", {
+            reason: `Baseline ${command.baseline.id} cannot include Work Item ${workItem.id} from another Project.`,
+            gate: `baseline:${command.baseline.id}:cross_project`,
+            permittedNextCommand: "capture_baseline",
+          });
+        }
+        if (
+          !access.bet.committedScope.some(
+            ({ id }) => id === workItem.betScopeId,
+          )
+        ) {
+          return scopeOutsideBet(
+            workspace,
+            context,
+            access.project.id,
+            access.bet.id,
+            workItem.betScopeId,
+          );
+        }
+      }
+      return {
+        ok: true,
+        workspace: {
+          ...workspace,
+          baselines: [
+            ...workspace.baselines,
+            structuredClone(command.baseline),
+          ],
+        },
+      };
+    }
+
     case "propose_replan":
     case "commit_today":
     case "accept_replan":

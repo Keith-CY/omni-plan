@@ -1,4 +1,4 @@
-import type { Evidence, Id, ISODate } from "@/domain/types";
+import type { Baseline, Evidence, Id, ISODate } from "@/domain/types";
 
 import { applyCommandHandler } from "./commandHandlers";
 import {
@@ -32,6 +32,7 @@ import type {
   ExceptionRecord,
   JsonValue,
   ProjectHoldState,
+  ProjectDependency,
   ProjectWorkItem,
   ReplanProposal,
   ReviewConclusion,
@@ -135,6 +136,17 @@ export type V2Command =
       workItemId: Id;
       patch: WorkItemPatch;
     }
+  | { type: "upsert_dependency"; dependency: ProjectDependency }
+  | { type: "remove_dependency"; dependencyId: Id }
+  | { type: "remove_work_item"; projectId: Id; workItemId: Id }
+  | { type: "capture_baseline"; baseline: Baseline }
+  | {
+      type: "complete_work_item";
+      projectId: Id;
+      workItemId: Id;
+      resultStatus: "completed" | "learned" | "blocked";
+      outcomeNote: string;
+    }
   | { type: "propose_replan"; proposal: ReplanProposal }
   | { type: "commit_today"; commitment: DailyCommitmentDraft }
   | { type: "accept_replan"; proposalId: Id; commitmentId: Id }
@@ -192,6 +204,11 @@ const knownCommandTypes = new Set(
     place_bet: true,
     create_work_item: true,
     update_work_item: true,
+    upsert_dependency: true,
+    remove_dependency: true,
+    remove_work_item: true,
+    capture_baseline: true,
+    complete_work_item: true,
     propose_replan: true,
     commit_today: true,
     accept_replan: true,
@@ -523,6 +540,45 @@ function isWorkItemPatchValue(value: unknown): boolean {
   );
 }
 
+function isProjectDependencyValue(value: unknown): value is ProjectDependency {
+  return (
+    isRecordValue(value) &&
+    isStringValue(value.id) &&
+    isStringValue(value.projectId) &&
+    isStringValue(value.fromId) &&
+    isStringValue(value.toId) &&
+    isOneOf(value.type, ["FS", "SS", "FF", "SF"]) &&
+    isFiniteNumberValue(value.lagSeconds) &&
+    isFiniteNumberValue(value.revision)
+  );
+}
+
+function isStringRecordValue(value: unknown): value is Record<string, string> {
+  return (
+    isRecordValue(value) && Object.values(value).every(isStringValue)
+  );
+}
+
+function isNumberRecordValue(value: unknown): value is Record<string, number> {
+  return (
+    isRecordValue(value) && Object.values(value).every(isFiniteNumberValue)
+  );
+}
+
+function isBaselineValue(value: unknown): value is Baseline {
+  return (
+    isRecordValue(value) &&
+    isStringValue(value.id) &&
+    isStringValue(value.projectId) &&
+    isStringValue(value.name) &&
+    isStringValue(value.capturedAt) &&
+    isStringRecordValue(value.plannedStartByItem) &&
+    isStringRecordValue(value.plannedFinishByItem) &&
+    isNumberRecordValue(value.plannedWorkSecondsByItem) &&
+    isOptionalStringValue(value.approvedByDecisionId)
+  );
+}
+
 function isReplanProposalValue(value: unknown): boolean {
   return (
     isRecordValue(value) &&
@@ -729,6 +785,23 @@ function isStructurallyValidCommand(value: unknown): value is V2Command {
         isStringValue(value.projectId) &&
         isStringValue(value.workItemId) &&
         isWorkItemPatchValue(value.patch)
+      );
+    case "upsert_dependency":
+      return isProjectDependencyValue(value.dependency);
+    case "remove_dependency":
+      return isStringValue(value.dependencyId);
+    case "remove_work_item":
+      return (
+        isStringValue(value.projectId) && isStringValue(value.workItemId)
+      );
+    case "capture_baseline":
+      return isBaselineValue(value.baseline);
+    case "complete_work_item":
+      return (
+        isStringValue(value.projectId) &&
+        isStringValue(value.workItemId) &&
+        isOneOf(value.resultStatus, ["completed", "learned", "blocked"]) &&
+        isStringValue(value.outcomeNote)
       );
     case "propose_replan":
       return isReplanProposalValue(value.proposal);
@@ -993,6 +1066,53 @@ function affectedExistingProjectIds(
       ]);
       break;
 
+    case "upsert_dependency":
+      candidates = uniqueIds([
+        command.dependency.projectId,
+        ...recordsWithId(workspace.workItems, command.dependency.fromId).map(
+          ({ projectId }) => projectId,
+        ),
+        ...recordsWithId(workspace.workItems, command.dependency.toId).map(
+          ({ projectId }) => projectId,
+        ),
+      ]);
+      break;
+
+    case "remove_dependency":
+      candidates = uniqueIds(
+        recordsWithId(workspace.dependencies, command.dependencyId).map(
+          ({ projectId }) => projectId,
+        ),
+      );
+      break;
+
+    case "remove_work_item":
+    case "complete_work_item":
+      candidates = uniqueIds([
+        command.projectId,
+        ...recordsWithId(workspace.workItems, command.workItemId).map(
+          ({ projectId }) => projectId,
+        ),
+      ]);
+      break;
+
+    case "capture_baseline": {
+      const itemIds = uniqueIds([
+        ...Object.keys(command.baseline.plannedStartByItem),
+        ...Object.keys(command.baseline.plannedFinishByItem),
+        ...Object.keys(command.baseline.plannedWorkSecondsByItem),
+      ]);
+      candidates = uniqueIds([
+        command.baseline.projectId,
+        ...itemIds.flatMap((itemId) =>
+          recordsWithId(workspace.workItems, itemId).map(
+            ({ projectId }) => projectId,
+          ),
+        ),
+      ]);
+      break;
+    }
+
     case "propose_replan":
       candidates = uniqueIds([
         ...projectIdsForSlots(workspace, command.proposal.proposedSlots),
@@ -1224,6 +1344,38 @@ function affectedRecordIds(
         command.patch.betScopeId,
       ]);
     }
+    case "upsert_dependency":
+      return uniqueIds([
+        command.dependency.id,
+        command.dependency.projectId,
+        command.dependency.fromId,
+        command.dependency.toId,
+      ]);
+    case "remove_dependency":
+      return uniqueIds([
+        command.dependencyId,
+        ...recordsWithId(workspace.dependencies, command.dependencyId).flatMap(
+          ({ projectId, fromId, toId }) => [projectId, fromId, toId],
+        ),
+      ]);
+    case "remove_work_item":
+    case "complete_work_item":
+      return uniqueIds([
+        command.projectId,
+        command.workItemId,
+        ...recordsWithId(workspace.workItems, command.workItemId).map(
+          ({ betScopeId }) => betScopeId,
+        ),
+      ]);
+    case "capture_baseline":
+      return uniqueIds([
+        command.baseline.id,
+        command.baseline.projectId,
+        command.baseline.approvedByDecisionId,
+        ...Object.keys(command.baseline.plannedStartByItem),
+        ...Object.keys(command.baseline.plannedFinishByItem),
+        ...Object.keys(command.baseline.plannedWorkSecondsByItem),
+      ]);
     case "propose_replan":
       return uniqueIds([
         command.proposal.id,
@@ -1329,6 +1481,10 @@ function targetWasCommitted(
       targetKind = "work_item";
       targetId = command.evidence.workItemId;
       break;
+    case "complete_work_item":
+      targetKind = "work_item";
+      targetId = command.workItemId;
+      break;
     case "configure_capacity":
     case "capture_inbox":
     case "confirm_action_triage":
@@ -1341,6 +1497,10 @@ function targetWasCommitted(
     case "place_bet":
     case "create_work_item":
     case "update_work_item":
+    case "upsert_dependency":
+    case "remove_dependency":
+    case "remove_work_item":
+    case "capture_baseline":
     case "propose_replan":
     case "commit_today":
     case "accept_replan":
@@ -1391,6 +1551,11 @@ function deterministicTriggerKey(command: V2Command): string | undefined {
     case "place_bet":
     case "create_work_item":
     case "update_work_item":
+    case "upsert_dependency":
+    case "remove_dependency":
+    case "remove_work_item":
+    case "capture_baseline":
+    case "complete_work_item":
     case "propose_replan":
     case "commit_today":
     case "accept_replan":

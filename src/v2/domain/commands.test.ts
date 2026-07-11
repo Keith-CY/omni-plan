@@ -304,6 +304,43 @@ const ALL_COMMANDS = [
     patch: { title: "Updated work", betScopeId: "scope-2" },
   },
   {
+    type: "upsert_dependency",
+    dependency: {
+      id: "dependency-1",
+      projectId: "project-1",
+      fromId: WORK_ITEM.id,
+      toId: "work-item-2",
+      type: "FS",
+      lagSeconds: 0,
+      revision: 1,
+    },
+  },
+  { type: "remove_dependency", dependencyId: "dependency-1" },
+  {
+    type: "remove_work_item",
+    projectId: "project-1",
+    workItemId: WORK_ITEM.id,
+  },
+  {
+    type: "capture_baseline",
+    baseline: {
+      id: "baseline-1",
+      projectId: "project-1",
+      name: "Baseline",
+      capturedAt: NOW,
+      plannedStartByItem: { [WORK_ITEM.id]: NOW },
+      plannedFinishByItem: { [WORK_ITEM.id]: LATER },
+      plannedWorkSecondsByItem: { [WORK_ITEM.id]: 3_600 },
+    },
+  },
+  {
+    type: "complete_work_item",
+    projectId: "project-1",
+    workItemId: WORK_ITEM.id,
+    resultStatus: "completed",
+    outcomeNote: "Completed",
+  },
+  {
     type: "propose_replan",
     proposal: {
       id: "proposal-1",
@@ -434,6 +471,11 @@ const EXPECTED_COMMAND_TYPES = [
   "place_bet",
   "create_work_item",
   "update_work_item",
+  "upsert_dependency",
+  "remove_dependency",
+  "remove_work_item",
+  "capture_baseline",
+  "complete_work_item",
   "propose_replan",
   "commit_today",
   "accept_replan",
@@ -1563,7 +1605,7 @@ describe("executeCommand trusted policy projection", () => {
       code: "HOLD_BLOCKS_COMMAND",
       hold: "sync_conflict",
     });
-    expect(unrelatedResult.rejection.code).toBe("COMMAND_NOT_IMPLEMENTED");
+    expect(unrelatedResult.rejection.code).toBe("BET_REQUIRED");
   });
 
   it("includes stored Replan targets in sync-conflict overlap checks", async () => {
