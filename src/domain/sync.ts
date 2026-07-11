@@ -1,4 +1,5 @@
 import type { ChangeSet, Id, WorkspaceSnapshot } from "./types";
+import { canonicalJson, sha256Hex } from "./canonical";
 import { browserFetch } from "./http";
 import { normalizeWorkspaceSnapshot } from "./projectLifecycle";
 
@@ -33,21 +34,6 @@ function joinRepoPath(...parts: string[]): string {
 
 function encodeRepoPath(path: string): string {
   return path.split("/").map(encodeURIComponent).join("/");
-}
-
-function stableJson(value: unknown): string {
-  if (value === null || typeof value !== "object") return JSON.stringify(value ?? null);
-  if (Array.isArray(value)) return `[${value.map((item) => stableJson(item)).join(",")}]`;
-  return `{${Object.entries(value as Record<string, unknown>)
-    .filter(([, item]) => item !== undefined)
-    .sort(([left], [right]) => left.localeCompare(right))
-    .map(([key, item]) => `${JSON.stringify(key)}:${stableJson(item)}`)
-    .join(",")}}`;
-}
-
-async function sha256Hex(value: string): Promise<string> {
-  const hash = new Uint8Array(await crypto.subtle.digest("SHA-256", encoder.encode(value)));
-  return Array.from(hash, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 async function deriveSyncKey(passphrase: string, salt: Uint8Array): Promise<CryptoKey> {
@@ -213,7 +199,7 @@ export async function encryptSyncPayload(value: unknown, passphrase: string): Pr
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const key = await deriveSyncKey(passphrase, salt);
   const ciphertext = new Uint8Array(
-    await crypto.subtle.encrypt({ name: "AES-GCM", iv: toArrayBuffer(iv) }, key, toArrayBuffer(encoder.encode(stableJson(value))))
+    await crypto.subtle.encrypt({ name: "AES-GCM", iv: toArrayBuffer(iv) }, key, toArrayBuffer(encoder.encode(canonicalJson(value))))
   );
 
   return {
@@ -237,7 +223,7 @@ export async function decryptSyncPayload<T>(payload: EncryptedSyncPayload, passp
 }
 
 export async function workspacePlaintextChecksum(snapshot: WorkspaceSnapshot): Promise<string> {
-  return sha256Hex(stableJson(normalizeWorkspaceSnapshot(snapshot)));
+  return sha256Hex(canonicalJson(normalizeWorkspaceSnapshot(snapshot)));
 }
 
 export async function createSyncChangeEnvelope(
@@ -248,7 +234,7 @@ export async function createSyncChangeEnvelope(
   passphrase: string,
   createdAt: string
 ): Promise<SyncChangeEnvelope> {
-  const plaintextChecksum = await sha256Hex(stableJson(changeSet));
+  const plaintextChecksum = await sha256Hex(canonicalJson(changeSet));
   const revision = await sha256Hex(`${baseRevision}\n${config.deviceId}\n${sequence}\n${plaintextChecksum}`);
   return {
     schemaVersion: 1,
@@ -290,7 +276,7 @@ export async function decryptFirebaseWorkspaceSnapshotEnvelope(
   passphrase: string
 ): Promise<WorkspaceSnapshot> {
   const snapshot = await decryptSyncPayload<WorkspaceSnapshot>(envelope.payload, passphrase);
-  const checksum = await sha256Hex(stableJson(snapshot));
+  const checksum = await sha256Hex(canonicalJson(snapshot));
   if (checksum !== envelope.plaintextChecksum) {
     throw new Error("Firebase workspace checksum mismatch after decrypt.");
   }

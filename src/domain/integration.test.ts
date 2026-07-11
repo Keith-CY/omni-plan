@@ -4,18 +4,198 @@ import { BrowserAppSettingsRepository, defaultAppSettings } from "./settings";
 import { BrowserWorkspaceRepository } from "./storage";
 import { sampleWorkspace } from "./sampleData";
 import { BrowserEncryptedSecretVault, browserSecretVaultStatus, decryptProviderSecret, encryptProviderSecret, type SecretVaultStorage } from "./secrets";
+import { canonicalJson, sha256Hex } from "./canonical";
 import {
+  buildFirebaseSyncPaths,
   buildChangeEnvelopePath,
   createSyncChangeEnvelope,
+  createSyncManifest,
   createFirebaseE2eeManifest,
   createFirebaseWorkspaceSnapshotEnvelope,
   decryptFirebaseWorkspaceSnapshotEnvelope,
   decryptSyncPayload,
   FirebaseE2eeSyncClient,
+  FirebaseSyncConflictError,
   githubSyncCommitMessage,
   GitHubPrivateRepoSyncClient,
-  GitHubSyncConflictError
+  GitHubSyncConflictError,
+  workspacePlaintextChecksum
 } from "./sync";
+
+describe("V1 sync characterization", () => {
+  const githubConfig = {
+    owner: "acme",
+    repo: "private-plan",
+    branch: "main",
+    rootPath: "//.omni-plan//",
+    workspaceId: "workspace-personal",
+    deviceId: "iphone"
+  };
+  const firebaseConfig = {
+    projectId: "firebase-project",
+    apiKey: "firebase-key",
+    databaseId: "(default)",
+    collectionPath: "/omniPlanSync//",
+    workspaceId: "personal",
+    deviceId: "macbook"
+  };
+  const createdAt = "2026-07-08T00:00:00.000Z";
+
+  it("exposes the characterized canonical serialization and SHA-256 primitives", async () => {
+    const value = {
+      z: 2,
+      nested: { z: false, a: "first", skip: undefined },
+      a: 1,
+      list: [{ b: 2, a: 1 }, undefined, null]
+    };
+
+    expect(canonicalJson(value)).toBe(
+      '{"a":1,"list":[{"a":1,"b":2},null,null],"nested":{"a":"first","z":false},"z":2}'
+    );
+    await expect(sha256Hex("abc")).resolves.toBe(
+      "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    );
+  });
+
+  it("preserves stable plaintext serialization through encrypted round trips", async () => {
+    const value = {
+      z: 2,
+      nested: { z: false, a: "first", skip: undefined },
+      a: 1,
+      list: [{ b: 2, a: 1 }, undefined, null]
+    };
+
+    const envelope = await createSyncChangeEnvelope(
+      value as unknown as (typeof sampleWorkspace.changeSets)[number],
+      githubConfig,
+      7,
+      "rev-previous",
+      "correct horse",
+      createdAt
+    );
+    const decrypted = await decryptSyncPayload<typeof value>(envelope.payload, "correct horse");
+
+    expect(JSON.stringify(decrypted)).toBe(
+      '{"a":1,"list":[{"a":1,"b":2},null,null],"nested":{"a":"first","z":false},"z":2}'
+    );
+    expect(envelope.payload).toMatchObject({
+      algorithm: "AES-GCM",
+      kdf: "PBKDF2-SHA256",
+      iterations: 210_000
+    });
+    expect(envelope.payload.salt).toMatch(/^[A-Za-z0-9+/]{22}==$/);
+    expect(envelope.payload.iv).toMatch(/^[A-Za-z0-9+/]{16}$/);
+    expect(envelope.payload.ciphertext).not.toContain("first");
+    await expect(decryptSyncPayload(envelope.payload, "wrong horse")).rejects.toThrow();
+  });
+
+  it("preserves the normalized V1 workspace plaintext checksum", async () => {
+    const reordered = JSON.parse(JSON.stringify(sampleWorkspace)) as typeof sampleWorkspace;
+    reordered.projects[0] = Object.fromEntries(
+      Object.entries(reordered.projects[0]).reverse()
+    ) as (typeof sampleWorkspace.projects)[number];
+
+    await expect(workspacePlaintextChecksum(sampleWorkspace)).resolves.toBe(
+      "d8bac0e33781688d825907642d493f9b4853276dc4453807b81aa8ceafb86782"
+    );
+    await expect(workspacePlaintextChecksum(reordered)).resolves.toBe(
+      "d8bac0e33781688d825907642d493f9b4853276dc4453807b81aa8ceafb86782"
+    );
+  });
+
+  it("preserves the exact V1 GitHub envelope, path, and manifest contract", async () => {
+    const value = {
+      z: 2,
+      nested: { z: false, a: "first", skip: undefined },
+      a: 1,
+      list: [{ b: 2, a: 1 }, undefined, null]
+    };
+    const envelope = await createSyncChangeEnvelope(
+      value as unknown as (typeof sampleWorkspace.changeSets)[number],
+      githubConfig,
+      7,
+      "rev-previous",
+      "correct horse",
+      createdAt
+    );
+
+    expect({ ...envelope, payload: undefined }).toEqual({
+      schemaVersion: 1,
+      workspaceId: "workspace-personal",
+      deviceId: "iphone",
+      sequence: 7,
+      baseRevision: "rev-previous",
+      revision: "32ac1ce993ba9f0ddf33703d719255cb0d1596a0d4cea31964a009547c7509d5",
+      createdAt,
+      plaintextChecksum: "fda8f0e1b0401ee902e24776c5b40373f004f0c20395b4abe61573d8b781f726",
+      payload: undefined
+    });
+    expect(buildChangeEnvelopePath(githubConfig, envelope)).toBe(
+      ".omni-plan/workspaces/workspace-personal/changes/iphone/00000007-32ac1ce993ba.json.enc"
+    );
+    expect(createSyncManifest(githubConfig, envelope)).toEqual({
+      schemaVersion: 1,
+      workspaceId: "workspace-personal",
+      provider: "github-private-repo",
+      branch: "main",
+      rootPath: "//.omni-plan//",
+      latestRevision: envelope.revision,
+      heads: {
+        iphone: { sequence: 7, revision: envelope.revision, updatedAt: createdAt }
+      },
+      updatedAt: createdAt
+    });
+  });
+
+  it("preserves the exact V1 Firebase envelope, paths, and manifest contract", async () => {
+    const envelope = await createFirebaseWorkspaceSnapshotEnvelope(
+      sampleWorkspace,
+      firebaseConfig,
+      undefined,
+      "correct horse",
+      createdAt
+    );
+
+    expect({ ...envelope, payload: undefined }).toEqual({
+      schemaVersion: 1,
+      workspaceId: "personal",
+      deviceId: "macbook",
+      revision: "cfe7c8948f162dfc48fd4c19ced8b4a02f662cf0fbda928db78300f339092c98",
+      createdAt,
+      plaintextChecksum: "d8bac0e33781688d825907642d493f9b4853276dc4453807b81aa8ceafb86782",
+      payload: undefined
+    });
+    expect(buildFirebaseSyncPaths(firebaseConfig)).toEqual({
+      manifest: "omniPlanSync/personal/manifest/current",
+      snapshot: "omniPlanSync/personal/snapshots/latest",
+      opDirectory: "omniPlanSync/personal/ops"
+    });
+    expect(createFirebaseE2eeManifest(firebaseConfig, envelope)).toEqual({
+      schemaVersion: 1,
+      provider: "firebase-firestore-e2ee",
+      workspaceId: "personal",
+      latestRevision: envelope.revision,
+      updatedAt: createdAt,
+      updatedByDeviceId: "macbook",
+      snapshotDocumentPath: "omniPlanSync/personal/snapshots/latest",
+      heads: {
+        macbook: { revision: envelope.revision, updatedAt: createdAt }
+      }
+    });
+    await expect(decryptFirebaseWorkspaceSnapshotEnvelope(envelope, "correct horse")).resolves.toEqual(sampleWorkspace);
+  });
+
+  it("preserves exact V1 transport conflict error contracts", () => {
+    expect(new GitHubSyncConflictError(".omni-plan/workspaces/ws/manifest.json")).toMatchObject({
+      name: "GitHubSyncConflictError",
+      message: "GitHub sync conflict while updating .omni-plan/workspaces/ws/manifest.json"
+    });
+    expect(new FirebaseSyncConflictError("remote advanced")).toMatchObject({
+      name: "FirebaseSyncConflictError",
+      message: "remote advanced"
+    });
+  });
+});
 
 describe("workspace, GitHub, and secrets", () => {
   it("exports and imports a workspace snapshot", () => {
