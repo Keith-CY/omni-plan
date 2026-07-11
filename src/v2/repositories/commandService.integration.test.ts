@@ -7,6 +7,7 @@ import {
   type V2Command,
 } from "../domain/commands";
 import { evaluateBetBoundary } from "../domain/lifecycle";
+import { sha256Text } from "../domain/stableHash";
 import type { MigrationRecord, WorkspaceV2 } from "../domain/types";
 import {
   buildBetVersion,
@@ -112,19 +113,27 @@ function betBoundaryWorkspace(): WorkspaceV2 {
   });
 }
 
-function attachMigrationMarker(
+async function attachMigrationMarker(
+  repository: Pick<AtomicWorkspaceRepository, "writeAndVerifyBackup">,
   workspace: WorkspaceV2,
   suffix: string,
-): MigrationRecord {
+): Promise<MigrationRecord> {
+  const rawPayload = JSON.stringify({ schemaVersion: 1, fixture: suffix });
+  const backupChecksum = await sha256Text(rawPayload);
   const record: MigrationRecord = {
     sourceSchemaVersion: 1,
     sourceChecksum: `fixture-source-${suffix}`,
-    backupId: `fixture-backup-${suffix}`,
-    backupChecksum: `fixture-backup-hash-${suffix}`,
+    backupId: `v1-backup-${backupChecksum}`,
+    backupChecksum,
     migratedAt: "2026-07-12T00:00:00.000Z",
     entityCounts: { projects: workspace.projects.length },
     deterministicIdMap: {},
   };
+  await repository.writeAndVerifyBackup({
+    id: record.backupId,
+    rawPayload,
+    checksum: record.backupChecksum,
+  });
   workspace.migration = structuredClone(record);
   return record;
 }
@@ -557,7 +566,11 @@ describe("CommandService", () => {
   it("permits only an exact verified system command to retry a stored CAS conflict with the same deterministic commandId", async () => {
     const repo = repository("system-cas-retry");
     const initial = betBoundaryWorkspace();
-    const migration = attachMigrationMarker(initial, "system-cas-retry");
+    const migration = await attachMigrationMarker(
+      repo,
+      initial,
+      "system-cas-retry",
+    );
     await repo.commitMigration({
       sourceChecksum: migration.sourceChecksum,
       workspace: initial,
@@ -627,7 +640,11 @@ describe("CommandService", () => {
   it("rejects changed payload, unverified source, and wrong capability against a stored system CAS receipt", async () => {
     const repo = repository("system-cas-negative");
     const initial = betBoundaryWorkspace();
-    const migration = attachMigrationMarker(initial, "system-cas-negative");
+    const migration = await attachMigrationMarker(
+      repo,
+      initial,
+      "system-cas-negative",
+    );
     await repo.commitMigration({
       sourceChecksum: migration.sourceChecksum,
       workspace: initial,

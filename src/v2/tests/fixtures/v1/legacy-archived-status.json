@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "exportedAt": "2021-04-05T00:00:00.000Z",
+  "snapshot": {
+    "projects": [
+      {
+        "id": "p-legacy-archived-status",
+        "name": "Raw archived status",
+        "status": "archived",
+        "archivedAt": "2021-04-04T18:00:00.000Z",
+        "mode": "explore",
+        "priority": 1,
+        "northStar": "Preserve the pre-normalization archived status.",
+        "currentOutcome": "The legacy record remains closed and visible in history.",
+        "horizon": "2021-04-01T00:00:00.000Z",
+        "start": "2021-03-01T00:00:00.000Z",
+        "reviewCadenceDays": 30
+      }
+    ],
+    "workItems": [],
+    "dependencies": [],
+    "resources": [],
+    "capacities": [],
+    "baselines": [],
+    "actuals": [],
+    "evidence": [],
+    "decisions": [],
+    "changeSets": [],
+    "auditGates": [
+      {
+        "id": "gate-legacy-archived",
+        "projectId": "p-legacy-archived-status",
+        "targetType": "project",
+        "targetId": "p-legacy-archived-status",
+        "severity": "info",
+        "reason": "Historical archive marker.",
+        "requiredAction": "None.",
+        "status": "cleared"
+      }
+    ],
+    "auditDecisions": []
+  }
+}

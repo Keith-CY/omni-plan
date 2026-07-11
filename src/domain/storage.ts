@@ -8,16 +8,16 @@ export interface WorkspaceRepository {
   importWorkspace(payload: string): WorkspaceSnapshot;
 }
 
-const STORAGE_KEY = "omni-plan-personal.workspace.v1";
+export const V1_WORKSPACE_STORAGE_KEY = "omni-plan-personal.workspace.v1";
 
 export class BrowserWorkspaceRepository implements WorkspaceRepository {
   async load(): Promise<WorkspaceSnapshot | undefined> {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = localStorage.getItem(V1_WORKSPACE_STORAGE_KEY);
     return raw ? this.importWorkspace(raw) : undefined;
   }
 
   async save(snapshot: WorkspaceSnapshot): Promise<void> {
-    localStorage.setItem(STORAGE_KEY, this.exportWorkspace(snapshot));
+    localStorage.setItem(V1_WORKSPACE_STORAGE_KEY, this.exportWorkspace(snapshot));
   }
 
   exportWorkspace(snapshot: WorkspaceSnapshot): string {

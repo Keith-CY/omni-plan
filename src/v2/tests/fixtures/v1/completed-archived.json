@@ -1,0 +1,131 @@
+{
+  "schemaVersion": 1,
+  "exportedAt": "2022-08-01T12:00:00.000Z",
+  "snapshot": {
+    "projects": [
+      {
+        "id": "p-completed",
+        "name": "Completed project",
+        "status": "done",
+        "mode": "ship",
+        "priority": 4,
+        "northStar": "Ship a completed outcome.",
+        "currentOutcome": "The explicit V1 done status is historical truth.",
+        "horizon": "2022-07-31T00:00:00.000Z",
+        "start": "2022-07-01T00:00:00.000Z",
+        "reviewCadenceDays": 7
+      },
+      {
+        "id": "p-completed-archived",
+        "name": "Completed and archived project",
+        "status": "done",
+        "archived": true,
+        "archivedAt": "2022-08-01T10:00:00.000Z",
+        "mode": "maintain",
+        "priority": 1,
+        "northStar": "Keep an archived result available as history.",
+        "currentOutcome": "The project is closed and hidden from default views.",
+        "horizon": "2022-06-30T00:00:00.000Z",
+        "start": "2022-06-01T00:00:00.000Z",
+        "reviewCadenceDays": 30,
+        "directionCard": {
+          "targetUser": "Future maintainers",
+          "userProblem": "Historical context can disappear.",
+          "businessGoal": "Retain a trustworthy record.",
+          "coreHypothesis": "Archived history prevents repeated mistakes.",
+          "successMetric": "The record remains inspectable.",
+          "failureCondition": "The record is silently rewritten.",
+          "validationMethod": "Open the archived history.",
+          "timeboxDays": 2,
+          "opportunityCost": "No active work is scheduled."
+        }
+      }
+    ],
+    "workItems": [
+      {
+        "id": "w-completed",
+        "projectId": "p-completed",
+        "kind": "milestone",
+        "title": "Outcome shipped",
+        "outline": "1",
+        "durationSeconds": 0,
+        "estimate": { "mostLikelySeconds": 0 },
+        "assignmentIds": [],
+        "percentComplete": 100,
+        "evidenceRequired": true
+      },
+      {
+        "id": "w-completed-archived",
+        "projectId": "p-completed-archived",
+        "kind": "task",
+        "title": "Document maintenance result",
+        "outline": "1",
+        "durationSeconds": 3600,
+        "estimate": { "mostLikelySeconds": 3600 },
+        "assignmentIds": [
+          { "resourceId": "r-historian", "attention": "shallow", "effortSeconds": 3600 }
+        ],
+        "percentComplete": 100
+      }
+    ],
+    "dependencies": [],
+    "resources": [
+      {
+        "id": "r-historian",
+        "name": "Historian",
+        "role": "Maintainer",
+        "capacityByAttention": { "deep": 0, "medium": 3600, "shallow": 7200 },
+        "hourlyRate": 50
+      }
+    ],
+    "capacities": [
+      {
+        "date": "2022-07-01T00:00:00.000Z",
+        "deepSeconds": 0,
+        "mediumSeconds": 3600,
+        "shallowSeconds": 7200,
+        "unavailableBlocks": []
+      }
+    ],
+    "baselines": [],
+    "actuals": [
+      {
+        "workItemId": "w-completed-archived",
+        "actualStart": "2022-06-30T09:00:00.000Z",
+        "actualFinish": "2022-06-30T10:00:00.000Z",
+        "actualWorkSeconds": 3600,
+        "remainingWorkSeconds": 0,
+        "actualCost": 50,
+        "recordedAt": "2022-06-30T10:00:00.000Z"
+      }
+    ],
+    "evidence": [
+      {
+        "id": "e-completed",
+        "kind": "release",
+        "summary": "The completed outcome shipped.",
+        "projectId": "p-completed",
+        "workItemId": "w-completed",
+        "createdAt": "2022-07-31T15:00:00.000Z",
+        "confidence": 1,
+        "tags": ["legacy", "completed"]
+      }
+    ],
+    "decisions": [
+      {
+        "id": "decision-completed",
+        "projectId": "p-completed",
+        "statement": "Stop after shipping the bounded outcome.",
+        "context": "The outcome is complete.",
+        "options": ["Stop", "Expand"],
+        "rationale": "Expansion has no validated demand.",
+        "consequences": "Follow-up work needs a new project.",
+        "linkedEvidenceIds": ["e-completed"],
+        "createdAt": "2022-07-31T16:00:00.000Z"
+      }
+    ],
+    "changeSets": [],
+    "auditGates": [],
+    "auditDecisions": []
+  }
+}

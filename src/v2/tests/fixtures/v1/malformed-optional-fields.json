@@ -1,0 +1,118 @@
+{
+  "schemaVersion": 1,
+  "exportedAt": "2020-01-01T00:00:00.000Z",
+  "snapshot": {
+    "projects": [
+      {
+        "id": "p-malformed-optionals",
+        "name": "Malformed optional values",
+        "status": "active",
+        "archived": false,
+        "archivedAt": 17,
+        "mode": "explore",
+        "priority": 2,
+        "northStar": "Optional corruption must not destroy required history.",
+        "currentOutcome": "Invalid optional values are ignored visibly.",
+        "horizon": "2020-03-01T00:00:00.000Z",
+        "start": "2020-01-01T00:00:00.000Z",
+        "reviewCadenceDays": 7,
+        "directionCard": {
+          "targetUser": null,
+          "userProblem": "The optional export fields were corrupted.",
+          "businessGoal": 42,
+          "coreHypothesis": "Safe normalization can preserve required records.",
+          "successMetric": null,
+          "failureCondition": "",
+          "validationMethod": ["not", "a", "string"],
+          "timeboxDays": "five",
+          "opportunityCost": null
+        },
+        "shapeUpPitch": {
+          "problem": null,
+          "appetiteKind": "small-batch",
+          "appetiteDays": -5,
+          "solutionSketch": 99,
+          "rabbitHoles": null,
+          "noGos": null,
+          "successBaseline": null,
+          "scopes": [
+            null,
+            { "id": 1, "title": "Invalid ID", "description": "Ignored", "confirmed": true, "hillPosition": 0.1 },
+            { "id": "scope-valid-malformed", "title": "Still valid", "description": 7, "confirmed": false, "hillPosition": 0.2 }
+          ],
+          "createdAt": "not-a-date",
+          "updatedAt": null
+        }
+      }
+    ],
+    "workItems": [
+      {
+        "id": "w-malformed-optionals",
+        "projectId": "p-malformed-optionals",
+        "parentId": null,
+        "kind": "task",
+        "title": "Normalize optional fields",
+        "outline": "1",
+        "durationSeconds": 3600,
+        "estimate": { "mostLikelySeconds": 3600 },
+        "constraint": null,
+        "assignmentIds": [],
+        "percentComplete": 10,
+        "splitSegments": null,
+        "repeatRule": null,
+        "shapeUpScopeId": 123,
+        "isShapeUpCycleMarker": "yes"
+      }
+    ],
+    "dependencies": [],
+    "resources": [],
+    "capacities": [],
+    "baselines": [
+      {
+        "id": "b-malformed-optionals",
+        "projectId": "p-malformed-optionals",
+        "name": "Malformed optional approval",
+        "capturedAt": "2020-01-02T09:00:00.000Z",
+        "plannedStartByItem": {
+          "w-malformed-optionals": "2020-01-02T09:00:00.000Z"
+        },
+        "plannedFinishByItem": {
+          "w-malformed-optionals": "2020-01-02T10:00:00.000Z"
+        },
+        "plannedWorkSecondsByItem": {
+          "w-malformed-optionals": 3600
+        },
+        "approvedByDecisionId": null
+      }
+    ],
+    "actuals": [
+      {
+        "workItemId": "w-malformed-optionals",
+        "actualStart": 10,
+        "actualFinish": null,
+        "actualWorkSeconds": 600,
+        "remainingWorkSeconds": 3000,
+        "actualCost": 0,
+        "recordedAt": "2020-01-02T10:00:00.000Z"
+      }
+    ],
+    "evidence": [
+      {
+        "id": "e-malformed-optionals",
+        "kind": "note",
+        "summary": "Required evidence survived.",
+        "url": 123,
+        "localFileRef": null,
+        "projectId": "p-malformed-optionals",
+        "workItemId": null,
+        "createdAt": "2020-01-02T11:00:00.000Z",
+        "confidence": 0.5,
+        "tags": []
+      }
+    ],
+    "decisions": [],
+    "changeSets": [],
+    "auditGates": [],
+    "auditDecisions": []
+  }
+}

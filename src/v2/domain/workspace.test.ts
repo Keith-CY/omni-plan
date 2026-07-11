@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { JsonValue } from "./types";
-import { stableHash } from "./stableHash";
+import { sha256Text, stableHash } from "./stableHash";
 import { createEmptyWorkspaceV2 } from "./workspace";
 import { buildInboxItem, buildWorkspaceV2 } from "../tests/builders";
 
@@ -41,6 +41,12 @@ describe("createEmptyWorkspaceV2", () => {
 });
 
 describe("stableHash", () => {
+  it("hashes exact UTF-8 text bytes with the standard SHA-256 vector", async () => {
+    expect(await sha256Text("abc")).toBe(
+      "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+    );
+  });
+
   it("ignores object insertion order", async () => {
     expect(await stableHash({ b: 2, a: 1 })).toBe(
       await stableHash({ a: 1, b: 2 }),

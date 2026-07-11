@@ -12,12 +12,24 @@ import {
 import {
   deleteV2Database,
   openV2Database,
+  requestResult,
+  transactionComplete,
   V2_DATABASE_NAME,
   V2_OBJECT_STORES,
 } from "./indexedDb";
 
 const V1_STORAGE_KEY = "omni-plan-personal.workspace.v1";
 const NOW = "2026-07-12T00:00:00.000Z";
+
+async function checksumText(value: string): Promise<string> {
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(value),
+  );
+  return Array.from(new Uint8Array(digest), (byte) =>
+    byte.toString(16).padStart(2, "0"),
+  ).join("");
+}
 
 function context(commandId: string, revision: number): CommandContext {
   return {
@@ -89,6 +101,23 @@ function migrationRecord(checksum: string): MigrationRecord {
     entityCounts: { projects: 0 },
     deterministicIdMap: {},
   };
+}
+
+async function persistMigrationBackup(
+  repository: BrowserWorkspaceRepository,
+  record: MigrationRecord,
+): Promise<void> {
+  const rawPayload = JSON.stringify({
+    schemaVersion: 1,
+    sourceChecksum: record.sourceChecksum,
+  });
+  record.backupId = `backup-${record.sourceChecksum}`;
+  record.backupChecksum = await checksumText(rawPayload);
+  await repository.writeAndVerifyBackup({
+    id: record.backupId,
+    rawPayload,
+    checksum: record.backupChecksum,
+  });
 }
 
 function abortOnce(operation: RepositoryTransactionOperation) {
@@ -511,6 +540,7 @@ describe("BrowserWorkspaceRepository", () => {
     const first = repository("migration-race");
     const second = repository("migration-race");
     const record = migrationRecord("source-checksum-1");
+    await persistMigrationBackup(first, record);
     const migrated = buildWorkspaceV2("workspace-migrated", {
       migration: record,
     });
@@ -533,6 +563,7 @@ describe("BrowserWorkspaceRepository", () => {
     expect(await first.loadMigration(record.sourceChecksum)).toEqual(record);
 
     const other = migrationRecord("different-checksum");
+    await persistMigrationBackup(first, other);
     expect(
       await first.commitMigration({
         sourceChecksum: other.sourceChecksum,
@@ -556,9 +587,27 @@ describe("BrowserWorkspaceRepository", () => {
     ).toBe("revision_conflict");
   });
 
+  it("refuses to commit migration without its matching verified backup", async () => {
+    const repo = repository("migration-missing-backup");
+    const record = migrationRecord("missing-backup-source");
+
+    await expect(
+      repo.commitMigration({
+        sourceChecksum: record.sourceChecksum,
+        workspace: buildWorkspaceV2("workspace-missing-backup", {
+          migration: record,
+        }),
+        migrationRecord: record,
+      }),
+    ).rejects.toThrow(/verified backup|backup.*missing/i);
+    expect(await repo.load()).toBeUndefined();
+    expect(await repo.loadMigration(record.sourceChecksum)).toBeUndefined();
+  });
+
   it("recognizes the same canonical migration after normal Workspace revisions advance", async () => {
     const repo = repository("migration-after-evolution");
     const record = migrationRecord("evolved-migration-checksum");
+    await persistMigrationBackup(repo, record);
     const migrated = buildWorkspaceV2("workspace-evolved-migration", {
       migration: record,
     });
@@ -606,6 +655,7 @@ describe("BrowserWorkspaceRepository", () => {
     const initializeRepo = repository("initialize-migration-race");
     const migrationRepo = repository("initialize-migration-race");
     const record = migrationRecord("initialize-migration-checksum");
+    await persistMigrationBackup(migrationRepo, record);
     const migrated = buildWorkspaceV2("workspace-race-migrated", {
       migration: record,
     });
@@ -631,6 +681,10 @@ describe("BrowserWorkspaceRepository", () => {
     const second = repository("different-migration-race");
     const left = migrationRecord("checksum-left");
     const right = migrationRecord("checksum-right");
+    await Promise.all([
+      persistMigrationBackup(first, left),
+      persistMigrationBackup(second, right),
+    ]);
 
     const outcomes = await Promise.all([
       first.commitMigration({
@@ -666,6 +720,7 @@ describe("BrowserWorkspaceRepository", () => {
       beforeTransactionComplete: abortOnce("commitMigration"),
     });
     const record = migrationRecord("aborted-migration");
+    await persistMigrationBackup(repo, record);
     const workspace = buildWorkspaceV2("workspace-aborted-migration", {
       migration: record,
     });
@@ -683,32 +738,305 @@ describe("BrowserWorkspaceRepository", () => {
 
   it("writes immutable verified backups and rejects mismatched bytes", async () => {
     const repo = repository("backup");
+    const rawPayload = "{\"schemaVersion\":1}";
+    const checksum = await checksumText(rawPayload);
     await repo.writeAndVerifyBackup({
       id: "backup-1",
-      rawPayload: "{\"schemaVersion\":1}",
-      checksum: "checksum-1",
+      rawPayload,
+      checksum,
     });
     await expect(
       repo.writeAndVerifyBackup({
         id: "backup-1",
-        rawPayload: "{\"schemaVersion\":1}",
-        checksum: "checksum-1",
+        rawPayload,
+        checksum,
       }),
     ).resolves.toBeUndefined();
     await expect(
       repo.writeAndVerifyBackup({
         id: "backup-1",
         rawPayload: "different",
-        checksum: "checksum-1",
+        checksum: await checksumText("different"),
       }),
     ).rejects.toThrow(/immutable|mismatch/i);
     await expect(
       repo.writeAndVerifyBackup({
         id: "backup-1",
-        rawPayload: "{\"schemaVersion\":1}",
+        rawPayload,
         checksum: "different-checksum",
       }),
-    ).rejects.toThrow(/immutable|mismatch/i);
+    ).rejects.toThrow(/checksum|mismatch/i);
+  });
+
+  it("loads a verified backup as an isolated exact-byte recovery copy", async () => {
+    const repo = repository("backup-readback");
+    const rawPayload = '{\n  "schemaVersion": 1,\n  "snapshot": {}\n}\n';
+    const checksum = await checksumText(rawPayload);
+    const backup = {
+      id: `v1-backup-${checksum}`,
+      rawPayload,
+      checksum,
+    };
+
+    await repo.writeAndVerifyBackup(backup);
+    const loaded = await repo.loadVerifiedBackup(backup.id);
+
+    expect(loaded).toEqual(backup);
+    if (loaded === undefined) throw new Error("Expected verified backup");
+    loaded.rawPayload = "caller mutation";
+    expect(await repo.loadVerifiedBackup(backup.id)).toEqual(backup);
+  });
+
+  it("persists one clone-isolated migration recovery marker and clears it explicitly", async () => {
+    const repo = repository("migration-recovery-marker");
+    const rawPayload = '{"schemaVersion":1,"snapshot":{}}';
+    const backupChecksum = await checksumText(rawPayload);
+    const backupId = `v1-backup-${backupChecksum}`;
+    await repo.writeAndVerifyBackup({
+      id: backupId,
+      rawPayload,
+      checksum: backupChecksum,
+    });
+    const recovery = {
+      sourceChecksum: "normalized-source-checksum",
+      backupId,
+      backupChecksum,
+      code: "MIGRATION_VALIDATION_FAILED" as const,
+      message: "A required project reference is malformed.",
+      occurredAt: NOW,
+      violations: [
+        {
+          code: "MALFORMED_REFERENCE",
+          message: "Missing project",
+        },
+      ],
+    };
+
+    await repo.saveMigrationRecovery(recovery);
+    const loaded = await repo.loadMigrationRecovery();
+    expect(loaded).toEqual(recovery);
+    if (loaded === undefined) throw new Error("Expected recovery marker");
+    loaded.message = "caller mutation";
+    expect(await repo.loadMigrationRecovery()).toEqual(recovery);
+
+    await repo.clearMigrationRecovery();
+    expect(await repo.loadMigrationRecovery()).toBeUndefined();
+  });
+
+  it("clears recovery by exact migration tuple CAS and preserves an unrelated marker", async () => {
+    const repo = repository("migration-recovery-cas");
+    const rawPayload = '{"schemaVersion":1,"snapshot":{"projects":[]}}';
+    const backupChecksum = await checksumText(rawPayload);
+    const backupId = `v1-backup-${backupChecksum}`;
+    await repo.writeAndVerifyBackup({ id: backupId, rawPayload, checksum: backupChecksum });
+    const recovery = {
+      sourceChecksum: "source-b",
+      backupId,
+      backupChecksum,
+      code: "MIGRATION_CONFLICT" as const,
+      message: "Source B still needs recovery.",
+      occurredAt: NOW,
+    };
+    await repo.saveMigrationRecovery(recovery);
+
+    await expect(
+      repo.clearMigrationRecoveryIfMatching({
+        sourceChecksum: "source-a",
+        backupId,
+        backupChecksum,
+      }),
+    ).resolves.toBe("not_matching");
+    expect(await repo.loadMigrationRecovery()).toEqual(recovery);
+
+    await expect(
+      repo.clearMigrationRecoveryIfMatching({
+        sourceChecksum: recovery.sourceChecksum,
+        backupId,
+        backupChecksum,
+      }),
+    ).resolves.toBe("cleared");
+    expect(await repo.loadMigrationRecovery()).toBeUndefined();
+  });
+
+  it("rejects a recovery marker that is not backed by matching verified raw bytes", async () => {
+    const repo = repository("orphan-recovery-marker");
+
+    await expect(
+      repo.saveMigrationRecovery({
+        sourceChecksum: "source-checksum",
+        backupId: "missing-backup",
+        backupChecksum: "missing-checksum",
+        code: "MIGRATION_PERSISTENCE_FAILED",
+        message: "Migration failed after backup.",
+        occurredAt: NOW,
+      }),
+    ).rejects.toThrow(/verified backup|not found/i);
+    expect(await repo.loadMigrationRecovery()).toBeUndefined();
+  });
+
+  it("fails closed when a recovery marker's verified backup is later corrupted", async () => {
+    const repo = repository("corrupt-recovery-backup");
+    const rawPayload = '{"schemaVersion":1,"snapshot":{}}';
+    const backupChecksum = await checksumText(rawPayload);
+    const backupId = `v1-backup-${backupChecksum}`;
+    await repo.writeAndVerifyBackup({
+      id: backupId,
+      rawPayload,
+      checksum: backupChecksum,
+    });
+    await repo.saveMigrationRecovery({
+      sourceChecksum: "source-checksum",
+      backupId,
+      backupChecksum,
+      code: "MIGRATION_PERSISTENCE_FAILED",
+      message: "Migration failed after backup.",
+      occurredAt: NOW,
+    });
+    const databaseName = databaseNames[databaseNames.length - 1] ?? "";
+    const database = await openV2Database({ databaseName, indexedDB });
+    const transaction = database.transaction(
+      V2_OBJECT_STORES.backups,
+      "readwrite",
+    );
+    const completion = transactionComplete(transaction);
+    await requestResult(
+      transaction.objectStore(V2_OBJECT_STORES.backups).put({
+        id: backupId,
+        rawPayload: "tampered",
+        checksum: backupChecksum,
+      }),
+    );
+    await completion;
+    database.close();
+
+    await expect(repo.loadMigrationRecovery()).rejects.toThrow(
+      /backup|checksum|verification/i,
+    );
+  });
+
+  it("clears a matching recovery marker in the same transaction that commits migration", async () => {
+    const repo = repository("migration-clears-recovery");
+    const rawPayload = '{"schemaVersion":1,"snapshot":{}}';
+    const backupChecksum = await checksumText(rawPayload);
+    const backupId = `v1-backup-${backupChecksum}`;
+    await repo.writeAndVerifyBackup({
+      id: backupId,
+      rawPayload,
+      checksum: backupChecksum,
+    });
+    const record = {
+      ...migrationRecord("recovered-source-checksum"),
+      backupId,
+      backupChecksum,
+    };
+    await repo.saveMigrationRecovery({
+      sourceChecksum: record.sourceChecksum,
+      backupId: record.backupId,
+      backupChecksum: record.backupChecksum,
+      code: "MIGRATION_PERSISTENCE_FAILED",
+      message: "The previous migration transaction aborted.",
+      occurredAt: NOW,
+    });
+    const workspace = buildWorkspaceV2("workspace-recovered", {
+      migration: record,
+    });
+
+    await expect(
+      repo.commitMigration({
+        sourceChecksum: record.sourceChecksum,
+        workspace,
+        migrationRecord: record,
+      }),
+    ).resolves.toBe("committed");
+
+    expect(await repo.load()).toEqual(workspace);
+    expect(await repo.loadMigration(record.sourceChecksum)).toEqual(record);
+    expect(await repo.loadMigrationRecovery()).toBeUndefined();
+  });
+
+  it("preserves an unrelated recovery marker when another source commits", async () => {
+    const repo = repository("migration-preserves-unrelated-recovery");
+    const record = migrationRecord("source-a");
+    await persistMigrationBackup(repo, record);
+    const rawPayloadB = '{"schemaVersion":1,"snapshot":{"source":"b"}}';
+    const backupChecksumB = await checksumText(rawPayloadB);
+    const backupIdB = `v1-backup-${backupChecksumB}`;
+    await repo.writeAndVerifyBackup({
+      id: backupIdB,
+      rawPayload: rawPayloadB,
+      checksum: backupChecksumB,
+    });
+    const recoveryB = {
+      sourceChecksum: "source-b",
+      backupId: backupIdB,
+      backupChecksum: backupChecksumB,
+      code: "MIGRATION_CONFLICT" as const,
+      message: "Source B still needs recovery.",
+      occurredAt: NOW,
+    };
+    await repo.saveMigrationRecovery(recoveryB);
+
+    await expect(
+      repo.commitMigration({
+        sourceChecksum: record.sourceChecksum,
+        workspace: buildWorkspaceV2("workspace-source-a", { migration: record }),
+        migrationRecord: record,
+      }),
+    ).resolves.toBe("committed");
+
+    expect(await repo.loadMigrationRecovery()).toEqual(recoveryB);
+  });
+
+  it("retains the verified recovery marker when migration commit aborts", async () => {
+    const databaseName = "omni-plan-v2-repository-recovery-commit-abort";
+    databaseNames.push(databaseName);
+    const setup = new BrowserWorkspaceRepository({ databaseName, indexedDB });
+    const rawPayload = '{"schemaVersion":1,"snapshot":{}}';
+    const backupChecksum = await checksumText(rawPayload);
+    const backupId = `v1-backup-${backupChecksum}`;
+    await setup.writeAndVerifyBackup({
+      id: backupId,
+      rawPayload,
+      checksum: backupChecksum,
+    });
+    const record = {
+      ...migrationRecord("recovery-aborted-source"),
+      backupId,
+      backupChecksum,
+    };
+    const recovery = {
+      sourceChecksum: record.sourceChecksum,
+      backupId,
+      backupChecksum,
+      code: "MIGRATION_PERSISTENCE_FAILED" as const,
+      message: "Previous attempt aborted.",
+      occurredAt: NOW,
+    };
+    await setup.saveMigrationRecovery(recovery);
+    const failing = new BrowserWorkspaceRepository({
+      databaseName,
+      indexedDB,
+      beforeTransactionComplete: abortOnce("commitMigration"),
+    });
+
+    await expect(
+      failing.commitMigration({
+        sourceChecksum: record.sourceChecksum,
+        workspace: buildWorkspaceV2("workspace-recovery-aborted", {
+          migration: record,
+        }),
+        migrationRecord: record,
+      }),
+    ).rejects.toThrow();
+
+    expect(await setup.load()).toBeUndefined();
+    expect(await setup.loadMigration(record.sourceChecksum)).toBeUndefined();
+    expect(await setup.loadMigrationRecovery()).toEqual(recovery);
+    expect(await setup.loadVerifiedBackup(backupId)).toEqual({
+      id: backupId,
+      rawPayload,
+      checksum: backupChecksum,
+    });
   });
 
   it("stores rejected receipts append-only without changing Workspace or outbox", async () => {

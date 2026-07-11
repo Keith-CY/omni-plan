@@ -1,0 +1,218 @@
+{
+  "schemaVersion": 1,
+  "exportedAt": "2023-11-15T09:30:00.000Z",
+  "snapshot": {
+    "projects": [
+      {
+        "id": "p-shape-up",
+        "name": "Legacy Shape Up project",
+        "status": "active",
+        "mode": "build",
+        "priority": 5,
+        "northStar": "Prove a bounded legacy pitch.",
+        "currentOutcome": "A historical audit approved the old cycle.",
+        "horizon": "2023-12-31T00:00:00.000Z",
+        "start": "2023-10-01T00:00:00.000Z",
+        "reviewCadenceDays": 7,
+        "directionCard": {
+          "targetUser": "Operations leads",
+          "userProblem": "Weekly reports hide delivery risk.",
+          "businessGoal": "Make delivery risk explicit.",
+          "coreHypothesis": "A bounded report flow exposes risk earlier.",
+          "successMetric": "Three teams act on the same risk signal.",
+          "failureCondition": "Teams keep separate shadow reports.",
+          "validationMethod": "Observe three weekly planning sessions.",
+          "timeboxDays": 42,
+          "opportunityCost": "Do not automate portfolio forecasting."
+        },
+        "shapeUpPitch": {
+          "problem": "Risk reports are late and inconsistent.",
+          "appetiteKind": "small-batch",
+          "appetiteDays": 10,
+          "solutionSketch": "One guided report with a single risk decision.",
+          "rabbitHoles": "Automatic prediction and cross-company benchmarking.",
+          "noGos": "No forecasting engine and no custom workflow builder.",
+          "successBaseline": "Three consecutive reports are reviewed before planning.",
+          "scopes": [
+            {
+              "id": "scope-report-core",
+              "title": "Core report",
+              "description": "Capture and publish the weekly risk decision.",
+              "confirmed": true,
+              "hillPosition": 0.75
+            },
+            {
+              "id": "scope-report-export",
+              "title": "Export",
+              "description": "Export the reviewed report as a PDF.",
+              "confirmed": false,
+              "hillPosition": 0.25,
+              "niceToHave": true
+            }
+          ],
+          "bet": {
+            "approvedAt": "2023-10-02T09:00:00.000Z",
+            "auditDecisionId": "ad-shape-up",
+            "cycleStart": "2023-10-02T09:00:00.000Z",
+            "cycleEnd": "2023-10-13T17:00:00.000Z",
+            "circuitBreakerAt": "2023-10-11T17:00:00.000Z",
+            "summary": "Legacy approval for the report cycle."
+          },
+          "createdAt": "2023-10-01T08:00:00.000Z",
+          "updatedAt": "2023-10-02T09:00:00.000Z"
+        }
+      }
+    ],
+    "workItems": [
+      {
+        "id": "w-shape-core",
+        "projectId": "p-shape-up",
+        "kind": "task",
+        "title": "Build report flow",
+        "outline": "1",
+        "durationSeconds": 28800,
+        "estimate": { "mostLikelySeconds": 28800 },
+        "assignmentIds": [
+          { "resourceId": "r-shape", "attention": "deep", "effortSeconds": 14400 }
+        ],
+        "percentComplete": 60,
+        "shapeUpScopeId": "scope-report-core",
+        "isShapeUpCycleMarker": true
+      },
+      {
+        "id": "w-shape-export",
+        "projectId": "p-shape-up",
+        "kind": "task",
+        "title": "Build report export",
+        "outline": "2",
+        "durationSeconds": 14400,
+        "estimate": { "mostLikelySeconds": 14400 },
+        "assignmentIds": [
+          { "resourceId": "r-shape", "attention": "medium", "effortSeconds": 7200 }
+        ],
+        "percentComplete": 10,
+        "shapeUpScopeId": "scope-report-export"
+      }
+    ],
+    "dependencies": [
+      {
+        "id": "d-shape-export",
+        "projectId": "p-shape-up",
+        "fromId": "w-shape-core",
+        "toId": "w-shape-export",
+        "type": "FS",
+        "lagSeconds": 0
+      }
+    ],
+    "resources": [
+      {
+        "id": "r-shape",
+        "name": "Legacy builder",
+        "role": "Builder",
+        "capacityByAttention": { "deep": 14400, "medium": 10800, "shallow": 7200 },
+        "hourlyRate": 75
+      }
+    ],
+    "capacities": [
+      {
+        "date": "2023-10-03T00:00:00.000Z",
+        "deepSeconds": 14400,
+        "mediumSeconds": 10800,
+        "shallowSeconds": 7200,
+        "unavailableBlocks": []
+      }
+    ],
+    "baselines": [
+      {
+        "id": "b-shape-up",
+        "projectId": "p-shape-up",
+        "name": "Approved legacy cycle",
+        "capturedAt": "2023-10-02T09:00:00.000Z",
+        "plannedStartByItem": { "w-shape-core": "2023-10-02T09:00:00.000Z" },
+        "plannedFinishByItem": { "w-shape-core": "2023-10-06T17:00:00.000Z" },
+        "plannedWorkSecondsByItem": { "w-shape-core": 14400 },
+        "approvedByDecisionId": "decision-shape-up"
+      }
+    ],
+    "actuals": [
+      {
+        "workItemId": "w-shape-core",
+        "actualStart": "2023-10-02T09:00:00.000Z",
+        "actualWorkSeconds": 10800,
+        "remainingWorkSeconds": 3600,
+        "actualCost": 225,
+        "recordedAt": "2023-10-04T17:00:00.000Z"
+      }
+    ],
+    "evidence": [
+      {
+        "id": "e-shape-up",
+        "kind": "feedback",
+        "summary": "The first team reviewed the shared risk signal.",
+        "projectId": "p-shape-up",
+        "workItemId": "w-shape-core",
+        "createdAt": "2023-10-04T16:00:00.000Z",
+        "confidence": 0.7,
+        "tags": ["legacy", "shape-up"]
+      }
+    ],
+    "decisions": [
+      {
+        "id": "decision-shape-up",
+        "projectId": "p-shape-up",
+        "statement": "Use one guided report.",
+        "context": "Teams disagree on risk.",
+        "options": ["One report", "Keep separate reports"],
+        "rationale": "A shared record is reviewable.",
+        "consequences": "Teams must use the same fields.",
+        "linkedEvidenceIds": ["e-shape-up"],
+        "createdAt": "2023-10-01T12:00:00.000Z"
+      }
+    ],
+    "changeSets": [
+      {
+        "id": "cs-shape-up",
+        "projectId": "p-shape-up",
+        "title": "Narrow the export",
+        "status": "approved",
+        "createdAt": "2023-10-05T10:00:00.000Z",
+        "reason": "Protect the appetite.",
+        "diffs": [
+          {
+            "entity": "WorkItem",
+            "entityId": "w-shape-export",
+            "field": "durationSeconds",
+            "before": 28800,
+            "after": 14400
+          }
+        ],
+        "rollbackToken": "rollback-shape-up",
+        "auditGateIds": ["gate-shape-up"]
+      }
+    ],
+    "auditGates": [
+      {
+        "id": "gate-shape-up",
+        "projectId": "p-shape-up",
+        "targetType": "scope",
+        "targetId": "w-shape-export",
+        "severity": "hard",
+        "reason": "Export exceeds appetite.",
+        "requiredAction": "Narrow export scope.",
+        "status": "cleared"
+      }
+    ],
+    "auditDecisions": [
+      {
+        "id": "ad-shape-up",
+        "projectId": "p-shape-up",
+        "action": "Narrow",
+        "strongestContinueEvidence": "The core report is useful.",
+        "strongestStopReason": "Export may exceed appetite.",
+        "rationale": "Approve only the bounded cycle.",
+        "createdAt": "2023-10-02T09:00:00.000Z",
+        "sourceGateIds": ["gate-shape-up"]
+      }
+    ]
+  }
+}

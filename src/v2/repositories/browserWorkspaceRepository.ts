@@ -1,13 +1,14 @@
 import type { ISODate } from "@/domain/types";
 
 import type { CommandContext, V2Command } from "../domain/commands";
-import { stableHash } from "../domain/stableHash";
+import { sha256Text, stableHash } from "../domain/stableHash";
 import type {
   CommandReceipt,
   JsonValue,
   MigrationRecord,
   WorkspaceV2,
 } from "../domain/types";
+import type { MigrationRecoveryState } from "../migration/recovery";
 import {
   openV2Database,
   requestResult,
@@ -64,11 +65,31 @@ export interface AtomicWorkspaceRepository {
   listReceipts(): Promise<CommandReceipt[]>;
 }
 
+export interface MigrationWorkspaceRepository
+  extends AtomicWorkspaceRepository {
+  loadVerifiedBackup(id: string): Promise<VerifiedBackupRecord | undefined>;
+  saveMigrationRecovery(state: MigrationRecoveryState): Promise<void>;
+  loadMigrationRecovery(): Promise<MigrationRecoveryState | undefined>;
+  clearMigrationRecovery(): Promise<void>;
+  clearMigrationRecoveryIfMatching(
+    expected: MigrationRecoveryIdentity,
+  ): Promise<"cleared" | "not_found" | "not_matching">;
+}
+
+export interface MigrationRecoveryIdentity {
+  sourceChecksum: string;
+  backupId: string;
+  backupChecksum: string;
+}
+
 export type RepositoryTransactionOperation =
   | "initialize"
   | "commit"
   | "commitMigration"
   | "backup"
+  | "saveMigrationRecovery"
+  | "clearMigrationRecovery"
+  | "clearMatchingMigrationRecovery"
   | "markOutboxSent"
   | "appendRejectedReceipt";
 
@@ -82,10 +103,30 @@ export interface BrowserWorkspaceRepositoryOptions {
   ) => void;
 }
 
-interface BackupRecord {
+export interface VerifiedBackupRecord {
   id: string;
   rawPayload: string;
   checksum: string;
+}
+
+type BackupRecord = VerifiedBackupRecord;
+
+const CURRENT_MIGRATION_RECOVERY_KEY = "migration-recovery:current";
+
+interface MigrationRecoveryRecord {
+  id: typeof CURRENT_MIGRATION_RECOVERY_KEY;
+  state: MigrationRecoveryState;
+}
+
+function migrationRecoveryMatches(
+  state: MigrationRecoveryState,
+  expected: MigrationRecoveryIdentity,
+): boolean {
+  return (
+    state.sourceChecksum === expected.sourceChecksum &&
+    state.backupId === expected.backupId &&
+    state.backupChecksum === expected.backupChecksum
+  );
 }
 
 function compareText(left: string, right: string): number {
@@ -420,10 +461,25 @@ export class BrowserWorkspaceRepository implements AtomicWorkspaceRepository {
   }): Promise<"committed" | "already_migrated" | "revision_conflict"> {
     const input = structuredClone(inputValue);
     await assertMigrationTuple(input);
+    const verifiedBackup = await this.loadVerifiedBackup(
+      input.migrationRecord.backupId,
+    );
+    if (
+      verifiedBackup === undefined ||
+      verifiedBackup.checksum !== input.migrationRecord.backupChecksum
+    ) {
+      throw new Error(
+        `Migration requires verified backup ${input.migrationRecord.backupId}.`,
+      );
+    }
     const database = await this.open();
     try {
       const transaction = database.transaction(
-        [V2_OBJECT_STORES.workspace, V2_OBJECT_STORES.migrationRuns],
+        [
+          V2_OBJECT_STORES.workspace,
+          V2_OBJECT_STORES.migrationRuns,
+          V2_OBJECT_STORES.backups,
+        ],
         "readwrite",
       );
       const completion = transactionComplete(transaction);
@@ -431,14 +487,34 @@ export class BrowserWorkspaceRepository implements AtomicWorkspaceRepository {
       const migrationStore = transaction.objectStore(
         V2_OBJECT_STORES.migrationRuns,
       );
-      const [current, existingMigration] = await Promise.all([
+      const backupStore = transaction.objectStore(V2_OBJECT_STORES.backups);
+      const [current, existingMigration, storedBackup, recoveryRecord] = await Promise.all([
         requestResult<WorkspaceV2 | undefined>(
           workspaceStore.get(CURRENT_WORKSPACE_KEY),
         ),
         requestResult<MigrationRecord | undefined>(
           migrationStore.get(input.sourceChecksum),
         ),
+        requestResult<BackupRecord | undefined>(
+          backupStore.get(input.migrationRecord.backupId),
+        ),
+        requestResult<MigrationRecoveryRecord | undefined>(
+          backupStore.get(CURRENT_MIGRATION_RECOVERY_KEY),
+        ),
       ]);
+
+      if (
+        storedBackup === undefined ||
+        storedBackup.id !== verifiedBackup.id ||
+        storedBackup.rawPayload !== verifiedBackup.rawPayload ||
+        storedBackup.checksum !== verifiedBackup.checksum
+      ) {
+        transaction.abort();
+        await completion.catch(() => undefined);
+        throw new Error(
+          `Migration backup ${input.migrationRecord.backupId} changed before atomic commit.`,
+        );
+      }
 
       if (existingMigration !== undefined) {
         transaction.abort();
@@ -462,11 +538,19 @@ export class BrowserWorkspaceRepository implements AtomicWorkspaceRepository {
         CURRENT_WORKSPACE_KEY,
       );
       const migrationRequest = migrationStore.add(input.migrationRecord);
+      const clearRecoveryRequest =
+        recoveryRecord !== undefined &&
+        migrationRecoveryMatches(recoveryRecord.state, input.migrationRecord)
+          ? backupStore.delete(CURRENT_MIGRATION_RECOVERY_KEY)
+          : undefined;
       this.inject("commitMigration", transaction);
       try {
         await Promise.all([
           requestResult(workspaceRequest),
           requestResult(migrationRequest),
+          ...(clearRecoveryRequest === undefined
+            ? []
+            : [requestResult(clearRecoveryRequest)]),
         ]);
         await completion;
         return "committed";
@@ -505,6 +589,9 @@ export class BrowserWorkspaceRepository implements AtomicWorkspaceRepository {
     ) {
       throw new Error("Backup identity, bytes, and checksum are required.");
     }
+    if ((await sha256Text(input.rawPayload)) !== input.checksum) {
+      throw new Error(`Backup ${input.id} checksum does not match its raw bytes.`);
+    }
     const database = await this.open();
     try {
       const transaction = database.transaction(
@@ -532,19 +619,189 @@ export class BrowserWorkspaceRepository implements AtomicWorkspaceRepository {
       const addRequest = store.add(record);
       const verifyRequest = store.get(input.id);
       this.inject("backup", transaction);
-      const [, verified] = await Promise.all([
-        requestResult(addRequest),
-        requestResult<BackupRecord | undefined>(verifyRequest),
-      ]);
-      if (
-        verified?.rawPayload !== input.rawPayload ||
-        verified.checksum !== input.checksum
-      ) {
-        transaction.abort();
+      try {
+        const [, verified] = await Promise.all([
+          requestResult(addRequest),
+          requestResult<BackupRecord | undefined>(verifyRequest),
+        ]);
+        if (
+          verified?.rawPayload !== input.rawPayload ||
+          verified.checksum !== input.checksum
+        ) {
+          transaction.abort();
+          await completion.catch(() => undefined);
+          throw new Error(`Backup ${input.id} failed read-back verification.`);
+        }
+        await completion;
+      } catch (error) {
         await completion.catch(() => undefined);
-        throw new Error(`Backup ${input.id} failed read-back verification.`);
+        throw error;
       }
+    } finally {
+      database.close();
+    }
+  }
+
+  async loadVerifiedBackup(
+    idValue: string,
+  ): Promise<VerifiedBackupRecord | undefined> {
+    const id = structuredClone(idValue);
+    if (id.trim().length === 0) {
+      throw new Error("Backup identity is required.");
+    }
+    const database = await this.open();
+    try {
+      const transaction = database.transaction(
+        V2_OBJECT_STORES.backups,
+        "readonly",
+      );
+      const completion = transactionComplete(transaction);
+      const record = await requestResult<BackupRecord | undefined>(
+        transaction.objectStore(V2_OBJECT_STORES.backups).get(id),
+      );
       await completion;
+      if (record === undefined) return undefined;
+      if (
+        record.id !== id ||
+        typeof record.rawPayload !== "string" ||
+        typeof record.checksum !== "string" ||
+        (await sha256Text(record.rawPayload)) !== record.checksum
+      ) {
+        throw new Error(`Backup ${id} failed read-back checksum verification.`);
+      }
+      return structuredClone(record);
+    } finally {
+      database.close();
+    }
+  }
+
+  async saveMigrationRecovery(
+    stateValue: MigrationRecoveryState,
+  ): Promise<void> {
+    const state = structuredClone(stateValue);
+    const occurredAtMilliseconds = Date.parse(state.occurredAt);
+    if (
+      (state.sourceChecksum !== null && state.sourceChecksum.trim().length === 0) ||
+      state.backupId.trim().length === 0 ||
+      state.backupChecksum.trim().length === 0 ||
+      state.code.trim().length === 0 ||
+      state.message.trim().length === 0 ||
+      !Number.isFinite(occurredAtMilliseconds) ||
+      new Date(occurredAtMilliseconds).toISOString() !== state.occurredAt
+    ) {
+      throw new Error("A canonical migration recovery state is required.");
+    }
+    const backup = await this.loadVerifiedBackup(state.backupId);
+    if (backup === undefined || backup.checksum !== state.backupChecksum) {
+      throw new Error(
+        `Migration recovery requires verified backup ${state.backupId}.`,
+      );
+    }
+    const record: MigrationRecoveryRecord = {
+      id: CURRENT_MIGRATION_RECOVERY_KEY,
+      state,
+    };
+    const database = await this.open();
+    try {
+      const transaction = database.transaction(
+        V2_OBJECT_STORES.backups,
+        "readwrite",
+      );
+      const completion = transactionComplete(transaction);
+      const request = transaction
+        .objectStore(V2_OBJECT_STORES.backups)
+        .put(record);
+      this.inject("saveMigrationRecovery", transaction);
+      await requestResult(request);
+      await completion;
+    } finally {
+      database.close();
+    }
+  }
+
+  async loadMigrationRecovery(): Promise<MigrationRecoveryState | undefined> {
+    const database = await this.open();
+    let state: MigrationRecoveryState | undefined;
+    try {
+      const transaction = database.transaction(
+        V2_OBJECT_STORES.backups,
+        "readonly",
+      );
+      const completion = transactionComplete(transaction);
+      const record = await requestResult<MigrationRecoveryRecord | undefined>(
+        transaction
+          .objectStore(V2_OBJECT_STORES.backups)
+          .get(CURRENT_MIGRATION_RECOVERY_KEY),
+      );
+      await completion;
+      state = record === undefined ? undefined : structuredClone(record.state);
+    } finally {
+      database.close();
+    }
+    if (state === undefined) return undefined;
+    const backup = await this.loadVerifiedBackup(state.backupId);
+    if (backup === undefined || backup.checksum !== state.backupChecksum) {
+      throw new Error(
+        `Migration recovery backup ${state.backupId} failed verification.`,
+      );
+    }
+    return state;
+  }
+
+  async clearMigrationRecovery(): Promise<void> {
+    const database = await this.open();
+    try {
+      const transaction = database.transaction(
+        V2_OBJECT_STORES.backups,
+        "readwrite",
+      );
+      const completion = transactionComplete(transaction);
+      const request = transaction
+        .objectStore(V2_OBJECT_STORES.backups)
+        .delete(CURRENT_MIGRATION_RECOVERY_KEY);
+      this.inject("clearMigrationRecovery", transaction);
+      await requestResult(request);
+      await completion;
+    } finally {
+      database.close();
+    }
+  }
+
+  async clearMigrationRecoveryIfMatching(
+    expectedValue: MigrationRecoveryIdentity,
+  ): Promise<"cleared" | "not_found" | "not_matching"> {
+    const expected = structuredClone(expectedValue);
+    if (
+      expected.sourceChecksum.trim().length === 0 ||
+      expected.backupId.trim().length === 0 ||
+      expected.backupChecksum.trim().length === 0
+    ) {
+      throw new Error("A complete migration recovery identity is required.");
+    }
+    const database = await this.open();
+    try {
+      const transaction = database.transaction(
+        V2_OBJECT_STORES.backups,
+        "readwrite",
+      );
+      const completion = transactionComplete(transaction);
+      const store = transaction.objectStore(V2_OBJECT_STORES.backups);
+      const record = await requestResult<MigrationRecoveryRecord | undefined>(
+        store.get(CURRENT_MIGRATION_RECOVERY_KEY),
+      );
+      if (record === undefined) {
+        await completion;
+        return "not_found";
+      }
+      if (!migrationRecoveryMatches(record.state, expected)) {
+        await completion;
+        return "not_matching";
+      }
+      const request = store.delete(CURRENT_MIGRATION_RECOVERY_KEY);
+      this.inject("clearMatchingMigrationRecovery", transaction);
+      await requestResult(request);
+      await completion;
+      return "cleared";
     } finally {
       database.close();
     }

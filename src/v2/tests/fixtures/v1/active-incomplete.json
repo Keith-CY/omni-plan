@@ -1,0 +1,147 @@
+{
+  "schemaVersion": 1,
+  "exportedAt": "2024-02-29T12:00:00.000Z",
+  "snapshot": {
+    "projects": [
+      {
+        "id": "p-active-incomplete",
+        "name": "Active incomplete",
+        "status": "active",
+        "mode": "build",
+        "priority": 3,
+        "northStar": "Learn whether the active idea deserves a bet.",
+        "currentOutcome": "No direction decisions have been recorded.",
+        "horizon": "2024-05-01T00:00:00.000Z",
+        "start": "2024-02-01T00:00:00.000Z",
+        "reviewCadenceDays": 7
+      },
+      {
+        "id": "p-waiting-incomplete",
+        "name": "Waiting incomplete",
+        "status": "waiting",
+        "mode": "explore",
+        "priority": 2,
+        "northStar": "Wait without losing the original problem.",
+        "currentOutcome": "Audience is known; success is not.",
+        "horizon": "2024-06-01T00:00:00.000Z",
+        "start": "2024-02-02T00:00:00.000Z",
+        "reviewCadenceDays": 14,
+        "directionCard": {
+          "targetUser": "A waiting operator",
+          "userProblem": "The dependency is unresolved.",
+          "businessGoal": "Avoid premature execution.",
+          "coreHypothesis": "Waiting preserves optionality.",
+          "successMetric": "",
+          "failureCondition": "",
+          "validationMethod": "",
+          "timeboxDays": 0,
+          "opportunityCost": "A competing project may move first."
+        }
+      },
+      {
+        "id": "p-paused-incomplete",
+        "name": "Paused incomplete",
+        "status": "paused",
+        "mode": "maintain",
+        "priority": 1,
+        "northStar": "Keep paused work inspectable.",
+        "currentOutcome": "The kill condition is missing.",
+        "horizon": "2024-07-01T00:00:00.000Z",
+        "start": "2024-02-03T00:00:00.000Z",
+        "reviewCadenceDays": 30,
+        "directionCard": {
+          "targetUser": "A paused operator",
+          "userProblem": "The prior scope was too broad.",
+          "businessGoal": "Resume only with a bounded bet.",
+          "coreHypothesis": "A smaller scope can restart progress.",
+          "successMetric": "One bounded outcome is validated.",
+          "failureCondition": "",
+          "validationMethod": "Interview three users.",
+          "timeboxDays": 5,
+          "opportunityCost": "Maintenance work is deferred."
+        }
+      }
+    ],
+    "workItems": [
+      {
+        "id": "w-active-incomplete",
+        "projectId": "p-active-incomplete",
+        "kind": "task",
+        "title": "Capture missing decisions",
+        "outline": "1",
+        "durationSeconds": 3600,
+        "estimate": { "mostLikelySeconds": 3600 },
+        "assignmentIds": [
+          { "resourceId": "r-owner", "attention": "deep", "effortSeconds": 3600 }
+        ],
+        "percentComplete": 0
+      },
+      {
+        "id": "w-waiting-incomplete",
+        "projectId": "p-waiting-incomplete",
+        "kind": "milestone",
+        "title": "Dependency resolves",
+        "outline": "1",
+        "durationSeconds": 0,
+        "estimate": { "mostLikelySeconds": 0 },
+        "assignmentIds": [],
+        "percentComplete": 0
+      },
+      {
+        "id": "w-paused-incomplete",
+        "projectId": "p-paused-incomplete",
+        "kind": "task",
+        "title": "Draft a kill condition",
+        "outline": "1",
+        "durationSeconds": 1800,
+        "estimate": { "mostLikelySeconds": 1800 },
+        "assignmentIds": [
+          { "resourceId": "r-owner", "attention": "medium", "effortSeconds": 1800 }
+        ],
+        "percentComplete": 25
+      }
+    ],
+    "dependencies": [],
+    "resources": [
+      {
+        "id": "r-owner",
+        "name": "Owner",
+        "role": "Operator",
+        "capacityByAttention": { "deep": 10800, "medium": 7200, "shallow": 3600 },
+        "hourlyRate": 100
+      },
+      {
+        "id": "r-reviewer",
+        "name": "Reviewer",
+        "role": "Advisor",
+        "capacityByAttention": { "deep": 3600, "medium": 7200, "shallow": 7200 },
+        "hourlyRate": 150
+      }
+    ],
+    "capacities": [
+      {
+        "date": "2024-02-29T00:00:00.000Z",
+        "deepSeconds": 10800,
+        "mediumSeconds": 7200,
+        "shallowSeconds": 3600,
+        "unavailableBlocks": [
+          { "start": "2024-02-29T03:00:00.000Z", "finish": "2024-02-29T04:00:00.000Z" }
+        ]
+      },
+      {
+        "date": "2024-03-01T00:00:00.000Z",
+        "deepSeconds": 7200,
+        "mediumSeconds": 7200,
+        "shallowSeconds": 7200,
+        "unavailableBlocks": []
+      }
+    ],
+    "baselines": [],
+    "actuals": [],
+    "evidence": [],
+    "decisions": [],
+    "changeSets": [],
+    "auditGates": [],
+    "auditDecisions": []
+  }
+}
