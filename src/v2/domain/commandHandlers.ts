@@ -6,7 +6,6 @@ import type {
   DirectionBrief,
   InboxItem,
   ProjectV2,
-  TriageRecommendation,
   WorkspaceV2,
 } from "./types";
 
@@ -140,17 +139,6 @@ function updatedInboxForAction(
     recommendation: evaluateActionEligibility(action.eligibility),
     triageStatus: "action",
     actionId: action.id,
-  };
-}
-
-function confirmedProjectRecommendation(
-  code: "PROJECT_CONFIRMED" | "ACTION_PROMOTED",
-  explanation: string,
-): TriageRecommendation {
-  return {
-    kind: "project",
-    ruleCodes: [code],
-    explanation,
   };
 }
 
@@ -454,10 +442,7 @@ export async function applyCommandHandler(
       const inboxItems = [...workspace.inboxItems];
       inboxItems[inboxIndex] = {
         ...inboxItem,
-        recommendation: confirmedProjectRecommendation(
-          "PROJECT_CONFIRMED",
-          "Human confirmed that this Inbox item requires Project structure.",
-        ),
+        recommendation: evaluateActionEligibility(command.eligibility),
         triageStatus: "project",
         projectId: project.id,
       };
@@ -664,13 +649,7 @@ export async function applyCommandHandler(
       const inboxItems = [...workspace.inboxItems];
       inboxItems[inboxIndex] = {
         ...inboxItem,
-        recommendation:
-          evaluatedRecommendation.kind === "project"
-            ? evaluatedRecommendation
-            : confirmedProjectRecommendation(
-                "ACTION_PROMOTED",
-                "Human promoted this Action to a Project.",
-              ),
+        recommendation: evaluatedRecommendation,
         triageStatus: "project",
         projectId: project.id,
       };

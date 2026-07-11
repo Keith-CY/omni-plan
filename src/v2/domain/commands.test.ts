@@ -240,6 +240,14 @@ const ALL_COMMANDS = [
   {
     type: "confirm_project_triage",
     inboxItemId: "inbox-1",
+    eligibility: {
+      singleSession: true,
+      estimateSeconds: 1_800,
+      dependencyIds: [],
+      requiresMilestoneEvidence: false,
+      outcomeCount: 1,
+      solutionKnown: true,
+    },
     project: { id: "project-1", name: "Project", priority: 1, notes: "" },
   },
   {
@@ -2013,12 +2021,16 @@ describe("executeCommand Action triage and promotion", () => {
 
   it("rejects Action confirmation when deterministic policy recommends Project", async () => {
     const workspace = buildCapturedWorkspace();
+    const projectEligibility = {
+      ...eligibility,
+      dependencyIds: ["dependency-1"],
+    };
     const command = {
       type: "confirm_action_triage",
       inboxItemId: "inbox-triage",
       action: {
         ...actionDraft,
-        eligibility: { ...eligibility, dependencyIds: ["dependency-1"] },
+        eligibility: projectEligibility,
       },
     } as const satisfies V2Command;
 
@@ -2035,6 +2047,30 @@ describe("executeCommand Action triage and promotion", () => {
     });
     expect(workspace.inboxItems[0].triageStatus).toBe("untriaged");
     expect(workspace.actions).toEqual([]);
+
+    const projectResult = await executeCommand(
+      result.workspace,
+      {
+        type: "confirm_project_triage",
+        inboxItemId: "inbox-triage",
+        eligibility: projectEligibility,
+        project: {
+          id: "project-triaged",
+          name: "Launch project",
+          priority: 2,
+          notes: "Shape the launch",
+        },
+      } as const,
+      buildContext({ commandId: "command-confirm-project" }),
+    );
+
+    expect(projectResult.ok).toBe(true);
+    if (!projectResult.ok) throw new Error("Expected Project triage to apply");
+    expect(projectResult.workspace.inboxItems[0].recommendation).toEqual({
+      kind: "project",
+      ruleCodes: ["NO_DEPENDENCY"],
+      explanation: "Has a dependency.",
+    });
   });
 
   it("lets a human confirm an Inbox item as a Direction-stage Project", async () => {
@@ -2042,6 +2078,7 @@ describe("executeCommand Action triage and promotion", () => {
     const command = {
       type: "confirm_project_triage",
       inboxItemId: "inbox-triage",
+      eligibility,
       project: {
         id: "project-triaged",
         name: "Launch project",
@@ -2085,10 +2122,9 @@ describe("executeCommand Action triage and promotion", () => {
       triageStatus: "project",
       projectId: "project-triaged",
       recommendation: {
-        kind: "project",
-        ruleCodes: ["PROJECT_CONFIRMED"],
-        explanation:
-          "Human confirmed that this Inbox item requires Project structure.",
+        kind: "action",
+        ruleCodes: [],
+        explanation: "Fits the lightweight Action boundary.",
       },
     });
     expect(result.workspace.actions).toEqual([]);
@@ -2104,6 +2140,7 @@ describe("executeCommand Action triage and promotion", () => {
           : {
               type,
               inboxItemId: "inbox-triage",
+              eligibility,
               project: {
                 id: "project-triaged",
                 name: "Launch project",
@@ -2483,9 +2520,9 @@ describe("executeCommand Action triage and promotion", () => {
       projectId: "project-promoted",
       triageStatus: "project",
       recommendation: {
-        kind: "project",
-        ruleCodes: ["ACTION_PROMOTED"],
-        explanation: "Human promoted this Action to a Project.",
+        kind: "action",
+        ruleCodes: [],
+        explanation: "Fits the lightweight Action boundary.",
       },
     });
     expect(result.workspace.actuals).toEqual(original.actuals);

@@ -95,6 +95,7 @@ export type V2Command =
   | {
       type: "confirm_project_triage";
       inboxItemId: Id;
+      eligibility: Action["eligibility"];
       project: ProjectDraft;
     }
   | {
@@ -682,6 +683,7 @@ function isStructurallyValidCommand(value: unknown): value is V2Command {
     case "confirm_project_triage":
       return (
         isStringValue(value.inboxItemId) &&
+        isActionEligibilityValue(value.eligibility) &&
         isProjectDraftValue(value.project)
       );
     case "update_project_metadata":
