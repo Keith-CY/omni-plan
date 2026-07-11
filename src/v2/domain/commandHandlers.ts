@@ -6,6 +6,11 @@ import {
   isDirectionComplete,
   isMaterialDirectionChange,
 } from "./direction";
+import {
+  hasActualEffort,
+  isConcreteEvidenceRequirement,
+  requirementStatus,
+} from "./evidence";
 import { transitionLifecycle } from "./lifecycle";
 import {
   capacityForLocalDate,
@@ -33,6 +38,7 @@ import type {
   CommitmentSlot,
   DailyCommitment,
   DirectionBrief,
+  ExceptionRecord,
   InboxItem,
   JsonValue,
   ProjectV2,
@@ -85,6 +91,19 @@ function entityNotFound(
     reason: `${entity} ${id} does not exist.`,
     gate: `entity:${entity}:${id}`,
     permittedNextCommand,
+  });
+}
+
+function duplicateEntityIdentity(
+  workspace: WorkspaceV2,
+  context: CommandContext,
+  entity: string,
+  id: string,
+): CommandHandlerResult {
+  return rejection(workspace, context, "SYNC_CONFLICT", {
+    reason: `${entity} ${id} has duplicate records for one identity.`,
+    gate: `entity_identity:${entity}:${id}`,
+    permittedNextCommand: "resolve_sync_conflict",
   });
 }
 
@@ -595,6 +614,34 @@ export async function applyCommandHandler(
   command: V2Command,
   context: CommandContext,
 ): Promise<CommandHandlerResult> {
+  if (context.commandId.trim().length === 0) {
+    return rejection(workspace, context, "INVALID_COMMAND", {
+      reason: "Command ID cannot be empty.",
+      gate: "command_context:command_id",
+      permittedNextCommand: command.type,
+    });
+  }
+  if (context.actorId.trim().length === 0) {
+    return rejection(workspace, context, "INVALID_COMMAND", {
+      reason: "Actor ID cannot be empty.",
+      gate: "command_context:actor_id",
+      permittedNextCommand: command.type,
+    });
+  }
+  if (!isCanonicalIsoTimestamp(context.now)) {
+    return rejection(workspace, context, "INVALID_COMMAND", {
+      reason: "Command time must be a canonical authoritative timestamp.",
+      gate: `command:${context.commandId}:time`,
+      permittedNextCommand: command.type,
+    });
+  }
+  const receiptCollision = commandReceiptCollisionRejection(
+    workspace,
+    context,
+    command.type,
+  );
+  if (receiptCollision !== undefined) return receiptCollision;
+
   const misusedActionId = actionIdentityMisuse(workspace, command);
   if (misusedActionId !== undefined) {
     return rejection(workspace, context, "ACTION_PROMOTION_REQUIRED", {
@@ -888,10 +935,10 @@ export async function applyCommandHandler(
     }
 
     case "complete_action": {
-      const actionIndex = workspace.actions.findIndex(
+      const actionsWithIdentity = workspace.actions.filter(
         ({ id }) => id === command.actionId,
       );
-      if (actionIndex < 0) {
+      if (actionsWithIdentity.length === 0) {
         return entityNotFound(
           workspace,
           context,
@@ -900,7 +947,18 @@ export async function applyCommandHandler(
           "confirm_action_triage",
         );
       }
-      const action = workspace.actions[actionIndex];
+      if (actionsWithIdentity.length !== 1) {
+        return duplicateEntityIdentity(
+          workspace,
+          context,
+          "Action",
+          command.actionId,
+        );
+      }
+      const action = actionsWithIdentity[0];
+      const actionIndex = workspace.actions.findIndex(
+        ({ id }) => id === action.id,
+      );
       if (action.status !== "open") {
         return rejection(workspace, context, "REVISION_CONFLICT", {
           reason: `Action ${action.id} is already ${action.status}.`,
@@ -911,19 +969,33 @@ export async function applyCommandHandler(
               : "read_completed_action",
         });
       }
-      if (command.actualSeconds < 0) {
+      if (
+        !Number.isSafeInteger(command.actualSeconds) ||
+        command.actualSeconds <= 0
+      ) {
         return rejection(workspace, context, "INVALID_COMMAND", {
-          reason: "Action actual effort cannot be negative.",
+          reason: "Action completion requires positive actual effort.",
           gate: `action_actual:${action.id}`,
           permittedNextCommand: "complete_action",
         });
       }
+      const outcomeNote = command.outcomeNote.trim();
+      if (outcomeNote.length === 0) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason: "Action completion requires a concise outcome.",
+          gate: `action_outcome:${action.id}`,
+          permittedNextCommand: "complete_action",
+        });
+      }
       const actualId = `${context.commandId}:actual`;
-      if (workspace.actuals.some(({ id }) => id === actualId)) {
+      const actualCollision = entityIdCollision(workspace, actualId, [
+        { entity: "CommandReceipt", id: context.commandId },
+      ]);
+      if (actualCollision !== undefined) {
         return entityAlreadyExists(
           workspace,
           context,
-          "ActualV2",
+          actualCollision,
           actualId,
           "read_existing_command_receipt",
         );
@@ -933,7 +1005,8 @@ export async function applyCommandHandler(
         ...action,
         revision: action.revision + 1,
         status: "completed",
-        outcomeNote: command.outcomeNote,
+        resultStatus: command.resultStatus,
+        outcomeNote,
         updatedAt: context.now,
       };
       return {
@@ -1546,6 +1619,18 @@ export async function applyCommandHandler(
           permittedNextCommand: "create_work_item",
         });
       }
+      if (
+        command.workItem.resultStatus !== undefined ||
+        command.workItem.outcomeNote !== undefined ||
+        command.workItem.percentComplete >= 100
+      ) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason:
+            "A new Work Item cannot bypass completion state or outcome recording.",
+          gate: `work_item:${command.workItem.id}:completion_state`,
+          permittedNextCommand: "complete_work_item",
+        });
+      }
       const collision = entityIdCollision(workspace, command.workItem.id, [
         { entity: "CommandReceipt", id: context.commandId },
       ]);
@@ -1593,10 +1678,10 @@ export async function applyCommandHandler(
       if (!access.ok) {
         return planningAccessRejection(workspace, context, access);
       }
-      const workItemIndex = workspace.workItems.findIndex(
+      const workItemsWithIdentity = workspace.workItems.filter(
         ({ id }) => id === command.workItemId,
       );
-      if (workItemIndex < 0) {
+      if (workItemsWithIdentity.length === 0) {
         return entityNotFound(
           workspace,
           context,
@@ -1605,13 +1690,63 @@ export async function applyCommandHandler(
           "create_work_item",
         );
       }
-      const workItem = workspace.workItems[workItemIndex];
+      if (workItemsWithIdentity.length !== 1) {
+        return duplicateEntityIdentity(
+          workspace,
+          context,
+          "ProjectWorkItem",
+          command.workItemId,
+        );
+      }
+      const workItem = workItemsWithIdentity[0];
+      const workItemIndex = workspace.workItems.findIndex(
+        ({ id }) => id === workItem.id,
+      );
       if (workItem.projectId !== access.project.id) {
         return rejection(workspace, context, "INVALID_COMMAND", {
           reason: `Work Item ${workItem.id} does not belong to Project ${access.project.id}.`,
           gate: `work_item:${workItem.id}:project`,
           permittedNextCommand: "update_work_item",
         });
+      }
+      if (
+        Object.prototype.hasOwnProperty.call(command.patch, "resultStatus") ||
+        Object.prototype.hasOwnProperty.call(command.patch, "outcomeNote") ||
+        (command.patch.percentComplete !== undefined &&
+          command.patch.percentComplete >= 100)
+      ) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason:
+            "Work Item completion state and outcome may only be written by complete_work_item.",
+          gate: `work_item:${workItem.id}:completion_state`,
+          permittedNextCommand: "complete_work_item",
+        });
+      }
+      if (isConcreteEvidenceRequirement(workItem)) {
+        if (
+          (Object.prototype.hasOwnProperty.call(
+            command.patch,
+            "evidenceRequired",
+          ) && command.patch.evidenceRequired !== true) ||
+          (Object.prototype.hasOwnProperty.call(command.patch, "kind") &&
+            command.patch.kind !== "milestone")
+        ) {
+          return rejection(workspace, context, "INVALID_COMMAND", {
+            reason: `Evidence requirement ${workItem.id} cannot be downgraded or cleared.`,
+            gate: `work_item:${workItem.id}:evidence_requirement`,
+            permittedNextCommand: "attach_evidence",
+          });
+        }
+        const nextKind = command.patch.kind ?? workItem.kind;
+        const nextEvidenceRequired =
+          command.patch.evidenceRequired ?? workItem.evidenceRequired;
+        if (nextKind !== "milestone" || nextEvidenceRequired !== true) {
+          return rejection(workspace, context, "INVALID_COMMAND", {
+            reason: `Evidence requirement ${workItem.id} cannot be downgraded or cleared.`,
+            gate: `work_item:${workItem.id}:evidence_requirement`,
+            permittedNextCommand: "attach_evidence",
+          });
+        }
       }
       const nextScopeId = command.patch.betScopeId ?? workItem.betScopeId;
       if (
@@ -1647,10 +1782,10 @@ export async function applyCommandHandler(
       if (!access.ok) {
         return planningAccessRejection(workspace, context, access);
       }
-      const workItemIndex = workspace.workItems.findIndex(
+      const workItemsWithIdentity = workspace.workItems.filter(
         ({ id }) => id === command.workItemId,
       );
-      if (workItemIndex < 0) {
+      if (workItemsWithIdentity.length === 0) {
         return entityNotFound(
           workspace,
           context,
@@ -1659,12 +1794,30 @@ export async function applyCommandHandler(
           "create_work_item",
         );
       }
-      const workItem = workspace.workItems[workItemIndex];
+      if (workItemsWithIdentity.length !== 1) {
+        return duplicateEntityIdentity(
+          workspace,
+          context,
+          "ProjectWorkItem",
+          command.workItemId,
+        );
+      }
+      const workItem = workItemsWithIdentity[0];
+      const workItemIndex = workspace.workItems.findIndex(
+        ({ id }) => id === workItem.id,
+      );
       if (workItem.projectId !== access.project.id) {
         return rejection(workspace, context, "INVALID_COMMAND", {
           reason: `Work Item ${workItem.id} does not belong to Project ${access.project.id}.`,
           gate: `work_item:${workItem.id}:project`,
           permittedNextCommand: "complete_work_item",
+        });
+      }
+      if (workItem.resultStatus !== undefined) {
+        return rejection(workspace, context, "REVISION_CONFLICT", {
+          reason: `Work Item ${workItem.id} already has an immutable completion result.`,
+          gate: `work_item:${workItem.id}:result`,
+          permittedNextCommand: "read_completed_work_item",
         });
       }
       if (
@@ -1678,12 +1831,57 @@ export async function applyCommandHandler(
           workItem.betScopeId,
         );
       }
+      if (
+        !hasActualEffort(
+          workspace,
+          {
+            kind: "work_item",
+            workItemId: workItem.id,
+          },
+          context.now,
+        )
+      ) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason: `Work Item ${workItem.id} requires recorded actual effort before completion.`,
+          gate: `work_item:${workItem.id}:actual_effort`,
+          permittedNextCommand: "record_actual",
+        });
+      }
+      const outcomeNote = command.outcomeNote.trim();
+      if (outcomeNote.length === 0) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason: `Work Item ${workItem.id} completion requires a concise outcome.`,
+          gate: `work_item:${workItem.id}:outcome`,
+          permittedNextCommand: command.type,
+        });
+      }
+      if (isConcreteEvidenceRequirement(workItem)) {
+        const status = requirementStatus(
+          workspace,
+          workItem.projectId,
+          workItem.id,
+          context.now,
+        );
+        if (!status.satisfied) {
+          return rejection(workspace, context, status.code, {
+            reason:
+              status.code === "EXCEPTION_EXPIRED"
+                ? `Evidence exception ${status.exceptionId} expired before Work Item ${workItem.id} completion.`
+                : `Work Item ${workItem.id} requires exact linked Evidence or an active evidence exception.`,
+            gate: `work_item:${workItem.id}:evidence`,
+            permittedNextCommand:
+              status.code === "EXCEPTION_EXPIRED"
+                ? "approve_evidence_exception"
+                : "attach_evidence",
+          });
+        }
+      }
       const workItems = [...workspace.workItems];
       workItems[workItemIndex] = {
         ...workItem,
         revision: workItem.revision + 1,
         resultStatus: command.resultStatus,
-        outcomeNote: command.outcomeNote,
+        outcomeNote,
       };
       return { ok: true, workspace: { ...workspace, workItems } };
     }
@@ -1698,10 +1896,10 @@ export async function applyCommandHandler(
       if (!access.ok) {
         return planningAccessRejection(workspace, context, access);
       }
-      const workItem = workspace.workItems.find(
+      const workItemsWithIdentity = workspace.workItems.filter(
         ({ id }) => id === command.workItemId,
       );
-      if (workItem === undefined) {
+      if (workItemsWithIdentity.length === 0) {
         return entityNotFound(
           workspace,
           context,
@@ -1710,11 +1908,27 @@ export async function applyCommandHandler(
           "create_work_item",
         );
       }
+      if (workItemsWithIdentity.length !== 1) {
+        return duplicateEntityIdentity(
+          workspace,
+          context,
+          "ProjectWorkItem",
+          command.workItemId,
+        );
+      }
+      const workItem = workItemsWithIdentity[0];
       if (workItem.projectId !== access.project.id) {
         return rejection(workspace, context, "INVALID_COMMAND", {
           reason: `Work Item ${workItem.id} does not belong to Project ${access.project.id}.`,
           gate: `work_item:${workItem.id}:project`,
           permittedNextCommand: "remove_work_item",
+        });
+      }
+      if (isConcreteEvidenceRequirement(workItem)) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason: `Evidence requirement ${workItem.id} cannot be deleted or cleared.`,
+          gate: `work_item:${workItem.id}:evidence_requirement`,
+          permittedNextCommand: "attach_evidence",
         });
       }
       const linkedDependency = workspace.dependencies.find(
@@ -2761,13 +2975,574 @@ export async function applyCommandHandler(
       };
     }
 
-    case "record_actual":
-    case "attach_evidence":
-    case "approve_evidence_exception":
-    case "resolve_evidence_exception":
-    case "request_validation":
-    case "satisfy_validation":
-      return notImplemented(workspace, context);
+    case "record_actual": {
+      const receiptCollision = commandReceiptCollisionRejection(
+        workspace,
+        context,
+        command.type,
+      );
+      if (receiptCollision !== undefined) return receiptCollision;
+      if (command.actual.id.trim().length === 0) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason: "Actual ID cannot be empty.",
+          gate: `actual:${command.actual.id}:id`,
+          permittedNextCommand: command.type,
+        });
+      }
+      const collision = entityIdCollision(workspace, command.actual.id, [
+        { entity: "CommandReceipt", id: context.commandId },
+      ]);
+      if (collision !== undefined) {
+        return entityAlreadyExists(
+          workspace,
+          context,
+          collision,
+          command.actual.id,
+          command.type,
+        );
+      }
+      if (command.actual.revision !== 1) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason: "A new append-only Actual must start at revision 1.",
+          gate: `actual:${command.actual.id}:revision`,
+          permittedNextCommand: command.type,
+        });
+      }
+      if (
+        !Number.isSafeInteger(command.actual.actualWorkSeconds) ||
+        command.actual.actualWorkSeconds <= 0
+      ) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason: "Actual work seconds must be a positive safe integer.",
+          gate: `actual:${command.actual.id}:actualWorkSeconds`,
+          permittedNextCommand: command.type,
+        });
+      }
+      if (
+        !Number.isSafeInteger(command.actual.remainingWorkSeconds) ||
+        command.actual.remainingWorkSeconds < 0
+      ) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason: "Remaining work seconds must be a nonnegative safe integer.",
+          gate: `actual:${command.actual.id}:remainingWorkSeconds`,
+          permittedNextCommand: command.type,
+        });
+      }
+      if (
+        !Number.isFinite(command.actual.actualCost) ||
+        command.actual.actualCost < 0 ||
+        command.actual.actualCost > Number.MAX_SAFE_INTEGER
+      ) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason: "Actual cost must be a nonnegative safe number.",
+          gate: `actual:${command.actual.id}:actualCost`,
+          permittedNextCommand: command.type,
+        });
+      }
+      const actualStart = command.actual.actualStart;
+      const actualFinish = command.actual.actualFinish;
+      const recordedAt = command.actual.recordedAt;
+      const timestampsAreCanonical =
+        isCanonicalIsoTimestamp(recordedAt) &&
+        (actualStart === undefined || isCanonicalIsoTimestamp(actualStart)) &&
+        (actualFinish === undefined || isCanonicalIsoTimestamp(actualFinish));
+      const timestampsAreOrdered =
+        (actualStart === undefined ||
+          Date.parse(actualStart) <= Date.parse(recordedAt)) &&
+        (actualFinish === undefined ||
+          Date.parse(actualFinish) <= Date.parse(recordedAt)) &&
+        (actualStart === undefined ||
+          actualFinish === undefined ||
+          Date.parse(actualStart) <= Date.parse(actualFinish)) &&
+        Date.parse(recordedAt) <= Date.parse(context.now);
+      if (!timestampsAreCanonical || !timestampsAreOrdered) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason:
+            "Actual timestamps must be canonical, ordered, and no later than the command time.",
+          gate: `actual:${command.actual.id}:timestamps`,
+          permittedNextCommand: command.type,
+        });
+      }
+      if (command.actual.target.kind === "action") {
+        const actionId = command.actual.target.actionId;
+        const actions = workspace.actions.filter(
+          ({ id }) => id === actionId,
+        );
+        if (actions.length === 0) {
+          return entityNotFound(
+            workspace,
+            context,
+            "Action",
+            actionId,
+            "confirm_action_triage",
+          );
+        }
+        if (actions.length !== 1) {
+          return rejection(workspace, context, "SYNC_CONFLICT", {
+            reason: `Actual ${command.actual.id} target Action ${actionId} is duplicated.`,
+            gate: `actual:${command.actual.id}:target`,
+            permittedNextCommand: "resolve_sync_conflict",
+          });
+        }
+      } else {
+        const workItemId = command.actual.target.workItemId;
+        const workItems = workspace.workItems.filter(
+          ({ id }) => id === workItemId,
+        );
+        if (workItems.length === 0) {
+          return entityNotFound(
+            workspace,
+            context,
+            "ProjectWorkItem",
+            workItemId,
+            "create_work_item",
+          );
+        }
+        if (workItems.length !== 1) {
+          return rejection(workspace, context, "SYNC_CONFLICT", {
+            reason: `Actual ${command.actual.id} target Work Item ${workItemId} is duplicated.`,
+            gate: `actual:${command.actual.id}:target`,
+            permittedNextCommand: "resolve_sync_conflict",
+          });
+        }
+        const workItem = workItems[0];
+        const access = resolvePlanningContext(
+          workspace,
+          workItem.projectId,
+          context.now,
+          command.type,
+        );
+        if (!access.ok) {
+          return planningAccessRejection(workspace, context, access);
+        }
+        if (
+          !access.bet.committedScope.some(({ id }) => id === workItem.betScopeId)
+        ) {
+          return scopeOutsideBet(
+            workspace,
+            context,
+            workItem.projectId,
+            access.bet.id,
+            workItem.betScopeId,
+          );
+        }
+      }
+      return {
+        ok: true,
+        workspace: {
+          ...workspace,
+          actuals: [...workspace.actuals, structuredClone(command.actual)],
+        },
+      };
+    }
+
+    case "attach_evidence": {
+      const receiptCollision = commandReceiptCollisionRejection(
+        workspace,
+        context,
+        command.type,
+      );
+      if (receiptCollision !== undefined) return receiptCollision;
+      if (
+        command.evidence.id.trim().length === 0 ||
+        command.evidence.summary.trim().length === 0 ||
+        command.evidence.projectId.trim().length === 0 ||
+        (command.evidence.workItemId !== undefined &&
+          command.evidence.workItemId.trim().length === 0) ||
+        (command.evidence.url !== undefined &&
+          command.evidence.url.trim().length === 0) ||
+        (command.evidence.localFileRef !== undefined &&
+          command.evidence.localFileRef.trim().length === 0)
+      ) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason:
+            "Evidence requires non-empty identity, summary, ownership, and optional reference fields.",
+          gate: `evidence:${command.evidence.id}:details`,
+          permittedNextCommand: command.type,
+        });
+      }
+      if (
+        command.evidence.confidence < 0 ||
+        command.evidence.confidence > 1
+      ) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason: "Evidence confidence must be between zero and one.",
+          gate: `evidence:${command.evidence.id}:confidence`,
+          permittedNextCommand: command.type,
+        });
+      }
+      if (
+        !isCanonicalIsoTimestamp(context.now) ||
+        !isCanonicalIsoTimestamp(command.evidence.createdAt) ||
+        Date.parse(command.evidence.createdAt) > Date.parse(context.now)
+      ) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason:
+            "Evidence creation time must be canonical and no later than the command time.",
+          gate: `evidence:${command.evidence.id}:created_at`,
+          permittedNextCommand: command.type,
+        });
+      }
+      const normalizedTags = command.evidence.tags.map((tag) => tag.trim());
+      if (
+        normalizedTags.some((tag) => tag.length === 0) ||
+        normalizedTags.some(
+          (tag, index) => tag !== command.evidence.tags[index],
+        ) ||
+        new Set(normalizedTags).size !== normalizedTags.length
+      ) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason: "Evidence tags must be non-empty, trimmed, and unique.",
+          gate: `evidence:${command.evidence.id}:tags`,
+          permittedNextCommand: command.type,
+        });
+      }
+      const collision = entityIdCollision(workspace, command.evidence.id, [
+        { entity: "CommandReceipt", id: context.commandId },
+      ]);
+      if (collision !== undefined) {
+        return entityAlreadyExists(
+          workspace,
+          context,
+          collision,
+          command.evidence.id,
+          command.type,
+        );
+      }
+      const projects = workspace.projects.filter(
+        ({ id }) => id === command.evidence.projectId,
+      );
+      if (projects.length !== 1) {
+        return entityNotFound(
+          workspace,
+          context,
+          "ProjectV2",
+          command.evidence.projectId,
+          "confirm_project_triage",
+        );
+      }
+      if (projects[0].stage === "closed") {
+        return rejection(workspace, context, "PROJECT_CLOSED", {
+          reason: `Closed Project ${projects[0].id} cannot accept new Evidence.`,
+          gate: `project:${projects[0].id}:closed`,
+          permittedNextCommand: "create_follow_up_project",
+        });
+      }
+      if (command.evidence.workItemId !== undefined) {
+        const workItems = workspace.workItems.filter(
+          ({ id, projectId }) =>
+            id === command.evidence.workItemId &&
+            projectId === command.evidence.projectId,
+        );
+        if (workItems.length !== 1) {
+          return entityNotFound(
+            workspace,
+            context,
+            "ProjectWorkItem",
+            command.evidence.workItemId,
+            "create_work_item",
+          );
+        }
+      }
+      return {
+        ok: true,
+        workspace: {
+          ...workspace,
+          evidence: [...workspace.evidence, structuredClone(command.evidence)],
+        },
+      };
+    }
+
+    case "approve_evidence_exception": {
+      const receiptCollision = commandReceiptCollisionRejection(
+        workspace,
+        context,
+        command.type,
+      );
+      if (receiptCollision !== undefined) return receiptCollision;
+      const collision = entityIdCollision(workspace, command.exception.id, [
+        { entity: "CommandReceipt", id: context.commandId },
+      ]);
+      if (collision !== undefined) {
+        return entityAlreadyExists(
+          workspace,
+          context,
+          collision,
+          command.exception.id,
+          command.type,
+        );
+      }
+      const projects = workspace.projects.filter(
+        ({ id }) => id === command.exception.projectId,
+      );
+      if (projects.length !== 1) {
+        return entityNotFound(
+          workspace,
+          context,
+          "ProjectV2",
+          command.exception.projectId,
+          "confirm_project_triage",
+        );
+      }
+      if (projects[0].stage === "closed") {
+        return rejection(workspace, context, "PROJECT_CLOSED", {
+          reason: `Closed Project ${projects[0].id} cannot approve an evidence exception.`,
+          gate: `project:${projects[0].id}:closed`,
+          permittedNextCommand: "create_follow_up_project",
+        });
+      }
+      const rationale = command.exception.rationale.trim();
+      const knownConsequence = command.exception.knownConsequence.trim();
+      if (
+        command.exception.id.trim().length === 0 ||
+        rationale.length === 0 ||
+        knownConsequence.length === 0
+      ) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason:
+            "An evidence exception requires an ID, rationale, and known consequence.",
+          gate: `exception:${command.exception.id}:details`,
+          permittedNextCommand: command.type,
+        });
+      }
+      const reviewAt = command.exception.reviewAt;
+      const expiresAt = command.exception.expiresAt;
+      if (
+        !isCanonicalIsoTimestamp(reviewAt) ||
+        !isCanonicalIsoTimestamp(expiresAt) ||
+        !isCanonicalIsoTimestamp(context.now) ||
+        Date.parse(context.now) > Date.parse(reviewAt) ||
+        Date.parse(reviewAt) >= Date.parse(expiresAt) ||
+        Date.parse(context.now) >= Date.parse(expiresAt)
+      ) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason:
+            "An evidence exception requires canonical dates with creation <= review < expiry and a future expiry.",
+          gate: `exception:${command.exception.id}:window`,
+          permittedNextCommand: command.type,
+        });
+      }
+      const requirements = workspace.workItems.filter(
+        (item) =>
+          item.id === command.exception.requirementId &&
+          item.projectId === command.exception.projectId &&
+          isConcreteEvidenceRequirement(item),
+      );
+      if (requirements.length !== 1) {
+        return rejection(workspace, context, "EVIDENCE_REQUIRED", {
+          reason: `Exception ${command.exception.id} must target one exact same-project evidence-required milestone.`,
+          gate: `exception:${command.exception.id}:requirement`,
+          permittedNextCommand: "create_work_item",
+        });
+      }
+      const record: ExceptionRecord = {
+        id: command.exception.id,
+        projectId: command.exception.projectId,
+        requirementId: command.exception.requirementId,
+        rationale,
+        knownConsequence,
+        reviewAt,
+        expiresAt,
+        approvedBy: context.actorId,
+        createdAt: context.now,
+        history: [
+          {
+            action: "created" as const,
+            actorId: context.actorId,
+            at: context.now,
+            note: rationale,
+          },
+        ],
+      };
+      return {
+        ok: true,
+        workspace: {
+          ...workspace,
+          exceptions: [...workspace.exceptions, record],
+        },
+      };
+    }
+
+    case "resolve_evidence_exception": {
+      const receiptCollision = commandReceiptCollisionRejection(
+        workspace,
+        context,
+        command.type,
+      );
+      if (receiptCollision !== undefined) return receiptCollision;
+      const matches = workspace.exceptions
+        .map((record, index) => ({ record, index }))
+        .filter(({ record }) => record.id === command.exceptionId);
+      if (matches.length !== 1) {
+        return entityNotFound(
+          workspace,
+          context,
+          "ExceptionRecord",
+          command.exceptionId,
+          "approve_evidence_exception",
+        );
+      }
+      const { record, index } = matches[0];
+      const project = workspace.projects.find(({ id }) => id === record.projectId);
+      if (project?.stage === "closed") {
+        return rejection(workspace, context, "PROJECT_CLOSED", {
+          reason: `Closed Project ${project.id} cannot mutate Exception ${record.id}.`,
+          gate: `project:${project.id}:closed`,
+          permittedNextCommand: "create_follow_up_project",
+        });
+      }
+      if (record.resolvedAt !== undefined) {
+        return rejection(workspace, context, "REVISION_CONFLICT", {
+          reason: `Exception ${record.id} is already resolved.`,
+          gate: `exception:${record.id}:resolution`,
+          permittedNextCommand: "read_resolved_exception",
+        });
+      }
+      const resolution = command.resolution.trim();
+      if (
+        resolution.length === 0 ||
+        !isCanonicalIsoTimestamp(context.now) ||
+        Date.parse(context.now) < Date.parse(record.createdAt)
+      ) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason:
+            "Exception resolution requires a non-empty note at or after creation.",
+          gate: `exception:${record.id}:resolution`,
+          permittedNextCommand: command.type,
+        });
+      }
+      const exceptions = [...workspace.exceptions];
+      exceptions[index] = {
+        ...record,
+        resolvedAt: context.now,
+        history: [
+          ...record.history.map((entry) => structuredClone(entry)),
+          {
+            action: "resolved",
+            actorId: context.actorId,
+            at: context.now,
+            note: resolution,
+          },
+        ],
+      };
+      return { ok: true, workspace: { ...workspace, exceptions } };
+    }
+
+    case "request_validation": {
+      const receiptCollision = commandReceiptCollisionRejection(
+        workspace,
+        context,
+        command.type,
+      );
+      if (receiptCollision !== undefined) return receiptCollision;
+      const access = resolvePlanningContext(
+        workspace,
+        command.projectId,
+        context.now,
+        command.type,
+      );
+      if (!access.ok) {
+        return planningAccessRejection(workspace, context, access);
+      }
+      const projectIndex = workspace.projects.findIndex(
+        ({ id }) => id === access.project.id,
+      );
+      const event =
+        access.project.stage === "planning"
+          ? "closure_requested"
+          : "validation_requested";
+      const transition = transitionLifecycle(access.project, event);
+      if (!transition.ok) {
+        return rejection(workspace, context, transition.code, {
+          reason: `Project ${access.project.id} cannot request validation from ${access.project.stage}.`,
+          gate: `project:${access.project.id}:stage:${access.project.stage}`,
+          permittedNextCommand: "use_legal_lifecycle_command",
+        });
+      }
+      const projects = [...workspace.projects];
+      projects[projectIndex] = {
+        ...transition.project,
+        updatedAt: context.now,
+      };
+      return { ok: true, workspace: { ...workspace, projects } };
+    }
+
+    case "satisfy_validation": {
+      const receiptCollision = commandReceiptCollisionRejection(
+        workspace,
+        context,
+        command.type,
+      );
+      if (receiptCollision !== undefined) return receiptCollision;
+      const matches = workspace.projects
+        .map((project, index) => ({ project, index }))
+        .filter(({ project }) => project.id === command.projectId);
+      if (matches.length !== 1) {
+        return entityNotFound(
+          workspace,
+          context,
+          "ProjectV2",
+          command.projectId,
+          "confirm_project_triage",
+        );
+      }
+      const { project, index } = matches[0];
+      if (project.stage === "closed") {
+        return rejection(workspace, context, "PROJECT_CLOSED", {
+          reason: `Closed Project ${project.id} cannot satisfy validation.`,
+          gate: `project:${project.id}:closed`,
+          permittedNextCommand: "create_follow_up_project",
+        });
+      }
+      if (project.stage !== "validating") {
+        return rejection(workspace, context, "ILLEGAL_LIFECYCLE_TRANSITION", {
+          reason: `Project ${project.id} cannot satisfy validation from ${project.stage}.`,
+          gate: `project:${project.id}:stage:${project.stage}`,
+          permittedNextCommand: "request_validation",
+        });
+      }
+      const requirements = workspace.workItems
+        .filter(
+          (item) =>
+            item.projectId === project.id &&
+            isConcreteEvidenceRequirement(item),
+        )
+        .sort((left, right) =>
+          left.id < right.id ? -1 : left.id > right.id ? 1 : 0,
+        );
+      for (const requirement of requirements) {
+        const status = requirementStatus(
+          workspace,
+          project.id,
+          requirement.id,
+          context.now,
+        );
+        if (!status.satisfied) {
+          return rejection(workspace, context, status.code, {
+            reason:
+              status.code === "EXCEPTION_EXPIRED"
+                ? `Evidence exception ${status.exceptionId} expired before Project ${project.id} validation was satisfied.`
+                : `Project ${project.id} requires exact Evidence or an active exception for milestone ${requirement.id}.`,
+            gate: `project:${project.id}:requirement:${requirement.id}`,
+            permittedNextCommand:
+              status.code === "EXCEPTION_EXPIRED"
+                ? "approve_evidence_exception"
+                : "attach_evidence",
+          });
+        }
+      }
+      const transition = transitionLifecycle(project, "validation_satisfied");
+      if (!transition.ok) {
+        return rejection(workspace, context, transition.code, {
+          reason: `Project ${project.id} cannot satisfy validation from ${project.stage}.`,
+          gate: `project:${project.id}:stage:${project.stage}`,
+          permittedNextCommand: "request_validation",
+        });
+      }
+      const projects = [...workspace.projects];
+      projects[index] = { ...transition.project, updatedAt: context.now };
+      return { ok: true, workspace: { ...workspace, projects } };
+    }
 
     case "record_bet_boundary": {
       const projectIndex = workspace.projects.findIndex(

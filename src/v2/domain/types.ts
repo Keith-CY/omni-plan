@@ -101,6 +101,7 @@ export interface Action {
   attention: AttentionKind;
   desiredDate?: ISODate;
   fixedStart?: ISODate;
+  resultStatus?: ResultStatus;
   outcomeNote?: string;
   promotedProjectId?: Id;
   createdAt: ISODate;

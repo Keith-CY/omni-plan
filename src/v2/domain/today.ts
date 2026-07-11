@@ -282,45 +282,32 @@ function latestActuals(actuals: ActualV2[]): Map<string, ActualV2> {
 
 function actionIsComplete(
   item: Action,
-  actuals: Map<string, ActualV2>,
+  _actuals: Map<string, ActualV2>,
 ): boolean {
-  return (
-    item.status !== "open" ||
-    actuals.get(`action:${item.id}`)?.remainingWorkSeconds === 0
-  );
+  return item.resultStatus !== undefined;
 }
 
 function workItemIsComplete(
   item: ProjectWorkItem,
-  actuals: Map<string, ActualV2>,
+  _actuals: Map<string, ActualV2>,
 ): boolean {
-  return (
-    item.resultStatus !== undefined ||
-    item.percentComplete >= 100 ||
-    actuals.get(`work_item:${item.id}`)?.remainingWorkSeconds === 0
-  );
+  return item.resultStatus !== undefined;
 }
 
 function targetSatisfiesDependency(
   workspace: WorkspaceV2,
   targetId: Id,
-  actuals: Map<string, ActualV2>,
+  _actuals: Map<string, ActualV2>,
 ): boolean {
   const action = workspace.actions.find(({ id }) => id === targetId);
   if (action !== undefined) {
     return (
-      action.status === "completed" ||
-      actuals.get(`action:${action.id}`)?.remainingWorkSeconds === 0
+      action.resultStatus === "completed" || action.resultStatus === "learned"
     );
   }
   const item = workspace.workItems.find(({ id }) => id === targetId);
   if (item === undefined || item.resultStatus === "blocked") return false;
-  return (
-    item.resultStatus === "completed" ||
-    item.resultStatus === "learned" ||
-    item.percentComplete >= 100 ||
-    actuals.get(`work_item:${item.id}`)?.remainingWorkSeconds === 0
-  );
+  return item.resultStatus === "completed" || item.resultStatus === "learned";
 }
 
 function targetIsUnfinished(
@@ -364,7 +351,8 @@ function remainingDuration(
   fallback: Seconds,
   actuals: Map<string, ActualV2>,
 ): Seconds {
-  return actuals.get(targetKey)?.remainingWorkSeconds ?? fallback;
+  const remaining = actuals.get(targetKey)?.remainingWorkSeconds;
+  return remaining === undefined || remaining <= 0 ? fallback : remaining;
 }
 
 function attentionForWorkItem(item: ProjectWorkItem): AttentionKind {
@@ -625,7 +613,9 @@ function actionCandidate(
   capacity: LocalDateCapacity,
   actuals: Map<string, ActualV2>,
 ): TodayCandidate | undefined {
-  if (actionIsComplete(action, actuals)) return undefined;
+  if (action.status !== "open" || actionIsComplete(action, actuals)) {
+    return undefined;
+  }
   const durationSeconds = remainingDuration(
     `action:${action.id}`,
     action.eligibility.estimateSeconds,

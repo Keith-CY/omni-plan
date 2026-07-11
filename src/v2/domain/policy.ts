@@ -154,6 +154,8 @@ const overdueReviewBlockedCommands = new Set([
   "capture_baseline",
   "commit_today",
   "accept_replan",
+  "request_validation",
+  "satisfy_validation",
 ]);
 
 const holdPriority: Record<ProjectHold, number> = {

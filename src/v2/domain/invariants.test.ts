@@ -1179,21 +1179,13 @@ describe("validateWorkspaceInvariants exceptions", () => {
     expect(violationsWithCode(workspace, "EXCEPTION_EXPIRED")).toEqual([]);
   });
 
-  it("expires an exception only when completed evidence-required work relies on it", () => {
+  it("leaves expired exception enforcement to the command that consumes it", () => {
     const workspace = buildValidWorkspace();
     workspace.workItems[0].evidenceRequired = true;
     workspace.workItems[0].resultStatus = "completed";
     workspace.exceptions = [buildException()];
 
-    expect(violationsWithCode(workspace, "EXCEPTION_EXPIRED")).toEqual([
-      {
-        code: "EXCEPTION_EXPIRED",
-        reason:
-          "Expired exception exception-1 no longer satisfies the evidence requirement for Work Item work-item-1.",
-        gate: "work_item:work-item-1:expired_exception",
-        permittedNextCommand: "approve_evidence_exception",
-      },
-    ]);
+    expect(violationsWithCode(workspace, "EXCEPTION_EXPIRED")).toEqual([]);
   });
 
   it("does not rely on an expired exception when evidence is attached", () => {
@@ -1215,7 +1207,7 @@ describe("validateWorkspaceInvariants exceptions", () => {
     expect(violationsWithCode(workspace, "EXCEPTION_EXPIRED")).toEqual([]);
   });
 
-  it("does not accept Evidence owned by another Project for the same Work Item", () => {
+  it("does not turn wrong-project Evidence into a global invariant failure", () => {
     const workspace = buildValidWorkspace();
     const otherBrief = buildDirectionBrief({
       id: "brief-2",
@@ -1246,15 +1238,7 @@ describe("validateWorkspaceInvariants exceptions", () => {
       tags: [],
     });
 
-    expect(violationsWithCode(workspace, "EXCEPTION_EXPIRED")).toEqual([
-      {
-        code: "EXCEPTION_EXPIRED",
-        reason:
-          "Expired exception exception-1 no longer satisfies the evidence requirement for Work Item work-item-1.",
-        gate: "work_item:work-item-1:expired_exception",
-        permittedNextCommand: "approve_evidence_exception",
-      },
-    ]);
+    expect(violationsWithCode(workspace, "EXCEPTION_EXPIRED")).toEqual([]);
   });
 
   it("does not treat resolved or future exceptions as expired", () => {
@@ -2541,8 +2525,8 @@ describe("validateWorkspaceInvariants determinism", () => {
     expect(first).toEqual(second);
     expect(codes(first)).toEqual([
       "BET_EXPIRED",
-      "EXCEPTION_EXPIRED",
       "PROJECT_CLOSED",
+      "ENTITY_NOT_FOUND",
       "ENTITY_NOT_FOUND",
     ]);
     expect(JSON.parse(JSON.stringify(first))).toEqual(first);

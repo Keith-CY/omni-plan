@@ -873,85 +873,6 @@ function validateScopeRules(
   }
 }
 
-function validateExceptionRules(
-  workspace: WorkspaceV2,
-  now: ISODate,
-  add: AddViolation,
-): void {
-  const nowTimestamp = parseTimestamp(now);
-  if (nowTimestamp === undefined) {
-    return;
-  }
-
-  const evidencedWorkItemKeys = new Set(
-    workspace.evidence
-      .filter(({ workItemId }) => workItemId !== undefined)
-      .map(({ projectId, workItemId }) =>
-        JSON.stringify([projectId, workItemId]),
-      ),
-  );
-
-  for (const workItem of sortedById(workspace.workItems)) {
-    if (
-      workItem.evidenceRequired !== true ||
-      workItem.resultStatus === undefined ||
-      evidencedWorkItemKeys.has(
-        JSON.stringify([workItem.projectId, workItem.id]),
-      )
-    ) {
-      continue;
-    }
-
-    const matchingExceptions = sortedById(
-      workspace.exceptions.filter(
-        (exception) =>
-          exception.projectId === workItem.projectId &&
-          exception.requirementId === workItem.id &&
-          exception.resolvedAt === undefined,
-      ),
-    );
-    const hasActiveException = matchingExceptions.some((exception) => {
-      const createdAt = parseTimestamp(exception.createdAt);
-      const expiresAt = parseTimestamp(exception.expiresAt);
-      return (
-        createdAt !== undefined &&
-        expiresAt !== undefined &&
-        createdAt <= nowTimestamp &&
-        nowTimestamp < expiresAt
-      );
-    });
-    if (hasActiveException) {
-      continue;
-    }
-
-    const expiredExceptions = matchingExceptions.filter((exception) => {
-      const createdAt = parseTimestamp(exception.createdAt);
-      const expiresAt = parseTimestamp(exception.expiresAt);
-      return (
-        createdAt !== undefined &&
-        expiresAt !== undefined &&
-        createdAt <= nowTimestamp &&
-        expiresAt <= nowTimestamp
-      );
-    });
-    if (expiredExceptions.length === 0) {
-      continue;
-    }
-
-    const exceptionIds = expiredExceptions.map(({ id }) => id).join(", ");
-    add(
-      "EXCEPTION_EXPIRED",
-      `Expired exception${
-        expiredExceptions.length === 1 ? "" : "s"
-      } ${exceptionIds} no longer satisf${
-        expiredExceptions.length === 1 ? "ies" : "y"
-      } the evidence requirement for Work Item ${workItem.id}.`,
-      `work_item:${workItem.id}:expired_exception`,
-      "approve_evidence_exception",
-    );
-  }
-}
-
 function closedProjectSnapshot(workspace: WorkspaceV2, projectId: Id): unknown {
   const projects = sortedById(
     workspace.projects.filter((project) => project.id === projectId),
@@ -1829,11 +1750,12 @@ function validateReferenceRules(
     if (
       requirement === undefined ||
       requirement.projectId !== exception.projectId ||
+      requirement.kind !== "milestone" ||
       requirement.evidenceRequired !== true
     ) {
       add(
         "ENTITY_NOT_FOUND",
-        `ExceptionRecord ${exception.id} must reference an evidence-required Work Item ${exception.requirementId} in Project ${exception.projectId}.`,
+        `ExceptionRecord ${exception.id} must reference an evidence-required milestone ${exception.requirementId} in Project ${exception.projectId}.`,
         gate,
         "repair_workspace_reference",
       );
@@ -1875,7 +1797,6 @@ export function validateWorkspaceInvariants(
   validateBetRules(workspace, now, previousWorkspace, collector.add);
   validateCapacityRules(workspace, collector.add);
   validateScopeRules(workspace, previousWorkspace, collector.add);
-  validateExceptionRules(workspace, now, collector.add);
   validateClosedProjectRules(workspace, previousWorkspace, collector.add);
   validateReferenceRules(workspace, collector.add);
 

@@ -264,6 +264,7 @@ const ALL_COMMANDS = [
     type: "complete_action",
     actionId: "action-1",
     actualSeconds: 900,
+    resultStatus: "completed",
     outcomeNote: "Done",
   },
   {
@@ -1796,6 +1797,7 @@ describe("executeCommand trusted policy projection", () => {
     const committedWorkspace = buildProjectWorkspace("review_overdue", {
       workItems: [WORK_ITEM],
       dailyCommitments: [commitment],
+      capacityProfile: structuredClone(commitment.capacitySnapshot),
     });
     const command = { type: "record_actual", actual: ACTUAL } as const;
     const context = buildContext({ expectedRevision: 11 });
@@ -1811,7 +1813,7 @@ describe("executeCommand trusted policy projection", () => {
       code: "HOLD_BLOCKS_COMMAND",
       hold: "review_overdue",
     });
-    expect(committed.rejection.code).toBe("COMMAND_NOT_IMPLEMENTED");
+    expect(committed.rejection.code).toBe("BET_REQUIRED");
   });
 
   it("allows only committed Work Items to complete during overdue review", async () => {
@@ -1834,6 +1836,7 @@ describe("executeCommand trusted policy projection", () => {
     const committedWorkspace = buildProjectWorkspace("review_overdue", {
       workItems: [WORK_ITEM],
       dailyCommitments: [commitment],
+      capacityProfile: structuredClone(commitment.capacitySnapshot),
     });
     const command = {
       type: "complete_work_item",
@@ -1894,6 +1897,176 @@ describe("executeCommand trusted policy projection", () => {
         buildContext({
           commandId: "complete-yesterday",
           expectedRevision: workspace.revision,
+        }),
+      ),
+    );
+
+    expect(result.rejection).toMatchObject({
+      code: "HOLD_BLOCKS_COMMAND",
+      hold: "review_overdue",
+    });
+  });
+
+  it("does not revive a historical commitment after the workspace timezone changes", async () => {
+    const snapshot = buildCapacityProfile({
+      timeZone: "Asia/Tokyo",
+      dailyBudgets: [
+        {
+          weekday: 6,
+          deepSeconds: 7_200,
+          mediumSeconds: 0,
+          shallowSeconds: 0,
+        },
+      ],
+      updatedAt: NOW,
+      updatedBy: "human-1",
+    });
+    const commitment = buildCommitment({
+      localDate: "2026-07-11",
+      capacitySnapshot: snapshot,
+    });
+    const workspace = buildProjectWorkspace("review_overdue", {
+      workItems: [WORK_ITEM],
+      dailyCommitments: [commitment],
+      capacityProfile: buildCapacityProfile({
+        timeZone: "UTC",
+        updatedAt: NOW,
+        updatedBy: "human-1",
+      }),
+    });
+
+    const result = rejected(
+      await executeCommand(
+        workspace,
+        { type: "record_actual", actual: ACTUAL },
+        buildContext({
+          commandId: "record-after-timezone-change",
+          expectedRevision: workspace.revision,
+          now: "2026-07-11T23:30:00.000Z",
+        }),
+      ),
+    );
+
+    expect(result.rejection).toMatchObject({
+      code: "HOLD_BLOCKS_COMMAND",
+      hold: "review_overdue",
+    });
+  });
+
+  it("keeps a commitment current by its immutable snapshot timezone", async () => {
+    const snapshot = buildCapacityProfile({
+      timeZone: "Asia/Tokyo",
+      dailyBudgets: [
+        {
+          weekday: 0,
+          deepSeconds: 7_200,
+          mediumSeconds: 0,
+          shallowSeconds: 0,
+        },
+      ],
+      updatedAt: NOW,
+      updatedBy: "human-1",
+    });
+    const commitment = buildCommitment({
+      localDate: "2026-07-12",
+      capacitySnapshot: snapshot,
+      committedAt: "2026-07-11T23:00:00.000Z",
+      slots: [
+        {
+          ...COMMITMENT_SLOT,
+          start: "2026-07-11T23:00:00.000Z",
+          finish: "2026-07-11T23:30:00.000Z",
+        },
+      ],
+    });
+    const workspace = buildProjectWorkspace("review_overdue", {
+      workItems: [WORK_ITEM],
+      dailyCommitments: [commitment],
+      capacityProfile: buildCapacityProfile({
+        timeZone: "UTC",
+        updatedAt: NOW,
+        updatedBy: "human-1",
+      }),
+    });
+
+    const result = rejected(
+      await executeCommand(
+        workspace,
+        { type: "record_actual", actual: ACTUAL },
+        buildContext({
+          commandId: "record-current-snapshot-timezone",
+          expectedRevision: workspace.revision,
+          now: "2026-07-11T23:30:00.000Z",
+        }),
+      ),
+    );
+
+    expect(result.rejection.code).toBe("BET_REQUIRED");
+  });
+
+  it("fails closed when multiple sole leaves are current in their snapshot timezones", async () => {
+    const utcCommitment = buildCommitment({
+      id: "commitment-utc",
+      localDate: "2026-07-11",
+      capacitySnapshot: buildCapacityProfile({
+        timeZone: "UTC",
+        dailyBudgets: [
+          {
+            weekday: 6,
+            deepSeconds: 7_200,
+            mediumSeconds: 0,
+            shallowSeconds: 0,
+          },
+        ],
+        updatedAt: NOW,
+        updatedBy: "human-1",
+      }),
+    });
+    const tokyoCommitment = buildCommitment({
+      id: "commitment-tokyo",
+      localDate: "2026-07-12",
+      proposalHash: "commitment-tokyo-hash",
+      capacitySnapshot: buildCapacityProfile({
+        timeZone: "Asia/Tokyo",
+        dailyBudgets: [
+          {
+            weekday: 0,
+            deepSeconds: 7_200,
+            mediumSeconds: 0,
+            shallowSeconds: 0,
+          },
+        ],
+        updatedAt: NOW,
+        updatedBy: "human-1",
+      }),
+      committedAt: "2026-07-11T23:00:00.000Z",
+      slots: [
+        {
+          ...COMMITMENT_SLOT,
+          id: "slot-tokyo",
+          start: "2026-07-11T23:00:00.000Z",
+          finish: "2026-07-11T23:30:00.000Z",
+        },
+      ],
+    });
+    const workspace = buildProjectWorkspace("review_overdue", {
+      workItems: [WORK_ITEM],
+      dailyCommitments: [utcCommitment, tokyoCommitment],
+      capacityProfile: buildCapacityProfile({
+        timeZone: "UTC",
+        updatedAt: NOW,
+        updatedBy: "human-1",
+      }),
+    });
+
+    const result = rejected(
+      await executeCommand(
+        workspace,
+        { type: "record_actual", actual: ACTUAL },
+        buildContext({
+          commandId: "record-ambiguous-current-leaves",
+          expectedRevision: workspace.revision,
+          now: "2026-07-11T23:30:00.000Z",
         }),
       ),
     );
@@ -2304,6 +2477,7 @@ describe("executeCommand trusted policy projection", () => {
     const retainedWorkspace = buildProjectWorkspace("review_overdue", {
       workItems: [WORK_ITEM],
       dailyCommitments: [historical, retained],
+      capacityProfile: structuredClone(retained.capacitySnapshot),
     });
     const command = { type: "record_actual", actual: ACTUAL } as const;
     const context = buildContext({ expectedRevision: 11 });
@@ -2322,7 +2496,7 @@ describe("executeCommand trusted policy projection", () => {
       code: "HOLD_BLOCKS_COMMAND",
       hold: "review_overdue",
     });
-    expect(retainedResult.rejection.code).toBe("COMMAND_NOT_IMPLEMENTED");
+    expect(retainedResult.rejection.code).toBe("BET_REQUIRED");
   });
 
   it("selects malformed commitment forks deterministically", async () => {
@@ -2770,6 +2944,7 @@ describe("executeCommand Action triage and promotion", () => {
         type: "complete_action",
         actionId: "action-triaged",
         actualSeconds: 1_200,
+        resultStatus: "completed",
         outcomeNote: "Launch notes published",
       },
       buildContext({

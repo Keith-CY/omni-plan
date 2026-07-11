@@ -429,6 +429,15 @@ describe("Bet-scoped Work Item planning", () => {
 
   it("completes a Work Item without changing its identity or prior workspace", async () => {
     const workspace = activeWorkspace({ workItems: [WORK_ITEM] });
+    workspace.actuals.push({
+      id: "actual-complete-work-item",
+      revision: 1,
+      target: { kind: "work_item", workItemId: WORK_ITEM.id },
+      actualWorkSeconds: 300,
+      remainingWorkSeconds: 0,
+      actualCost: 0,
+      recordedAt: NOW,
+    });
     const before = structuredClone(workspace);
 
     const result = await executeCommand(

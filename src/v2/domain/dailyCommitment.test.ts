@@ -1174,6 +1174,14 @@ describe("versioned Replan acceptance", () => {
 
     const completedSecondProject = structuredClone(expansionAccepted.workspace);
     completedSecondProject.revision += 1;
+    const completedWorkItem = completedSecondProject.workItems.find(
+      ({ id }) => id === "work-project-2",
+    );
+    expect(completedWorkItem).toBeDefined();
+    if (completedWorkItem === undefined) return;
+    completedWorkItem.revision += 1;
+    completedWorkItem.resultStatus = "completed";
+    completedWorkItem.outcomeNote = "Second project outcome delivered.";
     completedSecondProject.actuals.push({
       id: "actual-project-2-complete",
       revision: 1,
@@ -1677,15 +1685,14 @@ describe("versioned Replan acceptance", () => {
         recordedAt: GENERATED_AT,
       },
     };
-    const actual = rejected(
+    const actual = applied(
       await executeCommand(
         committed,
         actualCommand,
         context(committed.revision, { commandId: "review-actual" }),
       ),
     );
-    expect(actual.rejection.code).toBe("COMMAND_NOT_IMPLEMENTED");
-    expect(actual.rejection.code).not.toBe("HOLD_BLOCKS_COMMAND");
+    expect(actual.workspace.actuals).toContainEqual(actualCommand.actual);
     expect(JSON.stringify(actual.workspace.dailyCommitments[0])).toBe(
       JSON.stringify(committed.dailyCommitments[0]),
     );

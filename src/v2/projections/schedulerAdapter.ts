@@ -72,11 +72,18 @@ export function workItemToSchedulerInput(item: ProjectWorkItem): WorkItem {
   const {
     revision: _revision,
     betScopeId,
-    resultStatus: _resultStatus,
+    resultStatus,
     outcomeNote: _outcomeNote,
     ...shared
   } = structuredClone(item);
-  return { ...shared, shapeUpScopeId: betScopeId };
+  return {
+    ...shared,
+    percentComplete:
+      resultStatus === "completed" || resultStatus === "learned"
+        ? 100
+        : Math.min(shared.percentComplete, 99),
+    shapeUpScopeId: betScopeId,
+  };
 }
 
 function dependencyToSchedulerInput(

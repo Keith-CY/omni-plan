@@ -17,6 +17,7 @@ import {
   type AuthorizationContext,
 } from "./policy";
 import { stableHash } from "./stableHash";
+import { soleCommitmentLeafForLocalDate } from "./today";
 import type {
   Action,
   ActorKind,
@@ -114,6 +115,7 @@ export type V2Command =
       type: "complete_action";
       actionId: Id;
       actualSeconds: number;
+      resultStatus: "completed" | "learned" | "blocked";
       outcomeNote: string;
     }
   | {
@@ -765,6 +767,7 @@ function isStructurallyValidCommand(value: unknown): value is V2Command {
       return (
         isStringValue(value.actionId) &&
         isFiniteNumberValue(value.actualSeconds) &&
+        isOneOf(value.resultStatus, ["completed", "learned", "blocked"]) &&
         isStringValue(value.outcomeNote)
       );
     case "promote_action_to_project":
@@ -1033,12 +1036,29 @@ function soleEffectiveCommitmentForNow(
   workspace: WorkspaceV2,
   now: ISODate,
 ): DailyCommitment | undefined {
-  const current = effectiveDailyCommitments(workspace).filter(
-    (commitment) =>
+  const matching: DailyCommitment[] = [];
+  const localDates = [
+    ...new Set(workspace.dailyCommitments.map(({ localDate }) => localDate)),
+  ].sort(compareText);
+
+  for (const localDate of localDates) {
+    const couldBeCurrent = workspace.dailyCommitments.some(
+      (commitment) =>
+        commitment.localDate === localDate &&
+        localDateAt(now, commitment.capacitySnapshot.timeZone) === localDate,
+    );
+    if (!couldBeCurrent) continue;
+    const commitment = soleCommitmentLeafForLocalDate(workspace, localDate);
+    if (commitment === undefined) return undefined;
+    if (
       localDateAt(now, commitment.capacitySnapshot.timeZone) ===
-      commitment.localDate,
-  );
-  return current.length === 1 ? current[0] : undefined;
+      commitment.localDate
+    ) {
+      matching.push(commitment);
+    }
+  }
+
+  return matching.length === 1 ? matching[0] : undefined;
 }
 
 function affectedExistingProjectIds(
@@ -1562,13 +1582,30 @@ function targetWasCommitted(
   if (targetId === undefined) {
     return false;
   }
-
-  return effectiveDailyCommitments(workspace).some((commitment) =>
-    commitment.slots.some(({ target }) =>
-      targetKind === "action"
-        ? target.kind === "action" && target.actionId === targetId
-        : target.kind === "work_item" && target.workItemId === targetId,
-    ),
+  const commitment = soleEffectiveCommitmentForNow(workspace, now);
+  if (commitment === undefined) return false;
+  if (targetKind === "action") {
+    const actions = recordsWithId(workspace.actions, targetId);
+    return (
+      actions.length === 1 &&
+      commitment.slots.some(
+        ({ target, targetRevision }) =>
+          target.kind === "action" &&
+          target.actionId === targetId &&
+          targetRevision === actions[0].revision,
+      )
+    );
+  }
+  const workItems = recordsWithId(workspace.workItems, targetId);
+  return (
+    workItems.length === 1 &&
+    commitment.slots.some(
+      ({ target, targetRevision }) =>
+        target.kind === "work_item" &&
+        target.workItemId === targetId &&
+        target.projectId === workItems[0].projectId &&
+        targetRevision === workItems[0].revision,
+    )
   );
 }
 

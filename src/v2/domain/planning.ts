@@ -406,8 +406,10 @@ export function resolvePlanningContext(
   now: ISODate,
   commandType: string,
 ): PlanningContextResult {
-  const project = workspace.projects.find(({ id }) => id === projectId);
-  if (project === undefined) {
+  const projectsWithIdentity = workspace.projects.filter(
+    ({ id }) => id === projectId,
+  );
+  if (projectsWithIdentity.length === 0) {
     return {
       ok: false,
       code: "ENTITY_NOT_FOUND",
@@ -416,6 +418,16 @@ export function resolvePlanningContext(
       permittedNextCommand: "confirm_project_triage",
     };
   }
+  if (projectsWithIdentity.length !== 1) {
+    return {
+      ok: false,
+      code: "SYNC_CONFLICT",
+      reason: `ProjectV2 ${projectId} has duplicate records for one identity.`,
+      gate: `entity_identity:ProjectV2:${projectId}`,
+      permittedNextCommand: "resolve_sync_conflict",
+    };
+  }
+  const project = projectsWithIdentity[0];
 
   if (project.stage === "closed") {
     return {
