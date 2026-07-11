@@ -1404,6 +1404,34 @@ export async function applyCommandHandler(
         );
       }
       const project = workspace.projects[projectIndex];
+      const boundaryBet =
+        project.activeBetId === undefined
+          ? undefined
+          : workspace.bets.find(({ id }) => id === project.activeBetId);
+      const atRecordedAppetiteBoundary =
+        project.stage === "validating" &&
+        boundaryBet !== undefined &&
+        boundaryBet.projectId === project.id &&
+        boundaryBet.invalidatedAt === undefined &&
+        isCanonicalIsoTimestamp(boundaryBet.appetiteEnd) &&
+        isCanonicalIsoTimestamp(context.now) &&
+        Date.parse(context.now) >= Date.parse(boundaryBet.appetiteEnd) &&
+        project.holds.some(
+          ({ type, sourceId }) =>
+            type === "rebet_required" && sourceId === boundaryBet.id,
+        );
+      if (!atRecordedAppetiteBoundary) {
+        return rejection(
+          workspace,
+          context,
+          "ILLEGAL_LIFECYCLE_TRANSITION",
+          {
+            reason: `Project ${project.id} may use abandon_project only after its recorded appetite boundary.`,
+            gate: `project:${project.id}:appetite_boundary`,
+            permittedNextCommand: "record_bet_boundary",
+          },
+        );
+      }
       if (
         command.decision.projectId !== project.id ||
         command.decision.successComparison.trim().length === 0 ||

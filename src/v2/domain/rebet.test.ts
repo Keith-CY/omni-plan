@@ -871,6 +871,88 @@ describe("Bet appetite boundary", () => {
     },
   );
 
+  it.each([
+    {
+      name: "ordinary validation without an expiry boundary",
+      workspace: () => activeWorkspace("validating"),
+    },
+    {
+      name: "a material-change Re-bet hold with an invalidated Bet",
+      workspace: () => rebetWorkspace("validating"),
+    },
+  ])("rejects abandon during $name", async ({ workspace: buildWorkspace }) => {
+    const workspace = buildWorkspace();
+
+    const result = rejected(
+      await executeCommand(
+        workspace,
+        {
+          type: "abandon_project",
+          projectId: "project-1",
+          decision: {
+            id: "abandon-outside-expiry",
+            projectId: "project-1",
+            successComparison: "The target evidence was not achieved.",
+            outcome: "abandoned",
+            keyLearning: "Validation alone is not an expiry decision.",
+            unfinishedDisposition: "historical_incomplete",
+          },
+        },
+        context({
+          commandId: "command-abandon-outside-expiry",
+          now: APPETITE_END,
+        }),
+      ),
+    );
+
+    expect(result.rejection).toMatchObject({
+      code: "ILLEGAL_LIFECYCLE_TRANSITION",
+      gate: "project:project-1:appetite_boundary",
+      permittedNextCommand: "record_bet_boundary",
+    });
+    expect(result.workspace).toBe(workspace);
+  });
+
+  it("rejects a forged expiry hold before the immutable appetite end", async () => {
+    const workspace = activeWorkspace("validating");
+    workspace.projects[0].holds = [
+      {
+        type: "rebet_required",
+        sourceId: BET.id,
+        affectedRecordIds: ["project-1", BET.id],
+        createdAt: "2026-07-11T10:30:00.000Z",
+      },
+    ];
+
+    const result = rejected(
+      await executeCommand(
+        workspace,
+        {
+          type: "abandon_project",
+          projectId: "project-1",
+          decision: {
+            id: "abandon-before-expiry",
+            projectId: "project-1",
+            successComparison: "The target evidence was not achieved.",
+            outcome: "abandoned",
+            keyLearning: "A hold cannot move the appetite boundary.",
+            unfinishedDisposition: "historical_incomplete",
+          },
+        },
+        context({
+          commandId: "command-abandon-before-expiry",
+          now: "2026-07-11T10:59:59.999Z",
+        }),
+      ),
+    );
+
+    expect(result.rejection).toMatchObject({
+      code: "ILLEGAL_LIFECYCLE_TRANSITION",
+      gate: "project:project-1:appetite_boundary",
+      permittedNextCommand: "record_bet_boundary",
+    });
+  });
+
   it("allows a human to abandon at expiry only with a structured close decision", async () => {
     const expired = applied(
       await executeCommand(
