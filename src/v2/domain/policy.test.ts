@@ -262,6 +262,7 @@ describe("authorizeCommand authority matrix", () => {
   const humanOnly = [
     "confirm_action_triage",
     "confirm_project_triage",
+    "promote_action_to_project",
     "place_bet",
     "commit_today",
     "accept_replan",
@@ -297,7 +298,6 @@ describe("authorizeCommand authority matrix", () => {
     "update_project_metadata",
     "update_action",
     "complete_action",
-    "promote_action_to_project",
     "resolve_evidence_exception",
     "request_validation",
     "satisfy_validation",
@@ -440,6 +440,30 @@ describe("authorizeCommand authority matrix", () => {
     ).toMatchObject({
       code: "HUMAN_CONFIRMATION_REQUIRED",
       permittedNextCommand: "place_bet",
+    });
+  });
+
+  it("replays a human Action promotion but never imports one as confirmed", () => {
+    expect(
+      authorizeCommand(
+        "promote_action_to_project",
+        buildContext("human", {
+          origin: "sync",
+          source: buildSource(["replay_receipt"]),
+        }),
+      ),
+    ).toBeUndefined();
+    expect(
+      authorizeCommand(
+        "promote_action_to_project",
+        buildContext("human", {
+          origin: "import",
+          source: buildSource(["import_portable", "human_decision"]),
+        }),
+      ),
+    ).toMatchObject({
+      code: "HUMAN_CONFIRMATION_REQUIRED",
+      permittedNextCommand: "promote_action_to_project",
     });
   });
 

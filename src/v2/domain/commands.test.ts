@@ -265,6 +265,14 @@ const ALL_COMMANDS = [
   {
     type: "promote_action_to_project",
     actionId: "action-1",
+    eligibility: {
+      singleSession: true,
+      estimateSeconds: 1_800,
+      dependencyIds: ["dependency-1"],
+      requiresMilestoneEvidence: false,
+      outcomeCount: 1,
+      solutionKnown: true,
+    },
     project: { id: "project-1", name: "Project", priority: 1, notes: "" },
   },
   {
@@ -2484,12 +2492,131 @@ describe("executeCommand Action triage and promotion", () => {
     },
   );
 
+  it.each([
+    {
+      name: "Close decision ID",
+      command: {
+        type: "close_project",
+        projectId: "project-1",
+        decision: {
+          id: "action-triaged",
+          projectId: "project-1",
+          successComparison: "Not a Project",
+          outcome: "partial",
+          keyLearning: "Promote first",
+          unfinishedDisposition: "historical_incomplete",
+        },
+      },
+    },
+    {
+      name: "Close follow-up Project ID",
+      command: {
+        type: "close_project",
+        projectId: "project-1",
+        decision: {
+          id: "close-1",
+          projectId: "project-1",
+          successComparison: "Not a Project",
+          outcome: "partial",
+          keyLearning: "Promote first",
+          unfinishedDisposition: "follow_up_project",
+          followUpProjectId: "action-triaged",
+        },
+      },
+    },
+    {
+      name: "Abandon decision ID",
+      command: {
+        type: "abandon_project",
+        projectId: "project-1",
+        decision: {
+          id: "action-triaged",
+          projectId: "project-1",
+          successComparison: "Not a Project",
+          outcome: "abandoned",
+          keyLearning: "Promote first",
+          unfinishedDisposition: "historical_incomplete",
+        },
+      },
+    },
+    {
+      name: "Abandon follow-up Project ID",
+      command: {
+        type: "abandon_project",
+        projectId: "project-1",
+        decision: {
+          id: "abandon-1",
+          projectId: "project-1",
+          successComparison: "Not a Project",
+          outcome: "abandoned",
+          keyLearning: "Promote first",
+          unfinishedDisposition: "follow_up_project",
+          followUpProjectId: "action-triaged",
+        },
+      },
+    },
+  ] as const satisfies readonly { name: string; command: V2Command }[])(
+    "does not let an Action ID masquerade as a $name",
+    async ({ command }) => {
+      const workspace = buildOpenActionWorkspace();
+      const result = rejected(
+        await executeCommand(
+          workspace,
+          command,
+          buildContext({ expectedRevision: 4 }),
+        ),
+      );
+
+      expect(result.rejection).toMatchObject({
+        code: "ACTION_PROMOTION_REQUIRED",
+        gate: "action_identity:action-triaged",
+        permittedNextCommand: "promote_action_to_project",
+      });
+      expect(result.workspace).toBe(workspace);
+    },
+  );
+
+  it("rejects promotion when no Action eligibility rule requires Project structure", async () => {
+    const workspace = buildOpenActionWorkspace();
+
+    const result = rejected(
+      await executeCommand(
+        workspace,
+        {
+          type: "promote_action_to_project",
+          actionId: "action-triaged",
+          eligibility,
+          project: {
+            id: "project-promoted",
+            name: "Promoted launch",
+            priority: 3,
+            notes: "No Project rule supplied",
+          },
+        } as const,
+        buildContext({ expectedRevision: 4 }),
+      ),
+    );
+
+    expect(result.rejection).toMatchObject({
+      code: "INVALID_COMMAND",
+      reason: "Action promotion requires at least one failed eligibility rule.",
+      gate: "action_promotion_eligibility:action-triaged",
+      permittedNextCommand: "update_action",
+    });
+    expect(result.workspace).toBe(workspace);
+  });
+
   it("promotes an Action without deleting capture, Action, actual, or outcome history", async () => {
     const workspace = buildOpenActionWorkspace();
     const original = structuredClone(workspace);
+    const promotionEligibility: Action["eligibility"] = {
+      ...eligibility,
+      dependencyIds: ["dependency-1"],
+    };
     const command = {
       type: "promote_action_to_project",
       actionId: "action-triaged",
+      eligibility: promotionEligibility,
       project: {
         id: "project-promoted",
         name: "Promoted launch",
@@ -2511,6 +2638,7 @@ describe("executeCommand Action triage and promotion", () => {
       revision: 4,
       status: "promoted",
       promotedProjectId: "project-promoted",
+      eligibility: promotionEligibility,
       outcomeNote: "Existing outcome history",
       updatedAt: NOW,
     });
@@ -2520,9 +2648,9 @@ describe("executeCommand Action triage and promotion", () => {
       projectId: "project-promoted",
       triageStatus: "project",
       recommendation: {
-        kind: "action",
-        ruleCodes: [],
-        explanation: "Fits the lightweight Action boundary.",
+        kind: "project",
+        ruleCodes: ["NO_DEPENDENCY"],
+        explanation: "Has a dependency.",
       },
     });
     expect(result.workspace.actuals).toEqual(original.actuals);

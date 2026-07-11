@@ -24,6 +24,7 @@ export interface AuthorizationContext {
 const humanOnly = new Set([
   "confirm_action_triage",
   "confirm_project_triage",
+  "promote_action_to_project",
   "place_bet",
   "commit_today",
   "accept_replan",
@@ -76,6 +77,7 @@ const systemCapabilities = {
 const humanOnlyReasons = {
   confirm_action_triage: "Only a human can confirm Action triage.",
   confirm_project_triage: "Only a human can confirm Project triage.",
+  promote_action_to_project: "Only a human can promote an Action to a Project.",
   place_bet: "Only a human can place or replace a Bet.",
   commit_today: "Only a human can commit today's plan.",
   accept_replan: "Only a human can accept a Replan.",

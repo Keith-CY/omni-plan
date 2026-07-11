@@ -247,7 +247,14 @@ function actionIdentityCandidates(command: V2Command): string[] {
       return [command.exception.projectId, command.exception.requirementId];
     case "close_project":
     case "abandon_project":
-      return [command.projectId, command.decision.projectId];
+      return [
+        command.projectId,
+        command.decision.id,
+        command.decision.projectId,
+        ...(command.decision.followUpProjectId === undefined
+          ? []
+          : [command.decision.followUpProjectId]),
+      ];
     case "configure_capacity":
     case "capture_inbox":
     case "confirm_action_triage":
@@ -608,6 +615,15 @@ export async function applyCommandHandler(
           permittedNextCommand: "read_promoted_project",
         });
       }
+      const recommendation = evaluateActionEligibility(command.eligibility);
+      if (recommendation.kind !== "project") {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason:
+            "Action promotion requires at least one failed eligibility rule.",
+          gate: `action_promotion_eligibility:${action.id}`,
+          permittedNextCommand: "update_action",
+        });
+      }
       const inboxIndex = workspace.inboxItems.findIndex(
         ({ id }) => id === action.inboxItemId,
       );
@@ -637,19 +653,17 @@ export async function applyCommandHandler(
       const actions = [...workspace.actions];
       actions[actionIndex] = {
         ...action,
+        eligibility: structuredClone(command.eligibility),
         revision: action.revision + 1,
         status: "promoted",
         promotedProjectId: project.id,
         updatedAt: context.now,
       };
       const inboxItem = workspace.inboxItems[inboxIndex];
-      const evaluatedRecommendation = evaluateActionEligibility(
-        action.eligibility,
-      );
       const inboxItems = [...workspace.inboxItems];
       inboxItems[inboxIndex] = {
         ...inboxItem,
-        recommendation: evaluatedRecommendation,
+        recommendation,
         triageStatus: "project",
         projectId: project.id,
       };

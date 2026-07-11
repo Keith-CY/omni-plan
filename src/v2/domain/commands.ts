@@ -115,6 +115,7 @@ export type V2Command =
   | {
       type: "promote_action_to_project";
       actionId: Id;
+      eligibility: Action["eligibility"];
       project: ProjectDraft;
     }
   | {
@@ -703,7 +704,9 @@ function isStructurallyValidCommand(value: unknown): value is V2Command {
       );
     case "promote_action_to_project":
       return (
-        isStringValue(value.actionId) && isProjectDraftValue(value.project)
+        isStringValue(value.actionId) &&
+        isActionEligibilityValue(value.eligibility) &&
+        isProjectDraftValue(value.project)
       );
     case "update_direction":
       return (
