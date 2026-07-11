@@ -322,9 +322,42 @@ describe("authorizeCommand authority matrix", () => {
 
   it.each(humanOnly)("rejects system actor %s", (commandType) => {
     expect(authorizeCommand(commandType, buildContext("system"))).toMatchObject({
-      code: "ACTOR_NOT_AUTHORIZED",
+      code:
+        commandType === "place_bet"
+          ? "HUMAN_CONFIRMATION_REQUIRED"
+          : "ACTOR_NOT_AUTHORIZED",
     });
   });
+
+  it.each([
+    ["agent", "ui", ["submit_proposal"]],
+    ["agent", "agent", ["submit_proposal"]],
+    ["agent", "import", ["import_portable", "submit_proposal"]],
+    ["agent", "sync", ["replay_receipt", "submit_proposal"]],
+    ["system", "ui", []],
+    ["system", "agent", []],
+    ["system", "import", ["import_portable"]],
+    ["system", "sync", ["replay_receipt"]],
+  ] as const)(
+    "keeps place_bet human-only for %s through authorized %s origin",
+    (actorKind, origin, capabilities) => {
+      expect(
+        authorizeCommand(
+          "place_bet",
+          buildContext(actorKind, {
+            origin,
+            source: buildSource(capabilities),
+          }),
+        ),
+      ).toMatchObject({
+        code: "HUMAN_CONFIRMATION_REQUIRED",
+        reason: "Only a human can place or replace a Bet.",
+        permittedNextCommand: "place_bet",
+        actorKind,
+        origin,
+      });
+    },
+  );
 
   it.each(agentAutomatic)(
     "allows human and capability-authorized Agent actors to apply %s",

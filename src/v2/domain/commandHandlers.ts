@@ -1,6 +1,8 @@
 import { createCommandRejection, type CommandRejection } from "./errors";
 import type { CommandContext, V2Command } from "./commands";
 import { evaluateActionEligibility } from "./actionPolicy";
+import { buildBetVersion, isDirectionComplete } from "./direction";
+import { transitionLifecycle } from "./lifecycle";
 import type {
   Action,
   DirectionBrief,
@@ -130,6 +132,48 @@ function projectArtifactsCollision(
   return undefined;
 }
 
+function entityIdCollision(
+  workspace: WorkspaceV2,
+  id: string,
+): string | undefined {
+  if (workspace.workspaceId === id) return "WorkspaceV2";
+  const collections: readonly [string, readonly { id: string }[]][] = [
+    ["InboxItem", workspace.inboxItems],
+    ["Action", workspace.actions],
+    ["ProjectV2", workspace.projects],
+    ["DirectionBrief", workspace.directionBriefs],
+    ["BetVersion", workspace.bets],
+    ["PlanVersion", workspace.planVersions],
+    ["DailyCommitment", workspace.dailyCommitments],
+    ["ReplanProposal", workspace.replanProposals],
+    ["ReviewRecord", workspace.reviews],
+    ["ExceptionRecord", workspace.exceptions],
+    ["CloseDecision", workspace.closeDecisions],
+    ["CommandProposal", workspace.commandProposals],
+    ["SyncConflictRecord", workspace.syncConflicts],
+    ["CommandReceipt", workspace.commandReceipts],
+    ["ProjectWorkItem", workspace.workItems],
+    ["ProjectDependency", workspace.dependencies],
+    ["Resource", workspace.resources],
+    ["Baseline", workspace.baselines],
+    ["Evidence", workspace.evidence],
+    ["ActualV2", workspace.actuals],
+    ["LegacyAuditRecord", workspace.legacyAuditRecords],
+  ];
+
+  return collections.find(([, records]) =>
+    records.some((record) => record.id === id),
+  )?.[0];
+}
+
+function isCanonicalIsoTimestamp(value: string): boolean {
+  const milliseconds = Date.parse(value);
+  return (
+    Number.isFinite(milliseconds) &&
+    new Date(milliseconds).toISOString() === value
+  );
+}
+
 function updatedInboxForAction(
   inboxItem: InboxItem,
   action: Action,
@@ -209,7 +253,7 @@ function actionIdentityCandidates(command: V2Command): string[] {
     case "archive_project":
       return [command.projectId];
     case "update_direction":
-      return [command.projectId, command.brief.projectId];
+      return [command.projectId, command.brief.projectId, command.brief.id];
     case "place_bet":
       return [command.projectId, command.betId];
     case "create_work_item":
@@ -679,9 +723,216 @@ export async function applyCommandHandler(
       };
     }
 
+    case "update_direction": {
+      const projectIndex = workspace.projects.findIndex(
+        ({ id }) => id === command.projectId,
+      );
+      if (projectIndex < 0) {
+        return entityNotFound(
+          workspace,
+          context,
+          "ProjectV2",
+          command.projectId,
+          "confirm_project_triage",
+        );
+      }
+      const project = workspace.projects[projectIndex];
+      const briefIndex = workspace.directionBriefs.findIndex(
+        ({ id }) => id === project.activeDirectionBriefId,
+      );
+      const activeBrief = workspace.directionBriefs[briefIndex];
+      if (
+        command.brief.id !== project.activeDirectionBriefId ||
+        command.brief.projectId !== project.id ||
+        activeBrief === undefined ||
+        activeBrief.projectId !== project.id
+      ) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason: `Direction update must target the active brief for Project ${project.id}.`,
+          gate: `project:${project.id}:active_direction`,
+          permittedNextCommand: "update_direction",
+        });
+      }
+      if (project.stage !== "direction" && project.stage !== "awaiting_bet") {
+        return rejection(
+          workspace,
+          context,
+          "ILLEGAL_LIFECYCLE_TRANSITION",
+          {
+            reason: `Project ${project.id} cannot replace its active Direction draft from ${project.stage}.`,
+            gate: `project:${project.id}:stage:${project.stage}`,
+            permittedNextCommand: "update_direction",
+          },
+        );
+      }
+
+      const complete = isDirectionComplete(command.brief);
+      let transitionedProject = project;
+      if (project.stage === "direction" && complete) {
+        const transition = transitionLifecycle(project, "brief_completed");
+        if (!transition.ok) {
+          return rejection(
+            workspace,
+            context,
+            "ILLEGAL_LIFECYCLE_TRANSITION",
+            {
+              gate: `project:${project.id}:stage:${project.stage}`,
+              permittedNextCommand: "update_direction",
+            },
+          );
+        }
+        transitionedProject = transition.project;
+      } else if (project.stage === "awaiting_bet" && !complete) {
+        const transition = transitionLifecycle(
+          project,
+          "brief_became_incomplete",
+        );
+        if (!transition.ok) {
+          return rejection(
+            workspace,
+            context,
+            "ILLEGAL_LIFECYCLE_TRANSITION",
+            {
+              gate: `project:${project.id}:stage:${project.stage}`,
+              permittedNextCommand: "update_direction",
+            },
+          );
+        }
+        transitionedProject = transition.project;
+      }
+
+      const updatedBrief: DirectionBrief = {
+        ...structuredClone(command.brief),
+        version: activeBrief.version + 1,
+        createdAt: activeBrief.createdAt,
+        updatedAt: context.now,
+      };
+      const projects = [...workspace.projects];
+      projects[projectIndex] = {
+        ...transitionedProject,
+        updatedAt: context.now,
+      };
+      const directionBriefs = [...workspace.directionBriefs];
+      directionBriefs[briefIndex] = updatedBrief;
+
+      return {
+        ok: true,
+        workspace: { ...workspace, projects, directionBriefs },
+      };
+    }
+
+    case "place_bet": {
+      const projectIndex = workspace.projects.findIndex(
+        ({ id }) => id === command.projectId,
+      );
+      if (projectIndex < 0) {
+        return entityNotFound(
+          workspace,
+          context,
+          "ProjectV2",
+          command.projectId,
+          "confirm_project_triage",
+        );
+      }
+      const project = workspace.projects[projectIndex];
+      const transition = transitionLifecycle(project, "bet_placed");
+      if (!transition.ok || project.activeBetId !== undefined) {
+        return rejection(
+          workspace,
+          context,
+          "ILLEGAL_LIFECYCLE_TRANSITION",
+          {
+            reason: `Project ${project.id} cannot place a first Bet from ${project.stage}.`,
+            gate: `project:${project.id}:stage:${project.stage}`,
+            permittedNextCommand: "place_bet",
+          },
+        );
+      }
+
+      const brief = workspace.directionBriefs.find(
+        ({ id }) => id === project.activeDirectionBriefId,
+      );
+      if (brief === undefined || brief.projectId !== project.id) {
+        return entityNotFound(
+          workspace,
+          context,
+          "DirectionBrief",
+          project.activeDirectionBriefId,
+          "update_direction",
+        );
+      }
+      if (!isDirectionComplete(brief)) {
+        return rejection(workspace, context, "BRIEF_INCOMPLETE", {
+          reason: `Project ${project.id} requires all six Direction decisions before a Bet.`,
+          gate: `project:${project.id}:direction_complete`,
+          permittedNextCommand: "update_direction",
+        });
+      }
+
+      const collision = entityIdCollision(workspace, command.betId);
+      if (collision !== undefined) {
+        return entityAlreadyExists(
+          workspace,
+          context,
+          collision,
+          command.betId,
+          "place_bet",
+        );
+      }
+      if (!isCanonicalIsoTimestamp(command.start)) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason: "Bet start must be a valid ISO timestamp.",
+          gate: `bet:${command.betId}:appetite_start`,
+          permittedNextCommand: "place_bet",
+        });
+      }
+      if (
+        !isCanonicalIsoTimestamp(context.now) ||
+        command.start !== context.now
+      ) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason: "Bet start must equal the authoritative approval timestamp.",
+          gate: `bet:${command.betId}:appetite_start`,
+          permittedNextCommand: "place_bet",
+        });
+      }
+      const appetiteEndMilliseconds =
+        Date.parse(context.now) + brief.appetiteSeconds * 1_000;
+      if (
+        !Number.isFinite(appetiteEndMilliseconds) ||
+        Math.abs(appetiteEndMilliseconds) > 8.64e15
+      ) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason: "Direction appetite does not produce a valid Bet boundary.",
+          gate: `bet:${command.betId}:appetite_end`,
+          permittedNextCommand: "update_direction",
+        });
+      }
+
+      const bet = await buildBetVersion(brief, {
+        id: command.betId,
+        version: 1,
+        actorId: context.actorId,
+        approvedAt: context.now,
+      });
+      const projects = [...workspace.projects];
+      projects[projectIndex] = {
+        ...transition.project,
+        activeBetId: bet.id,
+        updatedAt: context.now,
+      };
+
+      return {
+        ok: true,
+        workspace: {
+          ...workspace,
+          projects,
+          bets: [...workspace.bets, bet],
+        },
+      };
+    }
+
     case "update_project_metadata":
-    case "update_direction":
-    case "place_bet":
     case "create_work_item":
     case "update_work_item":
     case "propose_replan":

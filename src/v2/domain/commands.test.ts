@@ -4,6 +4,7 @@ import type { Evidence } from "@/domain/types";
 
 import {
   buildCapacityProfile,
+  buildDirectionBrief,
   buildInboxItem,
   buildProjectV2,
   buildWorkspaceV2,
@@ -21,7 +22,9 @@ import type {
   CapacityProfile,
   CommandReceipt,
   DailyCommitment,
+  DirectionBrief,
   JsonValue,
+  LifecycleStage,
   ProjectHold,
   ProjectWorkItem,
   WorkspaceV2,
@@ -2457,6 +2460,26 @@ describe("executeCommand Action triage and promotion", () => {
       },
     },
     {
+      name: "Direction brief",
+      command: {
+        type: "update_direction",
+        projectId: "project-1",
+        brief: {
+          id: "action-triaged",
+          projectId: "project-1",
+          audienceAndProblem: "Not a Direction brief",
+          successEvidence: "None",
+          appetiteSeconds: 3_600,
+          validationMethod: "None",
+          firstScope: [
+            { id: "scope-1", title: "None", description: "None" },
+          ],
+          noGoOrKill: "Promote first",
+          advancedNotes: "",
+        },
+      },
+    },
+    {
       name: "Close decision",
       command: {
         type: "close_project",
@@ -2665,5 +2688,540 @@ describe("executeCommand Action triage and promotion", () => {
       version: 1,
     });
     expect(workspace).toEqual(original);
+  });
+});
+
+describe("executeCommand Direction and Bet", () => {
+  const COMPLETE_DIRECTION = buildDirectionBrief({
+    id: "brief-1",
+    projectId: "project-1",
+    version: 4,
+    audienceAndProblem: "Operators cannot see the next best action.",
+    successEvidence: "Five users start the right action within one minute.",
+    appetiteSeconds: 7_200,
+    validationMethod: "Observe five users completing the workflow.",
+    firstScope: [
+      {
+        id: "scope-1",
+        title: "Guided project start",
+        description: "Direction through the first committed plan.",
+      },
+    ],
+    noGoOrKill: "Stop if expert coaching is required.",
+    advancedNotes: "Editorial context.",
+    createdAt: "2026-07-10T09:00:00.000Z",
+    updatedAt: "2026-07-10T10:00:00.000Z",
+  });
+
+  function buildDirectionWorkspace(
+    stage: LifecycleStage = "direction",
+    brief: DirectionBrief = COMPLETE_DIRECTION,
+    overrides: Partial<WorkspaceV2> = {},
+  ): WorkspaceV2 {
+    return buildWorkspaceV2("workspace-direction", {
+      projects: [
+        buildProjectV2({
+          id: "project-1",
+          name: "Guided planning",
+          priority: 1,
+          notes: "Project metadata",
+          stage,
+          activeDirectionBriefId: brief.id,
+          createdAt: "2026-07-10T09:00:00.000Z",
+          updatedAt: "2026-07-10T10:00:00.000Z",
+        }),
+      ],
+      directionBriefs: [structuredClone(brief)],
+      ...overrides,
+    });
+  }
+
+  function directionDraft() {
+    const {
+      version: _version,
+      createdAt: _createdAt,
+      updatedAt: _updatedAt,
+      ...draft
+    } = structuredClone(COMPLETE_DIRECTION);
+    return draft;
+  }
+
+  it("saves an incomplete active brief as an editable Direction draft", async () => {
+    const workspace = deepFreeze(buildDirectionWorkspace("awaiting_bet"));
+    const original = structuredClone(workspace);
+    const command = deepFreeze({
+      type: "update_direction",
+      projectId: "project-1",
+      brief: {
+        ...directionDraft(),
+        audienceAndProblem: "   ",
+        firstScope: [
+          {
+            id: "scope-1",
+            title: "Still copied safely",
+            description: "A bounded scope",
+          },
+        ],
+      },
+    } as const satisfies V2Command);
+
+    const result = await executeCommand(workspace, command, buildContext());
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("Expected Direction draft to apply");
+    expect(result.workspace.projects[0]).toMatchObject({
+      id: "project-1",
+      stage: "direction",
+      updatedAt: NOW,
+    });
+    expect(result.workspace.directionBriefs).toHaveLength(1);
+    expect(result.workspace.directionBriefs[0]).toEqual({
+      ...command.brief,
+      version: COMPLETE_DIRECTION.version + 1,
+      createdAt: COMPLETE_DIRECTION.createdAt,
+      updatedAt: NOW,
+    });
+    expect(result.workspace.directionBriefs[0].firstScope).not.toBe(
+      command.brief.firstScope,
+    );
+    expect(result.workspace.bets).toEqual([]);
+    expect(workspace).toEqual(original);
+  });
+
+  it("moves a complete Direction brief to awaiting Bet without synthesizing approval", async () => {
+    const incomplete = {
+      ...COMPLETE_DIRECTION,
+      version: 1,
+      successEvidence: "",
+    };
+    const workspace = buildDirectionWorkspace("direction", incomplete);
+    const command = {
+      type: "update_direction",
+      projectId: "project-1",
+      brief: directionDraft(),
+    } as const satisfies V2Command;
+
+    const result = await executeCommand(workspace, command, buildContext());
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("Expected complete Direction to apply");
+    expect(result.workspace.projects[0]).toMatchObject({
+      stage: "awaiting_bet",
+      activeDirectionBriefId: "brief-1",
+      updatedAt: NOW,
+    });
+    expect(result.workspace.directionBriefs[0]).toMatchObject({
+      ...command.brief,
+      version: 2,
+      createdAt: COMPLETE_DIRECTION.createdAt,
+      updatedAt: NOW,
+    });
+    expect(result.workspace.bets).toEqual([]);
+    expect(result.workspace.projects[0].activeBetId).toBeUndefined();
+  });
+
+  it.each([
+    {
+      name: "a different Project owner",
+      command: {
+        type: "update_direction",
+        projectId: "project-1",
+        brief: { ...directionDraft(), projectId: "project-2" },
+      },
+    },
+    {
+      name: "a non-active brief ID",
+      command: {
+        type: "update_direction",
+        projectId: "project-1",
+        brief: { ...directionDraft(), id: "brief-other" },
+      },
+    },
+  ] as const)(
+    "rejects Direction updates targeting $name atomically",
+    async ({ command }) => {
+      const workspace = buildDirectionWorkspace();
+      const original = structuredClone(workspace);
+
+      const result = rejected(
+        await executeCommand(workspace, command, buildContext()),
+      );
+
+      expect(result.rejection).toMatchObject({
+        code: "INVALID_COMMAND",
+        gate: "project:project-1:active_direction",
+        permittedNextCommand: "update_direction",
+      });
+      expect(result.workspace).toBe(workspace);
+      expect(workspace).toEqual(original);
+    },
+  );
+
+  it.each(["planning", "executing", "validating", "closing", "closed"] as const)(
+    "does not overwrite Direction history from illegal %s stage",
+    async (stage) => {
+      const workspace = buildDirectionWorkspace(stage);
+
+      const result = rejected(
+        await executeCommand(
+          workspace,
+          {
+            type: "update_direction",
+            projectId: "project-1",
+            brief: directionDraft(),
+          },
+          buildContext(),
+        ),
+      );
+
+      expect(result.rejection).toMatchObject({
+        code: "ILLEGAL_LIFECYCLE_TRANSITION",
+        gate: `project:project-1:stage:${stage}`,
+        permittedNextCommand: "update_direction",
+      });
+      expect(result.workspace).toBe(workspace);
+    },
+  );
+
+  it("places a human Bet with an immutable complete brief and exact appetite", async () => {
+    const workspace = deepFreeze(
+      buildDirectionWorkspace("awaiting_bet", COMPLETE_DIRECTION, {
+        workItems: [
+          {
+            ...WORK_ITEM,
+            durationSeconds: 9_999_999,
+            estimate: { mostLikelySeconds: 9_999_999 },
+          },
+        ],
+      }),
+    );
+    const command = deepFreeze({
+      type: "place_bet",
+      projectId: "project-1",
+      betId: "bet-1",
+      start: NOW,
+    } as const satisfies V2Command);
+
+    const result = await executeCommand(workspace, command, buildContext());
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("Expected human Bet to apply");
+    expect(result.workspace.projects[0]).toMatchObject({
+      id: "project-1",
+      stage: "planning",
+      activeBetId: "bet-1",
+      updatedAt: NOW,
+    });
+    expect(result.workspace.bets).toHaveLength(1);
+    expect(result.workspace.bets[0]).toEqual({
+      id: "bet-1",
+      projectId: "project-1",
+      version: 1,
+      briefId: "brief-1",
+      briefHash: await stableHash(COMPLETE_DIRECTION as unknown as JsonValue),
+      briefSnapshot: COMPLETE_DIRECTION,
+      committedScope: COMPLETE_DIRECTION.firstScope,
+      appetiteStart: NOW,
+      appetiteEnd: "2026-07-11T11:00:00.000Z",
+      actorId: "human-1",
+      approvedAt: NOW,
+    });
+    expect(result.workspace.bets[0].briefSnapshot).not.toBe(
+      result.workspace.directionBriefs[0],
+    );
+    expect(result.workspace.bets[0].committedScope).not.toBe(
+      result.workspace.bets[0].briefSnapshot.firstScope,
+    );
+    expect(workspace.projects[0].stage).toBe("awaiting_bet");
+    expect(workspace.bets).toEqual([]);
+  });
+
+  it("applies the same Bet policy result for human UI and verified sync replay", async () => {
+    const workspace = buildDirectionWorkspace("awaiting_bet");
+    const command = {
+      type: "place_bet",
+      projectId: "project-1",
+      betId: "bet-1",
+      start: NOW,
+    } as const satisfies V2Command;
+
+    const uiResult = await executeCommand(
+      workspace,
+      command,
+      buildContext({ commandId: "ui-place-bet" }),
+    );
+    const syncResult = await executeCommand(
+      workspace,
+      command,
+      buildContext({
+        commandId: "sync-place-bet",
+        origin: "sync",
+        source: {
+          sourceId: "verified-replay",
+          verified: true,
+          capabilities: ["replay_receipt"],
+        },
+      }),
+    );
+
+    expect(uiResult.ok).toBe(true);
+    expect(syncResult.ok).toBe(true);
+    if (!uiResult.ok || !syncResult.ok) {
+      throw new Error("Expected both human decision origins to apply");
+    }
+    expect(syncResult.workspace.projects).toEqual(uiResult.workspace.projects);
+    expect(syncResult.workspace.directionBriefs).toEqual(
+      uiResult.workspace.directionBriefs,
+    );
+    expect(syncResult.workspace.bets).toEqual(uiResult.workspace.bets);
+  });
+
+  it.each([
+    ["agent", "ui", ["submit_proposal"]],
+    ["agent", "agent", ["submit_proposal"]],
+    ["agent", "import", ["import_portable", "submit_proposal"]],
+    ["agent", "sync", ["replay_receipt", "submit_proposal"]],
+    ["system", "ui", []],
+    ["system", "agent", []],
+    ["system", "import", ["import_portable"]],
+    ["system", "sync", ["replay_receipt"]],
+  ] as const)(
+    "requires human confirmation for %s place_bet through authorized %s origin",
+    async (actorKind, origin, capabilities) => {
+      const workspace = buildDirectionWorkspace("awaiting_bet");
+
+      const result = rejected(
+        await executeCommand(
+          workspace,
+          {
+            type: "place_bet",
+            projectId: "project-1",
+            betId: "bet-1",
+            start: NOW,
+          },
+          buildContext({
+            actorId: `${actorKind}-1`,
+            actorKind,
+            origin,
+            source: {
+              sourceId: `${origin}-source`,
+              verified: true,
+              capabilities: [...capabilities],
+            },
+          }),
+        ),
+      );
+
+      expect(result.rejection).toMatchObject({
+        code: "HUMAN_CONFIRMATION_REQUIRED",
+        reason: "Only a human can place or replace a Bet.",
+        permittedNextCommand: "place_bet",
+        actorKind,
+        origin,
+      });
+      expect(result.workspace).toBe(workspace);
+    },
+  );
+
+  it.each([
+    ["import", ["import_portable"]],
+    ["migration", ["human_decision"]],
+  ] as const)(
+    "never treats human %s origin as fresh Bet approval",
+    async (origin, capabilities) => {
+      const workspace = buildDirectionWorkspace("awaiting_bet");
+      const result = rejected(
+        await executeCommand(
+          workspace,
+          {
+            type: "place_bet",
+            projectId: "project-1",
+            betId: "bet-1",
+            start: NOW,
+          },
+          buildContext({
+            origin,
+            source: {
+              sourceId: `${origin}-source`,
+              verified: true,
+              capabilities: [...capabilities],
+            },
+          }),
+        ),
+      );
+
+      expect(result.workspace).toBe(workspace);
+      expect(result.rejection.code).toBe(
+        origin === "import"
+          ? "HUMAN_CONFIRMATION_REQUIRED"
+          : "SOURCE_NOT_AUTHORIZED",
+      );
+    },
+  );
+
+  it("rejects an incomplete active brief before Bet approval", async () => {
+    const workspace = buildDirectionWorkspace("awaiting_bet", {
+      ...COMPLETE_DIRECTION,
+      noGoOrKill: " ",
+    });
+
+    const result = rejected(
+      await executeCommand(
+        workspace,
+        {
+          type: "place_bet",
+          projectId: "project-1",
+          betId: "bet-1",
+          start: NOW,
+        },
+        buildContext(),
+      ),
+    );
+
+    expect(result.rejection).toMatchObject({
+      code: "BRIEF_INCOMPLETE",
+      gate: "project:project-1:direction_complete",
+      permittedNextCommand: "update_direction",
+    });
+    expect(result.workspace).toBe(workspace);
+  });
+
+  it.each(["direction", "planning", "executing", "validating", "closing", "closed"] as const)(
+    "places a first Bet only from awaiting_bet, not %s",
+    async (stage) => {
+      const workspace = buildDirectionWorkspace(stage);
+      const result = rejected(
+        await executeCommand(
+          workspace,
+          {
+            type: "place_bet",
+            projectId: "project-1",
+            betId: "bet-1",
+            start: NOW,
+          },
+          buildContext(),
+        ),
+      );
+
+      expect(result.rejection).toMatchObject({
+        code: "ILLEGAL_LIFECYCLE_TRANSITION",
+        gate: `project:project-1:stage:${stage}`,
+        permittedNextCommand: "place_bet",
+      });
+      expect(result.workspace).toBe(workspace);
+    },
+  );
+
+  it("rejects a duplicate Bet ID without changing Project state", async () => {
+    const workspace = buildDirectionWorkspace("awaiting_bet", COMPLETE_DIRECTION, {
+      bets: [
+        {
+          id: "bet-1",
+          projectId: "project-1",
+          version: 1,
+          briefId: "brief-1",
+          briefHash: "existing-hash",
+          briefSnapshot: structuredClone(COMPLETE_DIRECTION),
+          committedScope: structuredClone(COMPLETE_DIRECTION.firstScope),
+          appetiteStart: NOW,
+          appetiteEnd: LATER,
+          actorId: "human-old",
+          approvedAt: NOW,
+          invalidatedAt: NOW,
+          invalidationReason: "Historical Bet",
+        },
+      ],
+    });
+
+    const result = rejected(
+      await executeCommand(
+        workspace,
+        {
+          type: "place_bet",
+          projectId: "project-1",
+          betId: "bet-1",
+          start: NOW,
+        },
+        buildContext(),
+      ),
+    );
+
+    expect(result.rejection).toMatchObject({
+      code: "ENTITY_ALREADY_EXISTS",
+      gate: "entity_id:BetVersion:bet-1",
+      permittedNextCommand: "place_bet",
+    });
+    expect(result.workspace).toBe(workspace);
+  });
+
+  it("rejects a Bet ID already owned by another entity type", async () => {
+    const workspace = buildDirectionWorkspace("awaiting_bet");
+
+    const result = rejected(
+      await executeCommand(
+        workspace,
+        {
+          type: "place_bet",
+          projectId: "project-1",
+          betId: "brief-1",
+          start: NOW,
+        },
+        buildContext(),
+      ),
+    );
+
+    expect(result.rejection).toMatchObject({
+      code: "ENTITY_ALREADY_EXISTS",
+      gate: "entity_id:DirectionBrief:brief-1",
+      permittedNextCommand: "place_bet",
+    });
+    expect(result.workspace).toBe(workspace);
+  });
+
+  it("rejects an invalid ISO Bet start without throwing", async () => {
+    const workspace = buildDirectionWorkspace("awaiting_bet");
+    const result = await executeCommand(
+      workspace,
+      {
+        type: "place_bet",
+        projectId: "project-1",
+        betId: "bet-1",
+        start: "not-a-date",
+      },
+      buildContext(),
+    );
+    const rejectedResult = rejected(result);
+    expect(rejectedResult.rejection).toMatchObject({
+      code: "INVALID_COMMAND",
+      reason: "Bet start must be a valid ISO timestamp.",
+      gate: "bet:bet-1:appetite_start",
+      permittedNextCommand: "place_bet",
+    });
+    expect(rejectedResult.workspace).toBe(workspace);
+  });
+
+  it("rejects a command start that differs from the authoritative approval time", async () => {
+    const workspace = buildDirectionWorkspace("awaiting_bet");
+
+    const result = rejected(
+      await executeCommand(
+        workspace,
+        {
+          type: "place_bet",
+          projectId: "project-1",
+          betId: "bet-1",
+          start: "2026-07-12T09:00:00.000Z",
+        },
+        buildContext(),
+      ),
+    );
+
+    expect(result.rejection).toMatchObject({
+      code: "INVALID_COMMAND",
+      reason: "Bet start must equal the authoritative approval timestamp.",
+      gate: "bet:bet-1:appetite_start",
+      permittedNextCommand: "place_bet",
+    });
+    expect(result.workspace).toBe(workspace);
   });
 });

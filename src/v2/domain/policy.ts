@@ -336,6 +336,18 @@ function authorizeActor(
     );
   }
 
+  if (commandType === "place_bet" && context.actorKind === "system") {
+    return createCommandRejection(
+      "HUMAN_CONFIRMATION_REQUIRED",
+      rejectionContext(context),
+      {
+        reason: humanOnlyReasons.place_bet,
+        gate: undefined,
+        permittedNextCommand: "place_bet",
+      },
+    );
+  }
+
   if (context.actorKind === "system") {
     return createCommandRejection(
       "ACTOR_NOT_AUTHORIZED",
