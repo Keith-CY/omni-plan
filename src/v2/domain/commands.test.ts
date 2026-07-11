@@ -2084,6 +2084,12 @@ describe("executeCommand Action triage and promotion", () => {
       id: "inbox-triage",
       triageStatus: "project",
       projectId: "project-triaged",
+      recommendation: {
+        kind: "project",
+        ruleCodes: ["PROJECT_CONFIRMED"],
+        explanation:
+          "Human confirmed that this Inbox item requires Project structure.",
+      },
     });
     expect(result.workspace.actions).toEqual([]);
   });
@@ -2476,6 +2482,11 @@ describe("executeCommand Action triage and promotion", () => {
       actionId: "action-triaged",
       projectId: "project-promoted",
       triageStatus: "project",
+      recommendation: {
+        kind: "project",
+        ruleCodes: ["ACTION_PROMOTED"],
+        explanation: "Human promoted this Action to a Project.",
+      },
     });
     expect(result.workspace.actuals).toEqual(original.actuals);
     expect(result.workspace.projects[0]).toMatchObject({
