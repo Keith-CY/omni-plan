@@ -2,6 +2,10 @@ import type { Baseline, Evidence, Id, ISODate } from "@/domain/types";
 
 import { applyCommandHandler } from "./commandHandlers";
 import {
+  exactCanonicalAppetiteBoundaryHold,
+  selectExactCurrentCloseBet,
+} from "./close";
+import {
   createCommandRejection,
   type CommandRejection,
   type RejectionCode,
@@ -1774,6 +1778,28 @@ function deterministicTriggerKey(command: V2Command): string | undefined {
   }
 }
 
+function closureValidationRebetSourceIds(
+  workspace: WorkspaceV2,
+  projectIds: readonly Id[],
+  now: ISODate,
+): Id[] {
+  const allowed: Id[] = [];
+  for (const projectId of projectIds) {
+    const projects = recordsWithId(workspace.projects, projectId);
+    if (projects.length !== 1 || projects[0].stage !== "validating") continue;
+    const project = projects[0];
+    const currentBet = selectExactCurrentCloseBet(workspace, project);
+    if (!currentBet.ok) continue;
+    const hold = exactCanonicalAppetiteBoundaryHold(
+      project,
+      currentBet.bet,
+      now,
+    );
+    if (hold !== undefined) allowed.push(hold.sourceId);
+  }
+  return uniqueIds(allowed);
+}
+
 function buildAuthorizationContext(
   workspace: WorkspaceV2,
   command: V2Command,
@@ -1840,6 +1866,11 @@ function buildAuthorizationContext(
     targetWasCommitted: targetWasCommitted(workspace, command, context.now),
     expandsScope,
     deterministicTriggerKey: deterministicTriggerKey(command),
+    closureValidationRebetSourceIds: closureValidationRebetSourceIds(
+      workspace,
+      projectIds,
+      context.now,
+    ),
   };
 }
 

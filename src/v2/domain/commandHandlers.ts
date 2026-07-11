@@ -1,6 +1,19 @@
 import { createCommandRejection, type CommandRejection } from "./errors";
-import type { CommandContext, V2Command } from "./commands";
+import type {
+  CloseDecisionDraft,
+  CommandContext,
+  V2Command,
+} from "./commands";
 import { evaluateActionEligibility } from "./actionPolicy";
+import {
+  buildCloseArtifacts,
+  exactCanonicalAppetiteBoundaryHold,
+  selectExactCurrentCloseBet,
+  validateCloseDecisionDraft,
+  type CloseArtifacts,
+  type CloseValidationIssue,
+  type ExactCurrentCloseBet,
+} from "./close";
 import {
   buildBetVersion,
   isDirectionComplete,
@@ -419,11 +432,7 @@ function actionIdentityCandidates(command: V2Command): string[] {
     case "abandon_project":
       return [
         command.projectId,
-        command.decision.id,
         command.decision.projectId,
-        ...(command.decision.followUpProjectId === undefined
-          ? []
-          : [command.decision.followUpProjectId]),
       ];
     case "configure_capacity":
     case "capture_inbox":
@@ -604,6 +613,237 @@ function commandReceiptCollisionRejection(
         context.commandId,
         permittedNextCommand,
       );
+}
+
+function closeArtifactCollisionRejection(
+  workspace: WorkspaceV2,
+  context: CommandContext,
+  artifacts: CloseArtifacts,
+  permittedNextCommand: "close_project" | "abandon_project",
+): CommandHandlerResult | undefined {
+  const prospectiveEntities = [
+    { entity: "CloseDecision", id: artifacts.decision.id },
+    ...artifacts.returnedInboxItems.map(({ id }) => ({
+      entity: "InboxItem",
+      id,
+    })),
+    ...(artifacts.followUpProject === undefined
+      ? []
+      : [{ entity: "ProjectV2", id: artifacts.followUpProject.id }]),
+    ...(artifacts.followUpBrief === undefined
+      ? []
+      : [{ entity: "DirectionBrief", id: artifacts.followUpBrief.id }]),
+  ];
+  for (const prospective of prospectiveEntities) {
+    const collision = entityIdCollision(workspace, prospective.id, [
+      { entity: "CommandReceipt", id: context.commandId },
+      ...prospectiveEntities.filter((candidate) => candidate !== prospective),
+    ]);
+    if (collision !== undefined) {
+      return entityAlreadyExists(
+        workspace,
+        context,
+        collision,
+        prospective.id,
+        permittedNextCommand,
+      );
+    }
+  }
+  return undefined;
+}
+
+type CloseCommandType = "close_project" | "abandon_project";
+
+type PreparedCloseSubject =
+  | {
+      ok: true;
+      project: ProjectV2;
+      projectIndex: number;
+      currentBet: ExactCurrentCloseBet;
+    }
+  | { ok: false; result: CommandHandlerResult };
+
+function prepareCloseSubject(
+  workspace: WorkspaceV2,
+  context: CommandContext,
+  projectId: string,
+  commandType: CloseCommandType,
+): PreparedCloseSubject {
+  const receiptCollision = commandReceiptCollisionRejection(
+    workspace,
+    context,
+    commandType,
+  );
+  if (receiptCollision !== undefined) {
+    return { ok: false, result: receiptCollision };
+  }
+  const matches = workspace.projects
+    .map((project, index) => ({ project, index }))
+    .filter(({ project }) => project.id === projectId);
+  if (matches.length === 0) {
+    return {
+      ok: false,
+      result: entityNotFound(
+        workspace,
+        context,
+        "ProjectV2",
+        projectId,
+        "confirm_project_triage",
+      ),
+    };
+  }
+  if (matches.length !== 1) {
+    return {
+      ok: false,
+      result: duplicateEntityIdentity(
+        workspace,
+        context,
+        "ProjectV2",
+        projectId,
+      ),
+    };
+  }
+  const { project, index: projectIndex } = matches[0];
+  return {
+    ok: true,
+    project,
+    projectIndex,
+    currentBet: selectExactCurrentCloseBet(workspace, project),
+  };
+}
+
+function closeValidationRejection(
+  workspace: WorkspaceV2,
+  context: CommandContext,
+  issue: CloseValidationIssue,
+): CommandHandlerResult {
+  return rejection(workspace, context, issue.code, {
+    reason: issue.reason,
+    gate: issue.gate,
+    permittedNextCommand: issue.permittedNextCommand,
+  });
+}
+
+type PreparedCloseArtifacts =
+  | { ok: true; artifacts: CloseArtifacts }
+  | { ok: false; result: CommandHandlerResult };
+
+function prepareCloseArtifacts(
+  workspace: WorkspaceV2,
+  context: CommandContext,
+  project: ProjectV2,
+  decision: CloseDecisionDraft,
+  commandType: CloseCommandType,
+): PreparedCloseArtifacts {
+  const activeBriefMatches = workspace.directionBriefs.filter(
+    ({ id }) => id === project.activeDirectionBriefId,
+  );
+  if (activeBriefMatches.length === 0) {
+    return {
+      ok: false,
+      result: entityNotFound(
+        workspace,
+        context,
+        "DirectionBrief",
+        project.activeDirectionBriefId,
+        "update_direction",
+      ),
+    };
+  }
+  if (activeBriefMatches.length !== 1) {
+    return {
+      ok: false,
+      result: duplicateEntityIdentity(
+        workspace,
+        context,
+        "DirectionBrief",
+        project.activeDirectionBriefId,
+      ),
+    };
+  }
+  if (activeBriefMatches[0].projectId !== project.id) {
+    return {
+      ok: false,
+      result: entityNotFound(
+        workspace,
+        context,
+        "DirectionBrief",
+        project.activeDirectionBriefId,
+        "update_direction",
+      ),
+    };
+  }
+  const validationIssue = validateCloseDecisionDraft(
+    workspace,
+    project,
+    decision,
+    context.actorId,
+    context.now,
+    commandType,
+  );
+  if (validationIssue !== undefined) {
+    return {
+      ok: false,
+      result: closeValidationRejection(workspace, context, validationIssue),
+    };
+  }
+  const artifacts = buildCloseArtifacts(
+    workspace,
+    project,
+    decision,
+    context.actorId,
+    context.now,
+  );
+  const artifactCollision = closeArtifactCollisionRejection(
+    workspace,
+    context,
+    artifacts,
+    commandType,
+  );
+  if (artifactCollision !== undefined) {
+    return { ok: false, result: artifactCollision };
+  }
+  if (
+    workspace.closeDecisions.some(
+      ({ projectId }) => projectId === project.id,
+    )
+  ) {
+    return {
+      ok: false,
+      result: rejection(workspace, context, "SYNC_CONFLICT", {
+        reason: `Project ${project.id} already has an ambiguous Close decision.`,
+        gate: `project:${project.id}:close_identity`,
+        permittedNextCommand: "resolve_sync_conflict",
+      }),
+    };
+  }
+  return { ok: true, artifacts };
+}
+
+function applyCloseArtifacts(
+  workspace: WorkspaceV2,
+  projectIndex: number,
+  closedProject: ProjectV2,
+  artifacts: CloseArtifacts,
+): CommandHandlerResult {
+  const projects = [...workspace.projects];
+  projects[projectIndex] = closedProject;
+  if (artifacts.followUpProject !== undefined) {
+    projects.push(artifacts.followUpProject);
+  }
+  return {
+    ok: true,
+    workspace: {
+      ...workspace,
+      projects,
+      directionBriefs:
+        artifacts.followUpBrief === undefined
+          ? workspace.directionBriefs
+          : [...workspace.directionBriefs, artifacts.followUpBrief],
+      inboxItems: [...workspace.inboxItems, ...artifacts.returnedInboxItems],
+      closeDecisions: [...workspace.closeDecisions, artifacts.decision],
+    },
+  };
 }
 
 function nonSlotEntityCollisionForSlots(
@@ -3971,39 +4211,120 @@ export async function applyCommandHandler(
     }
 
     case "resolve_sync_conflict":
-    case "close_project":
       return notImplemented(workspace, context);
 
-    case "abandon_project": {
-      const projectIndex = workspace.projects.findIndex(
-        ({ id }) => id === command.projectId,
+    case "close_project": {
+      const subject = prepareCloseSubject(
+        workspace,
+        context,
+        command.projectId,
+        command.type,
       );
-      if (projectIndex < 0) {
-        return entityNotFound(
+      if (!subject.ok) return subject.result;
+      const { project, projectIndex } = subject;
+      if (project.stage === "closed") {
+        return rejection(workspace, context, "PROJECT_CLOSED", {
+          reason: `Closed Project ${project.id} cannot be closed again.`,
+          gate: `project:${project.id}:closed`,
+          permittedNextCommand: "create_follow_up_project",
+        });
+      }
+      if (project.stage !== "closing") {
+        return rejection(workspace, context, "ILLEGAL_LIFECYCLE_TRANSITION", {
+          reason: `Project ${project.id} cannot close from ${project.stage}.`,
+          gate: `project:${project.id}:stage:${project.stage}`,
+          permittedNextCommand: "satisfy_validation",
+        });
+      }
+      const currentBet = subject.currentBet;
+      if (!currentBet.ok) {
+        return closeValidationRejection(workspace, context, currentBet.issue);
+      }
+      const activeBet = currentBet.bet;
+      const rebetHolds = project.holds.filter(
+        ({ type }) => type === "rebet_required",
+      );
+      const boundaryHold = exactCanonicalAppetiteBoundaryHold(
+        project,
+        activeBet,
+        context.now,
+      );
+      if (rebetHolds.length > 0 && boundaryHold === undefined) {
+        return rejection(
           workspace,
           context,
-          "ProjectV2",
-          command.projectId,
-          "confirm_project_triage",
+          "ILLEGAL_LIFECYCLE_TRANSITION",
+          {
+            reason: `Project ${project.id} has no exact canonical appetite-boundary hold for Close.`,
+            gate: `project:${project.id}:appetite_boundary`,
+            permittedNextCommand: "record_bet_boundary",
+          },
         );
       }
-      const project = workspace.projects[projectIndex];
-      const boundaryBet =
-        project.activeBetId === undefined
+      const prepared = prepareCloseArtifacts(
+        workspace,
+        context,
+        project,
+        command.decision,
+        command.type,
+      );
+      if (!prepared.ok) return prepared.result;
+      const transition = transitionLifecycle(project, "project_closed");
+      if (!transition.ok) {
+        return rejection(workspace, context, transition.code, {
+          gate: `project:${project.id}:stage:${project.stage}`,
+          permittedNextCommand: "satisfy_validation",
+        });
+      }
+      const closedProject: ProjectV2 = {
+        ...transition.project,
+        holds:
+          boundaryHold === undefined
+            ? transition.project.holds
+            : transition.project.holds.filter((hold) => hold !== boundaryHold),
+        updatedAt: context.now,
+      };
+      return applyCloseArtifacts(
+        workspace,
+        projectIndex,
+        closedProject,
+        prepared.artifacts,
+      );
+    }
+
+    case "abandon_project": {
+      const subject = prepareCloseSubject(
+        workspace,
+        context,
+        command.projectId,
+        command.type,
+      );
+      if (!subject.ok) return subject.result;
+      const { project, projectIndex } = subject;
+      if (project.stage === "closed") {
+        return rejection(workspace, context, "PROJECT_CLOSED", {
+          reason: `Closed Project ${project.id} cannot be abandoned again.`,
+          gate: `project:${project.id}:closed`,
+          permittedNextCommand: "create_follow_up_project",
+        });
+      }
+      const currentBet = subject.currentBet;
+      if (!currentBet.ok && currentBet.issue.code === "SYNC_CONFLICT") {
+        return closeValidationRejection(workspace, context, currentBet.issue);
+      }
+      const boundaryBet = currentBet.ok ? currentBet.bet : undefined;
+      const boundaryHold =
+        boundaryBet === undefined
           ? undefined
-          : workspace.bets.find(({ id }) => id === project.activeBetId);
+          : exactCanonicalAppetiteBoundaryHold(
+              project,
+              boundaryBet,
+              context.now,
+            );
       const atRecordedAppetiteBoundary =
         project.stage === "validating" &&
         boundaryBet !== undefined &&
-        boundaryBet.projectId === project.id &&
-        boundaryBet.invalidatedAt === undefined &&
-        isCanonicalIsoTimestamp(boundaryBet.appetiteEnd) &&
-        isCanonicalIsoTimestamp(context.now) &&
-        Date.parse(context.now) >= Date.parse(boundaryBet.appetiteEnd) &&
-        project.holds.some(
-          ({ type, sourceId }) =>
-            type === "rebet_required" && sourceId === boundaryBet.id,
-        );
+        boundaryHold !== undefined;
       if (!atRecordedAppetiteBoundary) {
         return rejection(
           workspace,
@@ -4016,33 +4337,14 @@ export async function applyCommandHandler(
           },
         );
       }
-      if (
-        command.decision.projectId !== project.id ||
-        command.decision.successComparison.trim().length === 0 ||
-        command.decision.keyLearning.trim().length === 0 ||
-        (command.decision.unfinishedDisposition === "follow_up_project" &&
-          (command.decision.followUpProjectId === undefined ||
-            command.decision.followUpProjectId.trim().length === 0))
-      ) {
-        return rejection(workspace, context, "INVALID_COMMAND", {
-          reason:
-            "Abandon requires a structured comparison, learning, and unfinished-work disposition.",
-          gate: `project:${project.id}:abandon_decision`,
-          permittedNextCommand: "abandon_project",
-        });
-      }
-      const collision = entityIdCollision(workspace, command.decision.id, [
-        { entity: "CommandReceipt", id: context.commandId },
-      ]);
-      if (collision !== undefined) {
-        return entityAlreadyExists(
-          workspace,
-          context,
-          collision,
-          command.decision.id,
-          "abandon_project",
-        );
-      }
+      const prepared = prepareCloseArtifacts(
+        workspace,
+        context,
+        project,
+        command.decision,
+        command.type,
+      );
+      if (!prepared.ok) return prepared.result;
       const abandonTransition = transitionLifecycle(
         project,
         "abandon_confirmed",
@@ -4074,37 +4376,64 @@ export async function applyCommandHandler(
           },
         );
       }
-      const projects = [...workspace.projects];
-      projects[projectIndex] = {
+      const closedProject: ProjectV2 = {
         ...closeTransition.project,
         holds: closeTransition.project.holds.filter(
-          ({ type, sourceId }) =>
-            !(
-              type === "rebet_required" &&
-              sourceId === boundaryBet?.id
-            ),
+          (hold) => hold !== boundaryHold,
         ),
         updatedAt: context.now,
       };
+      return applyCloseArtifacts(
+        workspace,
+        projectIndex,
+        closedProject,
+        prepared.artifacts,
+      );
+    }
+
+    case "archive_project": {
+      const matches = workspace.projects.filter(
+        ({ id }) => id === command.projectId,
+      );
+      if (matches.length === 0) {
+        return entityNotFound(
+          workspace,
+          context,
+          "ProjectV2",
+          command.projectId,
+          "confirm_project_triage",
+        );
+      }
+      if (matches.length !== 1) {
+        return duplicateEntityIdentity(
+          workspace,
+          context,
+          "ProjectV2",
+          command.projectId,
+        );
+      }
+      const project = matches[0];
+      if (project.stage !== "closed") {
+        return rejection(workspace, context, "ILLEGAL_LIFECYCLE_TRANSITION", {
+          reason: `Project ${project.id} can be archived only after Close.`,
+          gate: `project:${project.id}:stage:${project.stage}`,
+          permittedNextCommand: "close_project",
+        });
+      }
+      const archived = new Set(workspace.visibility.archivedProjectIds);
+      if (command.archived) archived.add(project.id);
+      else archived.delete(project.id);
       return {
         ok: true,
         workspace: {
           ...workspace,
-          projects,
-          closeDecisions: [
-            ...workspace.closeDecisions,
-            {
-              ...structuredClone(command.decision),
-              actorId: context.actorId,
-              closedAt: context.now,
-            },
-          ],
+          visibility: {
+            ...workspace.visibility,
+            archivedProjectIds: [...archived].sort(),
+          },
         },
       };
     }
-
-    case "archive_project":
-      return notImplemented(workspace, context);
   }
 
   return assertNever(command);

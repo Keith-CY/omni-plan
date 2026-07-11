@@ -20,6 +20,7 @@ export interface AuthorizationContext {
   targetWasCommitted?: boolean;
   expandsScope?: boolean;
   deterministicTriggerKey?: string;
+  closureValidationRebetSourceIds?: Id[];
 }
 
 const humanOnly = new Set([
@@ -450,6 +451,7 @@ function isBlockingHold(
   affectedRecordIds?: Id[],
   targetWasCommitted?: boolean,
   expandsScope?: boolean,
+  closureValidationRebetSourceIds?: Id[],
 ): boolean {
   if (
     hold.type !== "sync_conflict" &&
@@ -467,6 +469,13 @@ function isBlockingHold(
         commandType !== "place_bet"
       );
     case "rebet_required":
+      if (
+        (commandType === "attach_evidence" ||
+          commandType === "satisfy_validation") &&
+        closureValidationRebetSourceIds?.includes(hold.sourceId) === true
+      ) {
+        return false;
+      }
       return rebetBlockedCommands.has(commandType);
     case "review_overdue":
       if (commandType === "update_work_item") {
@@ -500,6 +509,7 @@ export function findBlockingHold(
   affectedRecordIds?: Id[],
   targetWasCommitted?: boolean,
   expandsScope?: boolean,
+  closureValidationRebetSourceIds?: Id[],
 ): ProjectHoldState | undefined {
   return [...holds]
     .sort(
@@ -519,6 +529,7 @@ export function findBlockingHold(
         affectedRecordIds,
         targetWasCommitted,
         expandsScope,
+        closureValidationRebetSourceIds,
       ),
     );
 }
@@ -578,6 +589,7 @@ export function authorizeCommand(
     context.affectedRecordIds,
     context.targetWasCommitted,
     context.expandsScope,
+    context.closureValidationRebetSourceIds,
   );
   if (blockingHold === undefined) {
     return undefined;

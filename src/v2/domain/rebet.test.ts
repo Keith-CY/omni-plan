@@ -709,7 +709,6 @@ describe("Bet appetite boundary", () => {
         },
       },
       { type: "request_validation", projectId: "project-1" },
-      { type: "satisfy_validation", projectId: "project-1" },
     ];
 
     for (const [index, command] of commands.entries()) {

@@ -3,7 +3,7 @@ import type { Id, ISODate } from "@/domain/types";
 import type { CommandRejection, RejectionCode } from "./errors";
 import {
   overlappingWeeklyReviewCoverage,
-  weeklyReviewCoverageRange,
+  storedReviewSemanticsAreValid,
 } from "./review";
 import type {
   AttentionKind,
@@ -892,6 +892,12 @@ function closedProjectSnapshot(workspace: WorkspaceV2, projectId: Id): unknown {
     workspace.workItems.filter((workItem) => workItem.projectId === projectId),
   );
   const workItemIds = new Set(workItems.map(({ id }) => id));
+  const promotedActions = sortedById(
+    workspace.actions.filter(
+      ({ promotedProjectId }) => promotedProjectId === projectId,
+    ),
+  );
+  const promotedActionIds = new Set(promotedActions.map(({ id }) => id));
   const slotTargetsProject = (slot: CommitmentSlot): boolean =>
     slot.target.kind === "work_item" &&
     (slot.target.projectId === projectId ||
@@ -920,8 +926,10 @@ function closedProjectSnapshot(workspace: WorkspaceV2, projectId: Id): unknown {
   const actuals = sortedById(
     workspace.actuals.filter(
       (actual) =>
-        actual.target.kind === "work_item" &&
-        workItemIds.has(actual.target.workItemId),
+        (actual.target.kind === "work_item" &&
+          workItemIds.has(actual.target.workItemId)) ||
+        (actual.target.kind === "action" &&
+          promotedActionIds.has(actual.target.actionId)),
     ),
   );
   const replanProposals = sortedById(
@@ -933,6 +941,7 @@ function closedProjectSnapshot(workspace: WorkspaceV2, projectId: Id): unknown {
   );
   const protectedProjectRecordIds = new Set<Id>([
     projectId,
+    ...promotedActionIds,
     ...workItemIds,
     ...dailyCommitmentIds,
     ...bets.map(({ id }) => id),
@@ -978,6 +987,7 @@ function closedProjectSnapshot(workspace: WorkspaceV2, projectId: Id): unknown {
 
   return {
     project: projects[0] ?? null,
+    promotedActions,
     directionBriefs: sortedById(
       workspace.directionBriefs.filter(
         (brief) => brief.projectId === projectId,
@@ -1898,67 +1908,8 @@ function validateReviewRules(
       "resolve_sync_conflict",
     );
   }
-  const validStringArray = (
-    values: string[],
-    requireNonEmpty: boolean,
-  ): boolean =>
-    (!requireNonEmpty || values.length > 0) &&
-    values.every((value) => value.length > 0 && value === value.trim()) &&
-    new Set(values).size === values.length;
   for (const review of sortedById(workspace.reviews)) {
-    const createdAt = parseTimestamp(review.createdAt);
-    const dueAt = parseTimestamp(review.dueAt);
-    const overdueMarkedAt =
-      review.overdueMarkedAt === undefined
-        ? undefined
-        : parseTimestamp(review.overdueMarkedAt);
-    const kindMatchesTrigger =
-      (review.kind === "weekly" && review.triggerType === "weekly") ||
-      (review.kind === "event" && review.triggerType !== "weekly");
-    const cadenceSemanticsAreValid =
-      review.kind === "weekly"
-        ? weeklyReviewCoverageRange(workspace, review) !== undefined
-        : review.cadenceTimeZone === undefined;
-    let semanticsAreValid =
-      review.id.length > 0 &&
-      review.id === review.id.trim() &&
-      review.triggerKey.length > 0 &&
-      review.triggerKey === review.triggerKey.trim() &&
-      kindMatchesTrigger &&
-      cadenceSemanticsAreValid &&
-      isCanonicalTimestamp(review.createdAt) &&
-      isCanonicalTimestamp(review.dueAt) &&
-      createdAt !== undefined &&
-      (evaluatedAt === undefined || createdAt <= evaluatedAt) &&
-      dueAt !== undefined &&
-      (review.overdueMarkedAt === undefined ||
-        (isCanonicalTimestamp(review.overdueMarkedAt) &&
-          overdueMarkedAt !== undefined &&
-          dueAt <= overdueMarkedAt &&
-          createdAt <= overdueMarkedAt &&
-          (evaluatedAt === undefined || overdueMarkedAt <= evaluatedAt))) &&
-      validStringArray(review.affectedProjectIds, false) &&
-      validStringArray(review.affectedRecordIds, false) &&
-      ((review.status === "open" && review.conclusion === undefined) ||
-        (review.status === "completed" && review.conclusion !== undefined));
-    if (review.conclusion !== undefined) {
-      const completedAt = parseTimestamp(review.conclusion.completedAt);
-      semanticsAreValid =
-        semanticsAreValid &&
-        review.conclusion.summary.length > 0 &&
-        review.conclusion.summary === review.conclusion.summary.trim() &&
-        review.conclusion.actorId.length > 0 &&
-        review.conclusion.actorId === review.conclusion.actorId.trim() &&
-        validStringArray(review.conclusion.decisionCodes, true) &&
-        validStringArray(review.conclusion.followUpCommandIds, false) &&
-        isCanonicalTimestamp(review.conclusion.completedAt) &&
-        completedAt !== undefined &&
-        createdAt !== undefined &&
-        createdAt <= completedAt &&
-        (overdueMarkedAt === undefined || overdueMarkedAt <= completedAt) &&
-        (evaluatedAt === undefined || completedAt <= evaluatedAt);
-    }
-    if (!semanticsAreValid) {
+    if (!storedReviewSemanticsAreValid(workspace, review, evaluatedAt)) {
       add(
         "INVALID_COMMAND",
         `Review ${review.id} has invalid identity, occurrence, time, affected records, status, or conclusion semantics.`,

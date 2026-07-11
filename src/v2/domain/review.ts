@@ -363,6 +363,71 @@ export function overlappingWeeklyReviewCoverage(
   return conflicts;
 }
 
+export function storedReviewSemanticsAreValid(
+  workspace: WorkspaceV2,
+  review: ReviewRecord,
+  evaluatedAt?: number,
+): boolean {
+  const validStringArray = (
+    values: string[],
+    requireNonEmpty: boolean,
+  ): boolean =>
+    (!requireNonEmpty || values.length > 0) &&
+    values.every((value) => value.length > 0 && value === value.trim()) &&
+    new Set(values).size === values.length;
+  const createdAt = parsedCanonicalTimestamp(review.createdAt);
+  const dueAt = parsedCanonicalTimestamp(review.dueAt);
+  const overdueMarkedAt =
+    review.overdueMarkedAt === undefined
+      ? undefined
+      : parsedCanonicalTimestamp(review.overdueMarkedAt);
+  const kindMatchesTrigger =
+    (review.kind === "weekly" && review.triggerType === "weekly") ||
+    (review.kind === "event" && review.triggerType !== "weekly");
+  const cadenceSemanticsAreValid =
+    review.kind === "weekly"
+      ? weeklyReviewCoverageRange(workspace, review) !== undefined
+      : review.cadenceTimeZone === undefined;
+  let semanticsAreValid =
+    review.id.length > 0 &&
+    review.id === review.id.trim() &&
+    review.triggerKey.length > 0 &&
+    review.triggerKey === review.triggerKey.trim() &&
+    kindMatchesTrigger &&
+    cadenceSemanticsAreValid &&
+    createdAt !== undefined &&
+    (evaluatedAt === undefined || createdAt <= evaluatedAt) &&
+    dueAt !== undefined &&
+    (review.overdueMarkedAt === undefined ||
+      (overdueMarkedAt !== undefined &&
+        dueAt <= overdueMarkedAt &&
+        createdAt <= overdueMarkedAt &&
+        (evaluatedAt === undefined || overdueMarkedAt <= evaluatedAt))) &&
+    validStringArray(review.affectedProjectIds, false) &&
+    validStringArray(review.affectedRecordIds, false) &&
+    ((review.status === "open" && review.conclusion === undefined) ||
+      (review.status === "completed" && review.conclusion !== undefined));
+  if (review.conclusion !== undefined) {
+    const completedAt = parsedCanonicalTimestamp(
+      review.conclusion.completedAt,
+    );
+    semanticsAreValid =
+      semanticsAreValid &&
+      review.conclusion.summary.length > 0 &&
+      review.conclusion.summary === review.conclusion.summary.trim() &&
+      review.conclusion.actorId.length > 0 &&
+      review.conclusion.actorId === review.conclusion.actorId.trim() &&
+      validStringArray(review.conclusion.decisionCodes, true) &&
+      validStringArray(review.conclusion.followUpCommandIds, false) &&
+      completedAt !== undefined &&
+      createdAt !== undefined &&
+      createdAt <= completedAt &&
+      (overdueMarkedAt === undefined || overdueMarkedAt <= completedAt) &&
+      (evaluatedAt === undefined || completedAt <= evaluatedAt);
+  }
+  return semanticsAreValid;
+}
+
 function persistedWeeklyCoverage(
   workspace: WorkspaceV2,
   now: ISODate,

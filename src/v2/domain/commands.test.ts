@@ -1589,7 +1589,7 @@ describe("executeCommand rejection precedence and atomicity", () => {
     expect(withProposalCapability.workspace).toBe(workspace);
   });
 
-  it("returns COMMAND_NOT_IMPLEMENTED for a recognized human-authorized command", async () => {
+  it("returns an exact missing-project rejection for archive", async () => {
     const workspace = buildWorkspaceV2("workspace-1");
     const command = {
       type: "archive_project",
@@ -1602,7 +1602,10 @@ describe("executeCommand rejection precedence and atomicity", () => {
     );
 
     expect(result.workspace).toBe(workspace);
-    expect(result.rejection.code).toBe("COMMAND_NOT_IMPLEMENTED");
+    expect(result.rejection).toMatchObject({
+      code: "ENTITY_NOT_FOUND",
+      permittedNextCommand: "confirm_project_triage",
+    });
     expect(result.receipt.diff).toEqual([]);
     expect(workspace.commandReceipts).toEqual([]);
   });
@@ -3159,90 +3162,6 @@ describe("executeCommand Action triage and promotion", () => {
           outcome: "abandoned",
           keyLearning: "Promote first",
           unfinishedDisposition: "historical_incomplete",
-        },
-      },
-    },
-  ] as const satisfies readonly { name: string; command: V2Command }[])(
-    "does not let an Action ID masquerade as a $name",
-    async ({ command }) => {
-      const workspace = buildOpenActionWorkspace();
-      const result = rejected(
-        await executeCommand(
-          workspace,
-          command,
-          buildContext({ expectedRevision: 4 }),
-        ),
-      );
-
-      expect(result.rejection).toMatchObject({
-        code: "ACTION_PROMOTION_REQUIRED",
-        gate: "action_identity:action-triaged",
-        permittedNextCommand: "promote_action_to_project",
-      });
-      expect(result.workspace).toBe(workspace);
-    },
-  );
-
-  it.each([
-    {
-      name: "Close decision ID",
-      command: {
-        type: "close_project",
-        projectId: "project-1",
-        decision: {
-          id: "action-triaged",
-          projectId: "project-1",
-          successComparison: "Not a Project",
-          outcome: "partial",
-          keyLearning: "Promote first",
-          unfinishedDisposition: "historical_incomplete",
-        },
-      },
-    },
-    {
-      name: "Close follow-up Project ID",
-      command: {
-        type: "close_project",
-        projectId: "project-1",
-        decision: {
-          id: "close-1",
-          projectId: "project-1",
-          successComparison: "Not a Project",
-          outcome: "partial",
-          keyLearning: "Promote first",
-          unfinishedDisposition: "follow_up_project",
-          followUpProjectId: "action-triaged",
-        },
-      },
-    },
-    {
-      name: "Abandon decision ID",
-      command: {
-        type: "abandon_project",
-        projectId: "project-1",
-        decision: {
-          id: "action-triaged",
-          projectId: "project-1",
-          successComparison: "Not a Project",
-          outcome: "abandoned",
-          keyLearning: "Promote first",
-          unfinishedDisposition: "historical_incomplete",
-        },
-      },
-    },
-    {
-      name: "Abandon follow-up Project ID",
-      command: {
-        type: "abandon_project",
-        projectId: "project-1",
-        decision: {
-          id: "abandon-1",
-          projectId: "project-1",
-          successComparison: "Not a Project",
-          outcome: "abandoned",
-          keyLearning: "Promote first",
-          unfinishedDisposition: "follow_up_project",
-          followUpProjectId: "action-triaged",
         },
       },
     },
