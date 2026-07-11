@@ -41,10 +41,12 @@ export async function isMaterialDirectionChange(
   before: DirectionBrief,
   after: DirectionBrief,
 ): Promise<boolean> {
-  return (
-    (await stableHash(materialDirectionValue(before))) !==
-    (await stableHash(materialDirectionValue(after)))
-  );
+  const beforeSnapshot = structuredClone(before);
+  const afterSnapshot = structuredClone(after);
+  const beforeHash = stableHash(materialDirectionValue(beforeSnapshot));
+  const afterHash = stableHash(materialDirectionValue(afterSnapshot));
+
+  return (await beforeHash) !== (await afterHash);
 }
 
 export async function buildBetVersion(
@@ -58,25 +60,29 @@ export async function buildBetVersion(
   },
 ): Promise<BetVersion> {
   const briefSnapshot = structuredClone(brief);
-  const appetiteStart = input.approvedAt;
+  const inputSnapshot = structuredClone(input);
+  const committedScope = structuredClone(briefSnapshot.firstScope);
+  const briefHash = stableHash(briefSnapshot as unknown as JsonValue);
+  const appetiteStart = inputSnapshot.approvedAt;
   const appetiteEnd = new Date(
-    new Date(appetiteStart).getTime() + brief.appetiteSeconds * 1_000,
+    new Date(appetiteStart).getTime() +
+      briefSnapshot.appetiteSeconds * 1_000,
   ).toISOString();
 
   return {
-    id: input.id,
-    projectId: brief.projectId,
-    version: input.version,
-    briefId: brief.id,
-    briefHash: await stableHash(brief as unknown as JsonValue),
+    id: inputSnapshot.id,
+    projectId: briefSnapshot.projectId,
+    version: inputSnapshot.version,
+    briefId: briefSnapshot.id,
+    briefHash: await briefHash,
     briefSnapshot,
-    committedScope: structuredClone(brief.firstScope),
+    committedScope,
     appetiteStart,
     appetiteEnd,
-    actorId: input.actorId,
-    approvedAt: input.approvedAt,
-    ...(input.supersedesId === undefined
+    actorId: inputSnapshot.actorId,
+    approvedAt: inputSnapshot.approvedAt,
+    ...(inputSnapshot.supersedesId === undefined
       ? {}
-      : { supersedesId: input.supersedesId }),
+      : { supersedesId: inputSnapshot.supersedesId }),
   } satisfies BetVersion;
 }

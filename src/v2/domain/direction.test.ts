@@ -34,7 +34,7 @@ function completeBrief(
   overrides: Partial<DirectionBrief> = {},
 ): DirectionBrief {
   return {
-    ...COMPLETE_DRAFT,
+    ...structuredClone(COMPLETE_DRAFT),
     version: 3,
     createdAt: "2026-07-10T09:00:00.000Z",
     updatedAt: "2026-07-10T10:00:00.000Z",
@@ -107,6 +107,15 @@ describe("material Direction decisions", () => {
 
     await expect(isMaterialDirectionChange(before, after)).resolves.toBe(false);
   });
+
+  it("snapshots both comparison inputs before the first hash await", async () => {
+    const sameBrief = completeBrief();
+
+    const comparison = isMaterialDirectionChange(sameBrief, sameBrief);
+    sameBrief.firstScope[0].title = "Mutated while hashing";
+
+    await expect(comparison).resolves.toBe(false);
+  });
 });
 
 describe("buildBetVersion", () => {
@@ -142,5 +151,41 @@ describe("buildBetVersion", () => {
     brief.firstScope[0].title = "Mutated after approval";
     expect(bet.briefSnapshot.firstScope[0].title).toBe("Guided project start");
     expect(bet.committedScope[0].title).toBe("Guided project start");
+  });
+
+  it("snapshots every Bet input before the first hash await", async () => {
+    const brief = completeBrief({ appetiteSeconds: 7_200 });
+    const approvedBrief = structuredClone(brief);
+    const approval = {
+      id: "bet-async-snapshot",
+      version: 2,
+      actorId: "human-1",
+      approvedAt: APPROVED_AT,
+      supersedesId: "bet-old",
+    };
+    const approvedInput = structuredClone(approval);
+
+    const betPromise = buildBetVersion(brief, approval);
+    brief.audienceAndProblem = "Mutated while hashing";
+    brief.firstScope[0].title = "Mutated while hashing";
+    approval.actorId = "mutated-actor";
+    approval.approvedAt = "2026-07-12T09:00:00.000Z";
+    approval.supersedesId = "mutated-bet";
+
+    const bet = await betPromise;
+
+    expect(bet.briefSnapshot).toEqual(approvedBrief);
+    expect(bet.committedScope).toEqual(approvedBrief.firstScope);
+    expect(bet.briefHash).toBe(
+      await stableHash(approvedBrief as unknown as JsonValue),
+    );
+    expect(bet).toMatchObject({
+      id: approvedInput.id,
+      version: approvedInput.version,
+      actorId: approvedInput.actorId,
+      approvedAt: approvedInput.approvedAt,
+      supersedesId: approvedInput.supersedesId,
+      appetiteStart: approvedInput.approvedAt,
+    });
   });
 });

@@ -3114,6 +3114,50 @@ describe("executeCommand Direction and Bet", () => {
     },
   );
 
+  it("does not treat an awaiting project with historical Bet versions as a first Bet", async () => {
+    const historicalBet = {
+      id: "bet-historical",
+      projectId: "project-1",
+      version: 1,
+      briefId: "brief-1",
+      briefHash: "historical-hash",
+      briefSnapshot: structuredClone(COMPLETE_DIRECTION),
+      committedScope: structuredClone(COMPLETE_DIRECTION.firstScope),
+      appetiteStart: NOW,
+      appetiteEnd: LATER,
+      actorId: "human-old",
+      approvedAt: NOW,
+      invalidatedAt: LATER,
+      invalidationReason: "Historical Bet awaiting replacement",
+    } as const;
+    const workspace = buildDirectionWorkspace("awaiting_bet", COMPLETE_DIRECTION, {
+      bets: [historicalBet],
+    });
+    const original = structuredClone(workspace);
+
+    const result = rejected(
+      await executeCommand(
+        workspace,
+        {
+          type: "place_bet",
+          projectId: "project-1",
+          betId: "bet-new",
+          start: NOW,
+        },
+        buildContext(),
+      ),
+    );
+
+    expect(result.rejection).toMatchObject({
+      code: "ILLEGAL_LIFECYCLE_TRANSITION",
+      reason: "Project project-1 already has Bet history; use the Re-bet path.",
+      gate: "project:project-1:bet_history",
+      permittedNextCommand: "place_bet",
+    });
+    expect(result.workspace).toBe(workspace);
+    expect(workspace).toEqual(original);
+  });
+
   it("rejects a duplicate Bet ID without changing Project state", async () => {
     const workspace = buildDirectionWorkspace("awaiting_bet", COMPLETE_DIRECTION, {
       bets: [
@@ -3151,6 +3195,138 @@ describe("executeCommand Direction and Bet", () => {
     expect(result.rejection).toMatchObject({
       code: "ENTITY_ALREADY_EXISTS",
       gate: "entity_id:BetVersion:bet-1",
+      permittedNextCommand: "place_bet",
+    });
+    expect(result.workspace).toBe(workspace);
+  });
+
+  it.each([
+    {
+      name: "the pending CommandReceipt",
+      betId: "command-reserved-id",
+      commandId: "command-reserved-id",
+      entity: "CommandReceipt",
+      arrange: (_workspace: WorkspaceV2) => undefined,
+    },
+    {
+      name: "an existing BetScope",
+      betId: "scope-1",
+      commandId: "command-scope-collision",
+      entity: "BetScope",
+      arrange: (_workspace: WorkspaceV2) => undefined,
+    },
+    {
+      name: "a Daily Commitment slot",
+      betId: "slot-reserved",
+      commandId: "command-slot-collision",
+      entity: "CommitmentSlot",
+      arrange: (workspace: WorkspaceV2) => {
+        workspace.capacityProfile = structuredClone(PROFILE);
+        workspace.workItems = [structuredClone(WORK_ITEM)];
+        workspace.dailyCommitments = [
+          buildCommitment({
+            slots: [{ ...COMMITMENT_SLOT, id: "slot-reserved" }],
+          }),
+        ];
+      },
+    },
+    {
+      name: "a Replan proposal slot",
+      betId: "proposal-slot-reserved",
+      commandId: "command-proposal-slot-collision",
+      entity: "CommitmentSlot",
+      arrange: (workspace: WorkspaceV2) => {
+        workspace.capacityProfile = structuredClone(PROFILE);
+        workspace.workItems = [structuredClone(WORK_ITEM)];
+        workspace.dailyCommitments = [buildCommitment()];
+        workspace.replanProposals = [
+          {
+            id: "proposal-with-reserved-slot",
+            localDate: "2026-07-11",
+            baseCommitmentId: "commitment-1",
+            baseRevision: 0,
+            reasonCodes: ["actual_changed"],
+            proposedSlots: [
+              { ...COMMITMENT_SLOT, id: "proposal-slot-reserved" },
+            ],
+            proposalHash: "proposal-hash",
+            createdAt: NOW,
+            createdBy: "human-1",
+            status: "open",
+          },
+        ];
+      },
+    },
+    {
+      name: "a current capacity unavailable block",
+      betId: "away-1",
+      commandId: "command-away-collision",
+      entity: "UnavailableBlock",
+      arrange: (workspace: WorkspaceV2) => {
+        workspace.capacityProfile = structuredClone(PROFILE);
+      },
+    },
+    {
+      name: "a committed capacity unavailable block",
+      betId: "committed-away",
+      commandId: "command-committed-away-collision",
+      entity: "UnavailableBlock",
+      arrange: (workspace: WorkspaceV2) => {
+        workspace.capacityProfile = structuredClone(PROFILE);
+        workspace.workItems = [structuredClone(WORK_ITEM)];
+        workspace.dailyCommitments = [
+          buildCommitment({
+            capacitySnapshot: {
+              ...structuredClone(PROFILE),
+              unavailableBlocks: [
+                {
+                  id: "committed-away",
+                  start: NOW,
+                  finish: LATER,
+                },
+              ],
+            },
+          }),
+        ];
+      },
+    },
+    {
+      name: "a migration backup",
+      betId: "backup-reserved",
+      commandId: "command-backup-collision",
+      entity: "MigrationBackup",
+      arrange: (workspace: WorkspaceV2) => {
+        workspace.migration = {
+          sourceSchemaVersion: 1,
+          sourceChecksum: "source-checksum",
+          backupId: "backup-reserved",
+          backupChecksum: "backup-checksum",
+          migratedAt: NOW,
+          entityCounts: {},
+          deterministicIdMap: {},
+        };
+      },
+    },
+  ])("rejects a Bet ID owned by $name", async ({ betId, commandId, entity, arrange }) => {
+    const workspace = buildDirectionWorkspace("awaiting_bet");
+    arrange(workspace);
+
+    const result = rejected(
+      await executeCommand(
+        workspace,
+        {
+          type: "place_bet",
+          projectId: "project-1",
+          betId,
+          start: NOW,
+        },
+        buildContext({ commandId }),
+      ),
+    );
+
+    expect(result.rejection).toMatchObject({
+      code: "ENTITY_ALREADY_EXISTS",
+      gate: `entity_id:${entity}:${betId}`,
       permittedNextCommand: "place_bet",
     });
     expect(result.workspace).toBe(workspace);

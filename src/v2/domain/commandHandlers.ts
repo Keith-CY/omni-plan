@@ -135,8 +135,12 @@ function projectArtifactsCollision(
 function entityIdCollision(
   workspace: WorkspaceV2,
   id: string,
+  reservedIds: readonly { entity: string; id: string }[] = [],
 ): string | undefined {
+  const reservation = reservedIds.find((reserved) => reserved.id === id);
+  if (reservation !== undefined) return reservation.entity;
   if (workspace.workspaceId === id) return "WorkspaceV2";
+  if (workspace.migration?.backupId === id) return "MigrationBackup";
   const collections: readonly [string, readonly { id: string }[]][] = [
     ["InboxItem", workspace.inboxItems],
     ["Action", workspace.actions],
@@ -159,6 +163,36 @@ function entityIdCollision(
     ["Evidence", workspace.evidence],
     ["ActualV2", workspace.actuals],
     ["LegacyAuditRecord", workspace.legacyAuditRecords],
+    [
+      "BetScope",
+      [
+        ...workspace.directionBriefs.flatMap((brief) => brief.firstScope),
+        ...workspace.bets.flatMap((bet) => [
+          ...bet.briefSnapshot.firstScope,
+          ...bet.committedScope,
+        ]),
+      ],
+    ],
+    [
+      "CommitmentSlot",
+      [
+        ...workspace.dailyCommitments.flatMap(
+          (commitment) => commitment.slots,
+        ),
+        ...workspace.replanProposals.flatMap(
+          (proposal) => proposal.proposedSlots,
+        ),
+      ],
+    ],
+    [
+      "UnavailableBlock",
+      [
+        ...(workspace.capacityProfile?.unavailableBlocks ?? []),
+        ...workspace.dailyCommitments.flatMap(
+          (commitment) => commitment.capacitySnapshot.unavailableBlocks,
+        ),
+      ],
+    ],
   ];
 
   return collections.find(([, records]) =>
@@ -848,7 +882,6 @@ export async function applyCommandHandler(
           },
         );
       }
-
       const brief = workspace.directionBriefs.find(
         ({ id }) => id === project.activeDirectionBriefId,
       );
@@ -869,7 +902,9 @@ export async function applyCommandHandler(
         });
       }
 
-      const collision = entityIdCollision(workspace, command.betId);
+      const collision = entityIdCollision(workspace, command.betId, [
+        { entity: "CommandReceipt", id: context.commandId },
+      ]);
       if (collision !== undefined) {
         return entityAlreadyExists(
           workspace,
@@ -877,6 +912,18 @@ export async function applyCommandHandler(
           collision,
           command.betId,
           "place_bet",
+        );
+      }
+      if (workspace.bets.some((bet) => bet.projectId === project.id)) {
+        return rejection(
+          workspace,
+          context,
+          "ILLEGAL_LIFECYCLE_TRANSITION",
+          {
+            reason: `Project ${project.id} already has Bet history; use the Re-bet path.`,
+            gate: `project:${project.id}:bet_history`,
+            permittedNextCommand: "place_bet",
+          },
         );
       }
       if (!isCanonicalIsoTimestamp(command.start)) {
