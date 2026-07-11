@@ -14,6 +14,7 @@ import type {
   ProjectWorkItem,
   WorkspaceV2,
 } from "../domain/types";
+import { localDateAt } from "../domain/localTime";
 
 function isValidIso(value: string): boolean {
   return Number.isFinite(Date.parse(value));
@@ -83,29 +84,6 @@ function dependencyToSchedulerInput(
 ): Dependency {
   const { revision: _revision, ...shared } = structuredClone(dependency);
   return shared;
-}
-
-function localDateAt(value: string, timeZone: string): string | undefined {
-  const date = new Date(value);
-  if (!Number.isFinite(date.getTime())) return undefined;
-  try {
-    const parts = new Intl.DateTimeFormat("en-US", {
-      timeZone,
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-    }).formatToParts(date);
-    const part = (type: Intl.DateTimeFormatPartTypes) =>
-      parts.find((candidate) => candidate.type === type)?.value;
-    const year = part("year");
-    const month = part("month");
-    const day = part("day");
-    return year === undefined || month === undefined || day === undefined
-      ? undefined
-      : `${year}-${month}-${day}`;
-  } catch {
-    return undefined;
-  }
 }
 
 function compareText(left: string, right: string): number {

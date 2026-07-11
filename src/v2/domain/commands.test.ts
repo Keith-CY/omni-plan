@@ -670,7 +670,7 @@ describe("executeCommand applied receipts", () => {
     await expectCanonicalReceiptHashes(result.receipt, command);
   });
 
-  it("defers semantic capacity rules while accepting a structurally typed profile", async () => {
+  it("rejects a structurally typed profile that violates semantic capacity rules", async () => {
     const deferredProfile: CapacityProfile = {
       timeZone: "",
       weeklyWindows: [
@@ -696,10 +696,204 @@ describe("executeCommand applied receipts", () => {
       buildContext(),
     );
 
+    expect(result).toMatchObject({
+      ok: false,
+      workspace,
+      rejection: {
+        code: "INVALID_COMMAND",
+        gate: "capacity_profile:time_zone",
+        permittedNextCommand: "configure_capacity",
+      },
+    });
+    expect(workspace.capacityProfile).toBeUndefined();
+    expect(workspace.revision).toBe(0);
+  });
+
+  it("uses authoritative audit fields and deep-copies capacity input", async () => {
+    const workspace = deepFreeze(buildWorkspaceV2("workspace-1"));
+    const command = deepFreeze({
+      type: "configure_capacity",
+      profile: {
+        ...structuredClone(PROFILE),
+        updatedAt: "2000-01-01T00:00:00.000Z",
+        updatedBy: "untrusted-client",
+      },
+    } as const satisfies V2Command);
+
+    const result = await executeCommand(workspace, command, buildContext());
+
     expect(result.ok).toBe(true);
-    if (!result.ok) throw new Error("Expected typed profile to apply");
-    expect(result.workspace.capacityProfile).toEqual(deferredProfile);
-    expect(result.workspace.revision).toBe(1);
+    if (!result.ok) throw new Error("Expected applied command");
+    expect(result.workspace.capacityProfile).toEqual({
+      ...PROFILE,
+      updatedAt: NOW,
+      updatedBy: "human-1",
+    });
+    expect(result.workspace.capacityProfile).not.toBe(command.profile);
+    expect(result.workspace.capacityProfile?.weeklyWindows).not.toBe(
+      command.profile.weeklyWindows,
+    );
+    expect(command.profile.updatedAt).toBe("2000-01-01T00:00:00.000Z");
+    expect(command.profile.updatedBy).toBe("untrusted-client");
+  });
+
+  it("rejects a zero-capacity weekday even when another working day is usable", async () => {
+    const workspace = buildWorkspaceV2("workspace-1");
+    const profile: CapacityProfile = {
+      ...structuredClone(PROFILE),
+      weeklyWindows: [
+        { weekday: 1, startMinute: 540, finishMinute: 1_020 },
+        { weekday: 2, startMinute: 540, finishMinute: 1_020 },
+      ],
+      dailyBudgets: [
+        {
+          weekday: 1,
+          deepSeconds: 0,
+          mediumSeconds: 0,
+          shallowSeconds: 0,
+        },
+        {
+          weekday: 2,
+          deepSeconds: 3_600,
+          mediumSeconds: 0,
+          shallowSeconds: 0,
+        },
+      ],
+    };
+
+    const result = await executeCommand(
+      workspace,
+      { type: "configure_capacity", profile },
+      buildContext(),
+    );
+
+    expect(result).toMatchObject({
+      ok: false,
+      workspace,
+      rejection: {
+        code: "INVALID_COMMAND",
+        reason:
+          "Daily budget 0 for weekday 1 has no usable attention capacity for its configured working window.",
+        gate: "capacity_profile:daily_budget:0:usable_capacity",
+        permittedNextCommand: "configure_capacity",
+      },
+    });
+  });
+
+  it.each([
+    {
+      name: "a non-integer weekly minute",
+      gate: "capacity_profile:weekly_window:0",
+      patch: { weeklyWindows: [{ weekday: 6, startMinute: 540.5, finishMinute: 1_020 }] },
+    },
+    {
+      name: "an inverted weekly window",
+      gate: "capacity_profile:weekly_window:0",
+      patch: { weeklyWindows: [{ weekday: 6, startMinute: 1_020, finishMinute: 540 }] },
+    },
+    {
+      name: "overlapping same-weekday windows",
+      gate: "capacity_profile:weekly_window:1",
+      patch: {
+        weeklyWindows: [
+          { weekday: 6, startMinute: 540, finishMinute: 720 },
+          { weekday: 6, startMinute: 600, finishMinute: 800 },
+        ],
+      },
+    },
+    {
+      name: "duplicate weekday budgets",
+      gate: "capacity_profile:daily_budget:1",
+      patch: { dailyBudgets: [PROFILE.dailyBudgets[0], PROFILE.dailyBudgets[0]] },
+    },
+    {
+      name: "a negative attention budget",
+      gate: "capacity_profile:daily_budget:0",
+      patch: {
+        dailyBudgets: [
+          { ...PROFILE.dailyBudgets[0], deepSeconds: -1 },
+        ],
+      },
+    },
+    {
+      name: "a non-integer attention budget",
+      gate: "capacity_profile:daily_budget:0",
+      patch: {
+        dailyBudgets: [
+          { ...PROFILE.dailyBudgets[0], mediumSeconds: 0.5 },
+        ],
+      },
+    },
+    {
+      name: "a missing budget for a window weekday",
+      gate: "capacity_profile:weekly_window:0:budget",
+      patch: { dailyBudgets: [] },
+    },
+    {
+      name: "no usable window and budget pair",
+      gate: "capacity_profile:usable_capacity",
+      patch: {
+        dailyBudgets: [
+          {
+            weekday: 6,
+            deepSeconds: 0,
+            mediumSeconds: 0,
+            shallowSeconds: 0,
+          },
+        ],
+      },
+    },
+    {
+      name: "a non-canonical unavailable start",
+      gate: "capacity_profile:unavailable_block:0",
+      patch: {
+        unavailableBlocks: [
+          {
+            id: "away-1",
+            start: "2026-07-11T09:00:00Z",
+            finish: "2026-07-11T09:30:00.000Z",
+          },
+        ],
+      },
+    },
+    {
+      name: "an inverted unavailable interval",
+      gate: "capacity_profile:unavailable_block:0",
+      patch: {
+        unavailableBlocks: [
+          { id: "away-1", start: LATER, finish: NOW },
+        ],
+      },
+    },
+    {
+      name: "duplicate unavailable IDs",
+      gate: "capacity_profile:unavailable_block:1",
+      patch: {
+        unavailableBlocks: [PROFILE.unavailableBlocks[0], PROFILE.unavailableBlocks[0]],
+      },
+    },
+  ])("rejects $name", async ({ gate, patch }) => {
+    const workspace = buildWorkspaceV2("workspace-1");
+    const profile = {
+      ...structuredClone(PROFILE),
+      ...structuredClone(patch),
+    } as CapacityProfile;
+
+    const result = await executeCommand(
+      workspace,
+      { type: "configure_capacity", profile },
+      buildContext(),
+    );
+
+    expect(result).toMatchObject({
+      ok: false,
+      workspace,
+      rejection: {
+        code: "INVALID_COMMAND",
+        gate,
+        permittedNextCommand: "configure_capacity",
+      },
+    });
   });
 
   it("captures only an InboxItem and emits the exact creation diff", async () => {

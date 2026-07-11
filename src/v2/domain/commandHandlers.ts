@@ -7,6 +7,7 @@ import {
   isMaterialDirectionChange,
 } from "./direction";
 import { transitionLifecycle } from "./lifecycle";
+import { validateCapacityProfile } from "./localTime";
 import {
   resolvePlanningContext,
   type PlanningContextRejection,
@@ -430,11 +431,33 @@ export async function applyCommandHandler(
 
   switch (command.type) {
     case "configure_capacity": {
+      const validation = validateCapacityProfile(command.profile);
+      if (!validation.ok) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason: validation.reason,
+          gate: validation.gate,
+          permittedNextCommand: "configure_capacity",
+        });
+      }
+      const profile = {
+        timeZone: validation.canonicalTimeZone,
+        weeklyWindows: command.profile.weeklyWindows.map((window) => ({
+          ...window,
+        })),
+        dailyBudgets: command.profile.dailyBudgets.map((budget) => ({
+          ...budget,
+        })),
+        unavailableBlocks: command.profile.unavailableBlocks.map((block) => ({
+          ...block,
+        })),
+        updatedAt: context.now,
+        updatedBy: context.actorId,
+      };
       return {
         ok: true,
         workspace: {
           ...workspace,
-          capacityProfile: structuredClone(command.profile),
+          capacityProfile: profile,
         },
       };
     }

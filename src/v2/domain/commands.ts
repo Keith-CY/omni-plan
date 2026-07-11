@@ -10,6 +10,7 @@ import {
   validateWorkspaceInvariants,
   type InvariantViolation,
 } from "./invariants";
+import { localDateAt } from "./localTime";
 import {
   authorizeCommand,
   authorizeCommandIdentity,
@@ -1020,29 +1021,6 @@ function effectiveCommitmentForLocalDate(
   return effectiveDailyCommitments(workspace).find(
     (commitment) => commitment.localDate === localDate,
   );
-}
-
-function localDateAt(value: ISODate, timeZone: string): string | undefined {
-  const date = new Date(value);
-  if (!Number.isFinite(date.getTime())) return undefined;
-  try {
-    const parts = new Intl.DateTimeFormat("en-US", {
-      timeZone,
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-    }).formatToParts(date);
-    const part = (type: Intl.DateTimeFormatPartTypes) =>
-      parts.find((candidate) => candidate.type === type)?.value;
-    const year = part("year");
-    const month = part("month");
-    const day = part("day");
-    return year === undefined || month === undefined || day === undefined
-      ? undefined
-      : `${year}-${month}-${day}`;
-  } catch {
-    return undefined;
-  }
 }
 
 function soleEffectiveCommitmentForNow(
