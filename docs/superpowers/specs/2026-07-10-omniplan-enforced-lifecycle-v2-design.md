@@ -375,6 +375,10 @@ Closed projects are immutable. Archive is only a visibility preference and does 
 
 OmniPlan requires one portfolio-level Review each week. The Review queue covers:
 
+Each weekly Review stores the cadence timezone used when it was created. Its week boundaries and Sunday 18:00 deadline remain anchored to that immutable snapshot even if capacity settings later change.
+
+For backward compatibility, a schema-v2 weekly Review without this snapshot is accepted only when its deadline is provable from capacity configuration evidence that already existed at its creation time. All newly created Reviews include the snapshot.
+
 - Inbox aging;
 - Bet health and appetite;
 - capacity variance;

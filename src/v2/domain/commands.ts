@@ -18,6 +18,10 @@ import {
 } from "./policy";
 import { stableHash } from "./stableHash";
 import { soleCommitmentLeafForLocalDate } from "./today";
+import {
+  isPortfolioReviewScope,
+  reviewAffectedActiveProjectIds,
+} from "./review";
 import type {
   Action,
   ActorKind,
@@ -79,7 +83,7 @@ export type ExceptionDraft = Omit<
 >;
 export type ReviewDraft = Omit<
   ReviewRecord,
-  "status" | "createdAt" | "conclusion"
+  "status" | "createdAt" | "overdueMarkedAt" | "conclusion"
 >;
 export interface ConflictResolution {
   conflictId: Id;
@@ -668,7 +672,12 @@ function isReviewDraftValue(value: unknown): boolean {
   return (
     isRecordValue(value) &&
     isStringValue(value.id) &&
-    isOneOf(value.kind, ["weekly", "event"]) &&
+    ((value.kind === "weekly" &&
+      value.triggerType === "weekly" &&
+      isStringValue(value.cadenceTimeZone)) ||
+      (value.kind === "event" &&
+        value.triggerType !== "weekly" &&
+        value.cadenceTimeZone === undefined)) &&
     isStringValue(value.triggerKey) &&
     isOneOf(value.triggerType, [
       "weekly",
@@ -991,6 +1000,27 @@ function projectIdsForStoredReview(
   );
 }
 
+function projectIdsMutatedByReviewCommand(
+  workspace: WorkspaceV2,
+  reviewId: Id,
+  operation: "mark" | "complete",
+): Id[] {
+  const affectedProjectIds = uniqueIds(
+    recordsWithId(workspace.reviews, reviewId).flatMap((review) =>
+      reviewAffectedActiveProjectIds(workspace, review),
+    ),
+  );
+  if (operation === "mark") return affectedProjectIds;
+  return affectedProjectIds.filter((projectId) =>
+    recordsWithId(workspace.projects, projectId).some((project) =>
+      project.holds.some(
+        ({ type, sourceId }) =>
+          type === "review_overdue" && sourceId === reviewId,
+      ),
+    ),
+  );
+}
+
 function compareCommitmentRecency(
   left: DailyCommitment,
   right: DailyCommitment,
@@ -1222,12 +1252,23 @@ function affectedExistingProjectIds(
       break;
 
     case "mark_review_overdue":
+      candidates = projectIdsMutatedByReviewCommand(
+        workspace,
+        command.reviewId,
+        "mark",
+      );
+      break;
+
     case "complete_review":
-      candidates = projectIdsForStoredReview(workspace, command.reviewId);
+      candidates = projectIdsMutatedByReviewCommand(
+        workspace,
+        command.reviewId,
+        "complete",
+      );
       break;
 
     case "create_review":
-      candidates = command.review.affectedProjectIds;
+      candidates = [];
       break;
 
     case "resolve_sync_conflict": {
@@ -1508,6 +1549,85 @@ function affectedRecordIds(
   }
 }
 
+function policyMutationTargetIds(
+  workspace: WorkspaceV2,
+  command: V2Command,
+): Id[] {
+  switch (command.type) {
+    case "create_review":
+      return [command.review.id];
+    case "mark_review_overdue":
+      return uniqueIds([
+        command.reviewId,
+        ...projectIdsMutatedByReviewCommand(
+          workspace,
+          command.reviewId,
+          "mark",
+        ),
+      ]);
+    case "complete_review":
+      return uniqueIds([
+        command.reviewId,
+        ...projectIdsMutatedByReviewCommand(
+          workspace,
+          command.reviewId,
+          "complete",
+        ),
+      ]);
+    default:
+      return affectedRecordIds(workspace, command);
+  }
+}
+
+function timestampIsEffectiveAt(
+  value: ISODate | undefined,
+  now: ISODate,
+): boolean {
+  if (value === undefined) return false;
+  const timestamp = Date.parse(value);
+  const evaluatedAt = Date.parse(now);
+  return (
+    Number.isFinite(timestamp) &&
+    Number.isFinite(evaluatedAt) &&
+    new Date(timestamp).toISOString() === value &&
+    new Date(evaluatedAt).toISOString() === now &&
+    timestamp <= evaluatedAt
+  );
+}
+
+function classifyWorkItemScopeExpansion(
+  workspace: WorkspaceV2,
+  command: Extract<V2Command, { type: "update_work_item" }>,
+  now: ISODate,
+): boolean | undefined {
+  const workItems = recordsWithId(workspace.workItems, command.workItemId);
+  const projects = recordsWithId(workspace.projects, command.projectId);
+  if (workItems.length !== 1 || projects.length !== 1) return undefined;
+  const workItem = workItems[0];
+  const project = projects[0];
+  if (
+    workItem.projectId !== project.id ||
+    project.activeBetId === undefined ||
+    !["planning", "executing", "validating"].includes(project.stage)
+  ) {
+    return undefined;
+  }
+  const bets = recordsWithId(workspace.bets, project.activeBetId);
+  if (bets.length !== 1) return undefined;
+  const bet = bets[0];
+  if (
+    bet.projectId !== project.id ||
+    timestampIsEffectiveAt(bet.invalidatedAt, now) ||
+    !bet.committedScope.some(({ id }) => id === workItem.betScopeId)
+  ) {
+    return undefined;
+  }
+  return (
+    workItem.isScopeExpansion === true ||
+    command.patch.isScopeExpansion === true
+  );
+}
+
 function targetWasCommitted(
   workspace: WorkspaceV2,
   command: V2Command,
@@ -1517,6 +1637,10 @@ function targetWasCommitted(
   let targetKind: "action" | "work_item" | undefined;
 
   switch (command.type) {
+    case "complete_action":
+      targetKind = "action";
+      targetId = command.actionId;
+      break;
     case "record_actual":
       targetKind = command.actual.target.kind;
       targetId =
@@ -1551,7 +1675,6 @@ function targetWasCommitted(
     case "confirm_project_triage":
     case "update_project_metadata":
     case "update_action":
-    case "complete_action":
     case "promote_action_to_project":
     case "update_direction":
     case "place_bet":
@@ -1657,21 +1780,65 @@ function buildAuthorizationContext(
   context: CommandContext,
 ): AuthorizationContext {
   const projectIds = affectedExistingProjectIds(workspace, command);
+  const mutationTargetIds = policyMutationTargetIds(workspace, command);
+  const mutationTargetSet = new Set(mutationTargetIds);
   const projectHolds: ProjectHoldState[] = projectIds.flatMap(
     (projectId) =>
       recordsWithId(workspace.projects, projectId).flatMap(
         ({ holds }) => holds,
       ),
   );
+  const matchingGlobalSyncHolds = workspace.projects.flatMap(({ holds }) =>
+    holds.filter(
+      (hold) =>
+        hold.type === "sync_conflict" &&
+        hold.affectedRecordIds.some((id) => mutationTargetSet.has(id)),
+    ),
+  );
+  const scopedHolds = [
+    ...new Set([...projectHolds, ...matchingGlobalSyncHolds]),
+  ];
+  const syntheticReviewHolds: ProjectHoldState[] = workspace.reviews
+    .filter((review) => {
+      const dueAt = Date.parse(review.dueAt);
+      const now = Date.parse(context.now);
+      const appliesToCommand =
+        isPortfolioReviewScope(workspace, review) ||
+        review.affectedProjectIds.some((projectId) =>
+          projectIds.includes(projectId),
+        );
+      return (
+        appliesToCommand &&
+        review.status === "open" &&
+        Number.isFinite(dueAt) &&
+        Number.isFinite(now) &&
+        new Date(dueAt).toISOString() === review.dueAt &&
+        dueAt <= now
+      );
+    })
+    .map((review) => ({
+      type: "review_overdue",
+      sourceId: review.id,
+      affectedRecordIds: uniqueIds([
+        review.id,
+        ...review.affectedRecordIds,
+      ]),
+      createdAt: review.dueAt,
+    }));
+  const expandsScope =
+    command.type === "update_work_item"
+      ? classifyWorkItemScopeExpansion(workspace, command, context.now)
+      : undefined;
 
   return {
     actorKind: context.actorKind,
     origin: context.origin,
     source: context.source,
     workspaceRevision: workspace.revision,
-    projectHolds,
-    affectedRecordIds: affectedRecordIds(workspace, command),
+    projectHolds: [...scopedHolds, ...syntheticReviewHolds],
+    affectedRecordIds: mutationTargetIds,
     targetWasCommitted: targetWasCommitted(workspace, command, context.now),
+    expandsScope,
     deterministicTriggerKey: deterministicTriggerKey(command),
   };
 }

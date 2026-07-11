@@ -461,6 +461,32 @@ export function localDateAt(
   }
 }
 
+export function instantAtLocalMinute(
+  localDate: string,
+  minute: number,
+  timeZone: string,
+): ISODate | undefined {
+  const date = parseLocalDate(localDate);
+  if (
+    date === undefined ||
+    !Number.isInteger(minute) ||
+    minute < 0 ||
+    minute >= 1_440
+  ) {
+    return undefined;
+  }
+  try {
+    return new Date(
+      zonedLocalToEpochMilliseconds(
+        localDateTimeAtMinute(date, minute),
+        timeZone,
+      ),
+    ).toISOString();
+  } catch {
+    return undefined;
+  }
+}
+
 export function capacityForLocalDate(
   profile: CapacityProfile,
   localDate: string,

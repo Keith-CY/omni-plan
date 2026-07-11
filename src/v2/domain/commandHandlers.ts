@@ -25,6 +25,11 @@ import {
   type PlanningContextRejection,
 } from "./planning";
 import {
+  deriveReviewQueue,
+  reviewAffectedActiveProjectIds,
+  reviewOverdueTriggerKey,
+} from "./review";
+import {
   actualAttentionUsageForToday,
   canonicalReplanReasonCodes,
   generateTodayProposal,
@@ -42,6 +47,7 @@ import type {
   InboxItem,
   JsonValue,
   ProjectV2,
+  ReviewRecord,
   WorkspaceV2,
 } from "./types";
 
@@ -262,6 +268,12 @@ function isCanonicalIsoTimestamp(value: string): boolean {
   return (
     Number.isFinite(milliseconds) &&
     new Date(milliseconds).toISOString() === value
+  );
+}
+
+function sortedUniqueIds(values: string[]): string[] {
+  return [...new Set(values)].sort((left, right) =>
+    left < right ? -1 : left > right ? 1 : 0,
   );
 }
 
@@ -3673,9 +3685,291 @@ export async function applyCommandHandler(
       return { ok: true, workspace: { ...workspace, projects } };
     }
 
-    case "mark_review_overdue":
-    case "create_review":
-    case "complete_review":
+    case "create_review": {
+      const matchingOccurrences = workspace.reviews.filter(
+        ({ triggerKey }) => triggerKey === command.review.triggerKey,
+      );
+      if (matchingOccurrences.length > 1) {
+        return duplicateEntityIdentity(
+          workspace,
+          context,
+          "ReviewTrigger",
+          command.review.triggerKey,
+        );
+      }
+      if (matchingOccurrences.length === 1) {
+        return rejection(workspace, context, "DUPLICATE_COMMAND", {
+          reason: `Review occurrence ${command.review.triggerKey} is already persisted.`,
+          gate: `review_trigger:${command.review.triggerKey}`,
+          permittedNextCommand: "read_existing_review",
+        });
+      }
+      const derivedMatches = deriveReviewQueue(workspace, context.now).filter(
+        ({ triggerKey }) => triggerKey === command.review.triggerKey,
+      );
+      const exactDerived = derivedMatches.length === 1 &&
+        (await stableHash(command.review as unknown as JsonValue)) ===
+          (await stableHash(derivedMatches[0] as unknown as JsonValue));
+      if (!exactDerived) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason: `Review ${command.review.id} must exactly match one currently derived occurrence.`,
+          gate: `review:${command.review.id}:derivation`,
+          permittedNextCommand: command.type,
+        });
+      }
+      const collision = entityIdCollision(workspace, command.review.id, [
+        { entity: "CommandReceipt", id: context.commandId },
+      ]);
+      if (collision !== undefined) {
+        return entityAlreadyExists(
+          workspace,
+          context,
+          collision,
+          command.review.id,
+          command.type,
+        );
+      }
+      return {
+        ok: true,
+        workspace: {
+          ...workspace,
+          reviews: [
+            ...workspace.reviews,
+            {
+              ...structuredClone(command.review),
+              status: "open",
+              createdAt: context.now,
+            },
+          ],
+        },
+      };
+    }
+
+    case "mark_review_overdue": {
+      const matches = workspace.reviews
+        .map((review, index) => ({ review, index }))
+        .filter(({ review }) => review.id === command.reviewId);
+      if (matches.length === 0) {
+        return entityNotFound(
+          workspace,
+          context,
+          "ReviewRecord",
+          command.reviewId,
+          "create_review",
+        );
+      }
+      if (matches.length !== 1) {
+        return duplicateEntityIdentity(
+          workspace,
+          context,
+          "ReviewRecord",
+          command.reviewId,
+        );
+      }
+      const { review, index: reviewIndex } = matches[0];
+      if (review.status !== "open") {
+        return rejection(workspace, context, "REVISION_CONFLICT", {
+          reason: `Review ${review.id} is already completed.`,
+          gate: `review:${review.id}:status`,
+          permittedNextCommand: "read_completed_review",
+        });
+      }
+      if (review.overdueMarkedAt !== undefined) {
+        return rejection(workspace, context, "DUPLICATE_COMMAND", {
+          reason: `Review ${review.id} is already marked overdue.`,
+          gate: `review:${review.id}:overdue`,
+          permittedNextCommand: "complete_review",
+        });
+      }
+      const expectedTriggerKey = reviewOverdueTriggerKey(review);
+      if (
+        command.triggerKey !== expectedTriggerKey ||
+        !isCanonicalIsoTimestamp(review.dueAt) ||
+        Date.parse(context.now) < Date.parse(review.dueAt)
+      ) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason: `Review ${review.id} is not due for exact overdue trigger ${expectedTriggerKey}.`,
+          gate: `review:${review.id}:overdue`,
+          permittedNextCommand: command.type,
+        });
+      }
+      const projectIds = reviewAffectedActiveProjectIds(workspace, review);
+      const affectedRecordIds = sortedUniqueIds([
+        review.id,
+        ...review.affectedRecordIds,
+      ]);
+      const affectedProjects: Array<{
+        project: ProjectV2;
+        index: number;
+        alreadyHeld: boolean;
+      }> = [];
+      for (const projectId of projectIds) {
+        const projectMatches = workspace.projects
+          .map((project, index) => ({ project, index }))
+          .filter(({ project }) => project.id === projectId);
+        if (projectMatches.length === 0) {
+          return entityNotFound(
+            workspace,
+            context,
+            "ProjectV2",
+            projectId,
+            "repair_workspace_reference",
+          );
+        }
+        if (projectMatches.length !== 1) {
+          return duplicateEntityIdentity(
+            workspace,
+            context,
+            "ProjectV2",
+            projectId,
+          );
+        }
+        const { project, index } = projectMatches[0];
+        affectedProjects.push({
+          project,
+          index,
+          alreadyHeld: project.holds.some(
+            ({ type, sourceId }) =>
+              type === "review_overdue" && sourceId === review.id,
+          ),
+        });
+      }
+      const alreadyHeldCount = affectedProjects.filter(
+        ({ alreadyHeld }) => alreadyHeld,
+      ).length;
+      if (
+        affectedProjects.length > 0 &&
+        alreadyHeldCount === affectedProjects.length
+      ) {
+        return rejection(workspace, context, "DUPLICATE_COMMAND", {
+          reason: `Review ${review.id} is already marked overdue.`,
+          gate: `review:${review.id}:overdue`,
+          permittedNextCommand: "complete_review",
+        });
+      }
+      if (alreadyHeldCount > 0) {
+        return rejection(workspace, context, "SYNC_CONFLICT", {
+          reason: `Review ${review.id} is only partially marked overdue across its affected Projects.`,
+          gate: `review:${review.id}:overdue`,
+          permittedNextCommand: "resolve_sync_conflict",
+        });
+      }
+      const projects = [...workspace.projects];
+      for (const { project, index } of affectedProjects) {
+        projects[index] = {
+          ...project,
+          holds: [
+            ...project.holds,
+            {
+              type: "review_overdue",
+              sourceId: review.id,
+              affectedRecordIds,
+              createdAt: context.now,
+            },
+          ],
+          updatedAt: context.now,
+        };
+      }
+      const reviews = [...workspace.reviews];
+      reviews[reviewIndex] = { ...review, overdueMarkedAt: context.now };
+      return { ok: true, workspace: { ...workspace, projects, reviews } };
+    }
+
+    case "complete_review": {
+      const matches = workspace.reviews
+        .map((review, index) => ({ review, index }))
+        .filter(({ review }) => review.id === command.reviewId);
+      if (matches.length === 0) {
+        return entityNotFound(
+          workspace,
+          context,
+          "ReviewRecord",
+          command.reviewId,
+          "create_review",
+        );
+      }
+      if (matches.length !== 1) {
+        return duplicateEntityIdentity(
+          workspace,
+          context,
+          "ReviewRecord",
+          command.reviewId,
+        );
+      }
+      const { review, index: reviewIndex } = matches[0];
+      if (review.status !== "open" || review.conclusion !== undefined) {
+        return rejection(workspace, context, "REVISION_CONFLICT", {
+          reason: `Review ${review.id} already has an immutable conclusion.`,
+          gate: `review:${review.id}:conclusion`,
+          permittedNextCommand: "read_completed_review",
+        });
+      }
+      const summary = command.conclusion.summary.trim();
+      const decisionCodes = command.conclusion.decisionCodes.map((value) =>
+        value.trim(),
+      );
+      const followUpCommandIds = command.conclusion.followUpCommandIds.map(
+        (value) => value.trim(),
+      );
+      const arraysAreValid =
+        decisionCodes.length > 0 &&
+        decisionCodes.every((value) => value.length > 0) &&
+        new Set(decisionCodes).size === decisionCodes.length &&
+        followUpCommandIds.every((value) => value.length > 0) &&
+        new Set(followUpCommandIds).size === followUpCommandIds.length;
+      if (
+        summary.length === 0 ||
+        !arraysAreValid ||
+        !isCanonicalIsoTimestamp(review.createdAt) ||
+        Date.parse(context.now) < Date.parse(review.createdAt)
+      ) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason: `Review ${review.id} requires one concise conclusion, unique decisions, and valid follow-up command IDs.`,
+          gate: `review:${review.id}:conclusion`,
+          permittedNextCommand: command.type,
+        });
+      }
+      const affectedProjectIds = new Set(
+        reviewAffectedActiveProjectIds(workspace, review),
+      );
+      for (const projectId of affectedProjectIds) {
+        const projectMatches = workspace.projects.filter(
+          ({ id }) => id === projectId,
+        );
+        if (projectMatches.length !== 1) {
+          return duplicateEntityIdentity(
+            workspace,
+            context,
+            "ProjectV2",
+            projectId,
+          );
+        }
+      }
+      const reviews = [...workspace.reviews];
+      reviews[reviewIndex] = {
+        ...review,
+        status: "completed",
+        conclusion: {
+          summary,
+          decisionCodes,
+          followUpCommandIds,
+          actorId: context.actorId,
+          completedAt: context.now,
+        },
+      };
+      const projects = workspace.projects.map((project) => {
+        if (!affectedProjectIds.has(project.id)) return project;
+        const holds = project.holds.filter(
+          ({ type, sourceId }) =>
+            !(type === "review_overdue" && sourceId === review.id),
+        );
+        return holds.length === project.holds.length
+          ? project
+          : { ...project, holds, updatedAt: context.now };
+      });
+      return { ok: true, workspace: { ...workspace, reviews, projects } };
+    }
+
     case "resolve_sync_conflict":
     case "close_project":
       return notImplemented(workspace, context);

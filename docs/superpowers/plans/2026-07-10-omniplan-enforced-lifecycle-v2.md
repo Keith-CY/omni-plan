@@ -539,7 +539,9 @@ export interface ReviewRecord {
   affectedProjectIds: Id[];
   affectedRecordIds: Id[];
   dueAt: ISODate;
+  cadenceTimeZone?: string;
   createdAt: ISODate;
+  overdueMarkedAt?: ISODate;
   conclusion?: ReviewConclusion & { actorId: Id; completedAt: ISODate };
 }
 
@@ -1608,6 +1610,10 @@ Interpret weekday and due minute in the CapacityProfile timezone. A Review week 
 Expected: FAIL because Review derivation and completion do not exist.
 
 - [ ] Implement `deriveReviewQueue(workspace, now)` as a pure projection and use explicit `create_review` commands to persist new Review records. Use stable trigger keys for idempotency.
+
+Persist the cadence timezone on every weekly Review occurrence. That immutable snapshot, rather than the mutable current CapacityProfile or later command receipts, is authoritative for validating its Monday-to-Sunday range and Sunday 18:00 deadline.
+
+Grandfather schema-v2 weekly Reviews that predate this field only when the stored deadline can be proven against a CapacityProfile or applied capacity-configuration receipt that existed no later than the Review's creation time. New Review commands must always include the snapshot.
 
 - [ ] Run focused tests, `bun run test`, and `bun run build`.
 

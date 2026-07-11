@@ -21,10 +21,12 @@ function isNonBlank(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
 }
 
-function hasUsableEvidenceFields(
+export function isUsableEvidenceAt(
   evidence: WorkspaceV2["evidence"][number],
-  evaluatedAt: number,
+  now: ISODate,
 ): boolean {
+  const evaluatedAt = timestamp(now);
+  if (evaluatedAt === undefined || !isCanonicalTimestamp(now)) return false;
   return (
     typeof evidence.id === "string" &&
     evidence.id.trim().length > 0 &&
@@ -165,7 +167,7 @@ export function requirementStatus(
       (item) =>
         item.projectId === projectId &&
         item.workItemId === requirementId &&
-        hasUsableEvidenceFields(item, evaluatedAt),
+        isUsableEvidenceAt(item, now),
     )
     .sort(
       (left, right) =>

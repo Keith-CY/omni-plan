@@ -18,6 +18,7 @@ export interface AuthorizationContext {
   projectHolds: ProjectHoldState[];
   affectedRecordIds?: Id[];
   targetWasCommitted?: boolean;
+  expandsScope?: boolean;
   deterministicTriggerKey?: string;
 }
 
@@ -147,7 +148,6 @@ const rebetBlockedCommands = new Set([
 const overdueReviewBlockedCommands = new Set([
   "place_bet",
   "create_work_item",
-  "update_work_item",
   "upsert_dependency",
   "remove_dependency",
   "remove_work_item",
@@ -449,7 +449,16 @@ function isBlockingHold(
   hold: ProjectHoldState,
   affectedRecordIds?: Id[],
   targetWasCommitted?: boolean,
+  expandsScope?: boolean,
 ): boolean {
+  if (
+    hold.type !== "sync_conflict" &&
+    (commandType === "create_review" ||
+      commandType === "mark_review_overdue" ||
+      commandType === "complete_review")
+  ) {
+    return false;
+  }
   switch (hold.type) {
     case "migration_review":
       return (
@@ -460,9 +469,13 @@ function isBlockingHold(
     case "rebet_required":
       return rebetBlockedCommands.has(commandType);
     case "review_overdue":
+      if (commandType === "update_work_item") {
+        return expandsScope !== false;
+      }
       if (
         commandType === "record_actual" ||
         commandType === "attach_evidence" ||
+        commandType === "complete_action" ||
         commandType === "complete_work_item"
       ) {
         return targetWasCommitted !== true;
@@ -486,6 +499,7 @@ export function findBlockingHold(
   holds: ProjectHoldState[],
   affectedRecordIds?: Id[],
   targetWasCommitted?: boolean,
+  expandsScope?: boolean,
 ): ProjectHoldState | undefined {
   return [...holds]
     .sort(
@@ -504,6 +518,7 @@ export function findBlockingHold(
         hold,
         affectedRecordIds,
         targetWasCommitted,
+        expandsScope,
       ),
     );
 }
@@ -562,6 +577,7 @@ export function authorizeCommand(
     context.projectHolds,
     context.affectedRecordIds,
     context.targetWasCommitted,
+    context.expandsScope,
   );
   if (blockingHold === undefined) {
     return undefined;

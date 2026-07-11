@@ -1,6 +1,10 @@
 import type { Id, ISODate } from "@/domain/types";
 
 import type { CommandRejection, RejectionCode } from "./errors";
+import {
+  overlappingWeeklyReviewCoverage,
+  weeklyReviewCoverageRange,
+} from "./review";
 import type {
   AttentionKind,
   BetVersion,
@@ -182,6 +186,13 @@ function sameStructure(left: unknown, right: unknown): boolean {
 function parseTimestamp(value: ISODate): number | undefined {
   const timestamp = Date.parse(value);
   return Number.isFinite(timestamp) ? timestamp : undefined;
+}
+
+function isCanonicalTimestamp(value: ISODate): boolean {
+  const timestamp = parseTimestamp(value);
+  return (
+    timestamp !== undefined && new Date(timestamp).toISOString() === value
+  );
 }
 
 function isAtOrBefore(value: ISODate, boundary: ISODate): boolean {
@@ -1099,6 +1110,24 @@ function validateReferenceRules(
       }
     }
   }
+  const nestedReferenceTargets: ReferenceTarget[] = [
+    ...workspace.directionBriefs.flatMap(({ firstScope }) => firstScope),
+    ...workspace.bets.flatMap((bet) => [
+      ...bet.committedScope,
+      ...bet.briefSnapshot.firstScope,
+    ]),
+    ...workspace.dailyCommitments.flatMap(({ slots, capacitySnapshot }) => [
+      ...slots,
+      ...capacitySnapshot.unavailableBlocks,
+    ]),
+    ...workspace.replanProposals.flatMap(({ proposedSlots }) => proposedSlots),
+    ...(workspace.capacityProfile?.unavailableBlocks ?? []),
+  ];
+  for (const record of sortedById(nestedReferenceTargets)) {
+    if (!knownRecordsById.has(record.id)) {
+      knownRecordsById.set(record.id, record);
+    }
+  }
   if (workspace.migration !== undefined) {
     knownRecordsById.set(workspace.migration.backupId, {
       id: workspace.migration.backupId,
@@ -1787,6 +1816,180 @@ function validateReferenceRules(
   }
 }
 
+function validateReviewRules(
+  workspace: WorkspaceV2,
+  now: ISODate,
+  previousWorkspace: WorkspaceV2 | undefined,
+  add: AddViolation,
+): void {
+  const ids = new Map<Id, number>();
+  const triggerKeys = new Map<string, number>();
+  for (const review of workspace.reviews) {
+    ids.set(review.id, (ids.get(review.id) ?? 0) + 1);
+    triggerKeys.set(
+      review.triggerKey,
+      (triggerKeys.get(review.triggerKey) ?? 0) + 1,
+    );
+  }
+  for (const [id, count] of [...ids].sort(([left], [right]) =>
+    compareText(left, right),
+  )) {
+    if (count > 1) {
+      add(
+        "SYNC_CONFLICT",
+        `Review identity ${id} has ${count} stored records.`,
+        `review:${id}:identity`,
+        "resolve_sync_conflict",
+      );
+    }
+  }
+  for (const [triggerKey, count] of [...triggerKeys].sort(
+    ([left], [right]) => compareText(left, right),
+  )) {
+    if (count > 1) {
+      add(
+        "SYNC_CONFLICT",
+        `Review occurrence ${triggerKey} has ${count} stored records.`,
+        `review_trigger:${triggerKey}`,
+        "resolve_sync_conflict",
+      );
+    }
+  }
+  if (previousWorkspace !== undefined) {
+    const previousById = new Map<Id, WorkspaceV2["reviews"]>();
+    const candidateById = new Map<Id, WorkspaceV2["reviews"]>();
+    for (const review of previousWorkspace.reviews) {
+      const matches = previousById.get(review.id) ?? [];
+      matches.push(review);
+      previousById.set(review.id, matches);
+    }
+    for (const review of workspace.reviews) {
+      const matches = candidateById.get(review.id) ?? [];
+      matches.push(review);
+      candidateById.set(review.id, matches);
+    }
+    for (const [id, previousMatches] of [...previousById].sort(
+      ([left], [right]) => compareText(left, right),
+    )) {
+      const candidateMatches = candidateById.get(id) ?? [];
+      if (
+        previousMatches.length === 1 &&
+        candidateMatches.length === 1 &&
+        previousMatches[0].cadenceTimeZone !==
+          candidateMatches[0].cadenceTimeZone
+      ) {
+        add(
+          "INVALID_COMMAND",
+          `Review ${id} cadence timezone snapshot is immutable.`,
+          `review:${id}:cadence_timezone`,
+          "read_existing_review",
+        );
+      }
+    }
+  }
+
+  const evaluatedAt = parseTimestamp(now);
+  const weeklyCoverageConflicts = overlappingWeeklyReviewCoverage(workspace);
+  for (const conflict of weeklyCoverageConflicts) {
+    add(
+      "SYNC_CONFLICT",
+      `Weekly Review coverage ${conflict.leftReviewId} and ${conflict.rightReviewId} overlap at ${conflict.overlapStart}.`,
+      `weekly_coverage:${conflict.overlapStart}`,
+      "resolve_sync_conflict",
+    );
+  }
+  const validStringArray = (
+    values: string[],
+    requireNonEmpty: boolean,
+  ): boolean =>
+    (!requireNonEmpty || values.length > 0) &&
+    values.every((value) => value.length > 0 && value === value.trim()) &&
+    new Set(values).size === values.length;
+  for (const review of sortedById(workspace.reviews)) {
+    const createdAt = parseTimestamp(review.createdAt);
+    const dueAt = parseTimestamp(review.dueAt);
+    const overdueMarkedAt =
+      review.overdueMarkedAt === undefined
+        ? undefined
+        : parseTimestamp(review.overdueMarkedAt);
+    const kindMatchesTrigger =
+      (review.kind === "weekly" && review.triggerType === "weekly") ||
+      (review.kind === "event" && review.triggerType !== "weekly");
+    const cadenceSemanticsAreValid =
+      review.kind === "weekly"
+        ? weeklyReviewCoverageRange(workspace, review) !== undefined
+        : review.cadenceTimeZone === undefined;
+    let semanticsAreValid =
+      review.id.length > 0 &&
+      review.id === review.id.trim() &&
+      review.triggerKey.length > 0 &&
+      review.triggerKey === review.triggerKey.trim() &&
+      kindMatchesTrigger &&
+      cadenceSemanticsAreValid &&
+      isCanonicalTimestamp(review.createdAt) &&
+      isCanonicalTimestamp(review.dueAt) &&
+      createdAt !== undefined &&
+      (evaluatedAt === undefined || createdAt <= evaluatedAt) &&
+      dueAt !== undefined &&
+      (review.overdueMarkedAt === undefined ||
+        (isCanonicalTimestamp(review.overdueMarkedAt) &&
+          overdueMarkedAt !== undefined &&
+          dueAt <= overdueMarkedAt &&
+          createdAt <= overdueMarkedAt &&
+          (evaluatedAt === undefined || overdueMarkedAt <= evaluatedAt))) &&
+      validStringArray(review.affectedProjectIds, false) &&
+      validStringArray(review.affectedRecordIds, false) &&
+      ((review.status === "open" && review.conclusion === undefined) ||
+        (review.status === "completed" && review.conclusion !== undefined));
+    if (review.conclusion !== undefined) {
+      const completedAt = parseTimestamp(review.conclusion.completedAt);
+      semanticsAreValid =
+        semanticsAreValid &&
+        review.conclusion.summary.length > 0 &&
+        review.conclusion.summary === review.conclusion.summary.trim() &&
+        review.conclusion.actorId.length > 0 &&
+        review.conclusion.actorId === review.conclusion.actorId.trim() &&
+        validStringArray(review.conclusion.decisionCodes, true) &&
+        validStringArray(review.conclusion.followUpCommandIds, false) &&
+        isCanonicalTimestamp(review.conclusion.completedAt) &&
+        completedAt !== undefined &&
+        createdAt !== undefined &&
+        createdAt <= completedAt &&
+        (overdueMarkedAt === undefined || overdueMarkedAt <= completedAt) &&
+        (evaluatedAt === undefined || completedAt <= evaluatedAt);
+    }
+    if (!semanticsAreValid) {
+      add(
+        "INVALID_COMMAND",
+        `Review ${review.id} has invalid identity, occurrence, time, affected records, status, or conclusion semantics.`,
+        `review:${review.id}:semantics`,
+        "repair_workspace_reference",
+      );
+    }
+  }
+
+  const completedReviewIds = new Set(
+    workspace.reviews
+      .filter(({ status }) => status === "completed")
+      .map(({ id }) => id),
+  );
+  for (const project of sortedById(workspace.projects)) {
+    for (const hold of project.holds) {
+      if (
+        hold.type === "review_overdue" &&
+        completedReviewIds.has(hold.sourceId)
+      ) {
+        add(
+          "SYNC_CONFLICT",
+          `Completed Review ${hold.sourceId} still owns an overdue hold on Project ${project.id}.`,
+          `review:${hold.sourceId}:completed_hold`,
+          "resolve_sync_conflict",
+        );
+      }
+    }
+  }
+}
+
 export function validateWorkspaceInvariants(
   workspace: WorkspaceV2,
   now: ISODate,
@@ -1799,6 +2002,7 @@ export function validateWorkspaceInvariants(
   validateScopeRules(workspace, previousWorkspace, collector.add);
   validateClosedProjectRules(workspace, previousWorkspace, collector.add);
   validateReferenceRules(workspace, collector.add);
+  validateReviewRules(workspace, now, previousWorkspace, collector.add);
 
   return collector.result();
 }

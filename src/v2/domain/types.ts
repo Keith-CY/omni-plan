@@ -293,7 +293,9 @@ export interface ReviewRecord {
   affectedProjectIds: Id[];
   affectedRecordIds: Id[];
   dueAt: ISODate;
+  cadenceTimeZone?: string;
   createdAt: ISODate;
+  overdueMarkedAt?: ISODate;
   conclusion?: ReviewConclusion & { actorId: Id; completedAt: ISODate };
 }
 

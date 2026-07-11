@@ -126,9 +126,19 @@ export function evaluateBetBoundary(
   now: string,
 ): BetBoundaryProposal[] {
   const nowMilliseconds = Date.parse(now);
-  if (!Number.isFinite(nowMilliseconds)) return [];
+  if (
+    !Number.isFinite(nowMilliseconds) ||
+    new Date(nowMilliseconds).toISOString() !== now
+  ) {
+    return [];
+  }
 
-  const betsById = new Map(workspace.bets.map((bet) => [bet.id, bet]));
+  const betsById = new Map<string, WorkspaceV2["bets"]>();
+  for (const bet of workspace.bets) {
+    const matches = betsById.get(bet.id) ?? [];
+    matches.push(bet);
+    betsById.set(bet.id, matches);
+  }
   const persistedTriggerKeys = new Set(
     workspace.reviews.map(({ triggerKey }) => triggerKey),
   );
@@ -144,11 +154,22 @@ export function evaluateBetBoundary(
       continue;
     }
 
-    const bet = betsById.get(project.activeBetId);
+    const matchingBets = betsById.get(project.activeBetId) ?? [];
+    if (matchingBets.length !== 1) continue;
+    const bet = matchingBets[0];
+    const invalidatedAt =
+      bet?.invalidatedAt === undefined
+        ? undefined
+        : Date.parse(bet.invalidatedAt);
+    const invalidationIsEffective =
+      invalidatedAt !== undefined &&
+      Number.isFinite(invalidatedAt) &&
+      new Date(invalidatedAt).toISOString() === bet?.invalidatedAt &&
+      invalidatedAt <= nowMilliseconds;
     if (
       bet === undefined ||
       bet.projectId !== project.id ||
-      bet.invalidatedAt !== undefined
+      invalidationIsEffective
     ) {
       continue;
     }
