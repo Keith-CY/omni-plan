@@ -361,6 +361,8 @@ const ALL_COMMANDS = [
     commitment: {
       id: "commitment-1",
       localDate: "2026-07-11",
+      workspaceRevision: 0,
+      generatedAt: NOW,
       proposalHash: "proposal-hash",
       slots: [COMMITMENT_SLOT],
     },
@@ -539,7 +541,9 @@ describe("V2Command public contract", () => {
       );
 
       if (!result.ok) {
-        expect(result.rejection.code).not.toBe("INVALID_COMMAND");
+        expect(result.rejection.gate).not.toBe(
+          `command_payload:${command.type}`,
+        );
       }
     },
   );
@@ -1171,6 +1175,8 @@ describe("executeCommand applied receipts", () => {
         commitment: {
           id: "commitment-1",
           localDate: "2026-07-11",
+          workspaceRevision: 0,
+          generatedAt: NOW,
           proposalHash: "proposal-hash",
           slots: [
             {
@@ -2207,6 +2213,8 @@ describe("executeCommand trusted policy projection", () => {
       commitment: {
         id: "commitment-next",
         localDate: effectiveCommitment.localDate,
+        workspaceRevision: 11,
+        generatedAt: NOW,
         proposalHash: "replacement-hash",
         slots: [],
       },

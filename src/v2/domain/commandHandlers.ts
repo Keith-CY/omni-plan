@@ -7,15 +7,34 @@ import {
   isMaterialDirectionChange,
 } from "./direction";
 import { transitionLifecycle } from "./lifecycle";
-import { validateCapacityProfile } from "./localTime";
 import {
+  capacityForLocalDate,
+  createCapacityLedger,
+  localDateAt,
+  validateCapacityProfile,
+} from "./localTime";
+import {
+  buildPlanVersionsForCommitment,
+  PlanVersionBuildError,
   resolvePlanningContext,
   type PlanningContextRejection,
 } from "./planning";
+import {
+  actualAttentionUsageForToday,
+  canonicalReplanReasonCodes,
+  generateTodayProposal,
+  replanHasMaterialChange,
+  soleCommitmentLeafForLocalDate,
+  TODAY_PROPOSAL_MAX_AGE_SECONDS,
+} from "./today";
+import { stableHash } from "./stableHash";
 import type {
   Action,
+  CommitmentSlot,
+  DailyCommitment,
   DirectionBrief,
   InboxItem,
+  JsonValue,
   ProjectV2,
   WorkspaceV2,
 } from "./types";
@@ -141,15 +160,16 @@ function projectArtifactsCollision(
   return undefined;
 }
 
-function entityIdCollision(
+function entityIdOwners(
   workspace: WorkspaceV2,
   id: string,
   reservedIds: readonly { entity: string; id: string }[] = [],
-): string | undefined {
-  const reservation = reservedIds.find((reserved) => reserved.id === id);
-  if (reservation !== undefined) return reservation.entity;
-  if (workspace.workspaceId === id) return "WorkspaceV2";
-  if (workspace.migration?.backupId === id) return "MigrationBackup";
+): string[] {
+  const owners = reservedIds
+    .filter((reserved) => reserved.id === id)
+    .map(({ entity }) => entity);
+  if (workspace.workspaceId === id) owners.push("WorkspaceV2");
+  if (workspace.migration?.backupId === id) owners.push("MigrationBackup");
   const collections: readonly [string, readonly { id: string }[]][] = [
     ["InboxItem", workspace.inboxItems],
     ["Action", workspace.actions],
@@ -204,9 +224,18 @@ function entityIdCollision(
     ],
   ];
 
-  return collections.find(([, records]) =>
-    records.some((record) => record.id === id),
-  )?.[0];
+  for (const [entity, records] of collections) {
+    if (records.some((record) => record.id === id)) owners.push(entity);
+  }
+  return [...new Set(owners)];
+}
+
+function entityIdCollision(
+  workspace: WorkspaceV2,
+  id: string,
+  reservedIds: readonly { entity: string; id: string }[] = [],
+): string | undefined {
+  return entityIdOwners(workspace, id, reservedIds)[0];
 }
 
 function isCanonicalIsoTimestamp(value: string): boolean {
@@ -415,6 +444,152 @@ function scopeOutsideBet(
   });
 }
 
+function canonicalSnapshot(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalSnapshot);
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .filter(([, item]) => item !== undefined)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, item]) => [key, canonicalSnapshot(item)]),
+    );
+  }
+  return value;
+}
+
+function sameSnapshot(left: unknown, right: unknown): boolean {
+  return JSON.stringify(canonicalSnapshot(left)) ===
+    JSON.stringify(canonicalSnapshot(right));
+}
+
+function hasReviewOverdue(workspace: WorkspaceV2): boolean {
+  return workspace.projects.some((project) =>
+    project.holds.some(({ type }) => type === "review_overdue"),
+  );
+}
+
+function proposalTimestampIsFresh(
+  generatedAt: string,
+  now: string,
+): boolean {
+  const generated = Date.parse(generatedAt);
+  const current = Date.parse(now);
+  return (
+    Number.isFinite(generated) &&
+    Number.isFinite(current) &&
+    new Date(generated).toISOString() === generatedAt &&
+    new Date(current).toISOString() === now &&
+    current >= generated &&
+    current - generated <= TODAY_PROPOSAL_MAX_AGE_SECONDS * 1_000
+  );
+}
+
+function capacityErrorForSlots(
+  workspace: WorkspaceV2,
+  localDate: string,
+  generatedAt: string,
+  slots: CommitmentSlot[],
+): string | undefined {
+  if (workspace.capacityProfile === undefined) {
+    return "A Capacity Profile is required before committing Today.";
+  }
+  try {
+    const capacity = capacityForLocalDate(
+      workspace.capacityProfile,
+      localDate,
+    );
+    const ledger = createCapacityLedger(
+      capacity,
+      generatedAt,
+      actualAttentionUsageForToday(
+        workspace,
+        localDate,
+        generatedAt,
+        capacity.timeZone,
+      ),
+    );
+    const slotIds = new Set<string>();
+    for (const slot of slots) {
+      if (slotIds.has(slot.id)) {
+        return `Daily draft repeats slot ID ${slot.id}.`;
+      }
+      slotIds.add(slot.id);
+      ledger.consume(slot);
+    }
+    return undefined;
+  } catch (error) {
+    return error instanceof Error
+      ? error.message
+      : "Daily draft exceeds available capacity.";
+  }
+}
+
+function reviewOverdueRejection(
+  workspace: WorkspaceV2,
+  context: CommandContext,
+  commandType: "commit_today" | "accept_replan",
+): CommandHandlerResult {
+  return rejection(workspace, context, "HOLD_BLOCKS_COMMAND", {
+    reason: `Portfolio review_overdue freezes new Daily Commitments and blocks ${commandType}.`,
+    gate: "project_hold:review_overdue",
+    hold: "review_overdue",
+    permittedNextCommand: "complete_review",
+  });
+}
+
+function planBuildRejection(
+  workspace: WorkspaceV2,
+  context: CommandContext,
+  error: unknown,
+  permittedNextCommand: string,
+): CommandHandlerResult {
+  if (error instanceof PlanVersionBuildError) {
+    return rejection(workspace, context, error.code, {
+      reason: error.message,
+      gate: error.gate,
+      ...(error.hold === undefined ? {} : { hold: error.hold }),
+      permittedNextCommand:
+        error.permittedNextCommand ??
+        (error.code === "SYNC_CONFLICT"
+          ? "resolve_sync_conflict"
+          : permittedNextCommand),
+    });
+  }
+  throw error;
+}
+
+function commandReceiptCollisionRejection(
+  workspace: WorkspaceV2,
+  context: CommandContext,
+  permittedNextCommand: string,
+): CommandHandlerResult | undefined {
+  const collision = entityIdCollision(workspace, context.commandId);
+  return collision === undefined
+    ? undefined
+    : entityAlreadyExists(
+        workspace,
+        context,
+        collision,
+        context.commandId,
+        permittedNextCommand,
+      );
+}
+
+function nonSlotEntityCollisionForSlots(
+  workspace: WorkspaceV2,
+  slots: CommitmentSlot[],
+): { entity: string; id: string } | undefined {
+  for (const slot of slots) {
+    const entity = entityIdOwners(workspace, slot.id).find(
+      (owner) => owner !== "CommitmentSlot",
+    );
+    if (entity !== undefined) {
+      return { entity, id: slot.id };
+    }
+  }
+  return undefined;
+}
+
 export async function applyCommandHandler(
   workspace: WorkspaceV2,
   command: V2Command,
@@ -438,6 +613,35 @@ export async function applyCommandHandler(
           gate: validation.gate,
           permittedNextCommand: "configure_capacity",
         });
+      }
+      const receiptCollision = commandReceiptCollisionRejection(
+        workspace,
+        context,
+        command.type,
+      );
+      if (receiptCollision !== undefined) return receiptCollision;
+      for (const block of command.profile.unavailableBlocks) {
+        if (block.id === context.commandId) {
+          return entityAlreadyExists(
+            workspace,
+            context,
+            "UnavailableBlock",
+            block.id,
+            "configure_capacity",
+          );
+        }
+        const nonUnavailableOwner = entityIdOwners(workspace, block.id).find(
+          (owner) => owner !== "UnavailableBlock",
+        );
+        if (nonUnavailableOwner !== undefined) {
+          return entityAlreadyExists(
+            workspace,
+            context,
+            nonUnavailableOwner,
+            block.id,
+            "configure_capacity",
+          );
+        }
       }
       const profile = {
         timeZone: validation.canonicalTimeZone,
@@ -1917,9 +2121,646 @@ export async function applyCommandHandler(
       };
     }
 
-    case "propose_replan":
-    case "commit_today":
-    case "accept_replan":
+    case "commit_today": {
+      if (hasReviewOverdue(workspace)) {
+        return reviewOverdueRejection(workspace, context, command.type);
+      }
+      if (workspace.capacityProfile === undefined) {
+        return rejection(workspace, context, "CAPACITY_EXCEEDED", {
+          reason: "Configure capacity before committing Today.",
+          gate: "capacity_profile:required",
+          permittedNextCommand: "configure_capacity",
+        });
+      }
+      const receiptCollision = commandReceiptCollisionRejection(
+        workspace,
+        context,
+        command.type,
+      );
+      if (receiptCollision !== undefined) return receiptCollision;
+      const slotCollision = nonSlotEntityCollisionForSlots(
+        workspace,
+        command.commitment.slots,
+      );
+      if (slotCollision !== undefined) {
+        return entityAlreadyExists(
+          workspace,
+          context,
+          slotCollision.entity,
+          slotCollision.id,
+          "commit_today",
+        );
+      }
+      if (command.commitment.workspaceRevision !== workspace.revision) {
+        return rejection(workspace, context, "REVISION_CONFLICT", {
+          reason: `Today draft revision ${command.commitment.workspaceRevision} does not match Workspace revision ${workspace.revision}.`,
+          gate: "today_proposal:workspace_revision",
+          permittedNextCommand: "regenerate_today",
+        });
+      }
+      if (
+        !proposalTimestampIsFresh(command.commitment.generatedAt, context.now) ||
+        localDateAt(
+          command.commitment.generatedAt,
+          workspace.capacityProfile.timeZone,
+        ) !== command.commitment.localDate ||
+        localDateAt(context.now, workspace.capacityProfile.timeZone) !==
+          command.commitment.localDate
+      ) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason: "Today proposal is no longer fresh for the current local date.",
+          gate: "today_proposal:freshness",
+          permittedNextCommand: "regenerate_today",
+        });
+      }
+      if (
+        workspace.dailyCommitments.some(
+          ({ localDate }) => localDate === command.commitment.localDate,
+        )
+      ) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason: `Today ${command.commitment.localDate} is already committed; changes require a Replan.`,
+          gate: `daily_commitment:${command.commitment.localDate}:already_committed`,
+          permittedNextCommand: "propose_replan",
+        });
+      }
+      const receiptReservation = [
+        { entity: "CommandReceipt", id: context.commandId },
+      ];
+      const draftReservations = [
+        ...receiptReservation,
+        ...command.commitment.slots.map(({ id }) => ({
+          entity: "CommitmentSlot",
+          id,
+        })),
+      ];
+      if (
+        command.commitment.slots.some(({ id }) => id === context.commandId)
+      ) {
+        return entityAlreadyExists(
+          workspace,
+          context,
+          "CommitmentSlot",
+          context.commandId,
+          "commit_today",
+        );
+      }
+      const commitmentCollision = entityIdCollision(
+        workspace,
+        command.commitment.id,
+        draftReservations,
+      );
+      if (commitmentCollision !== undefined) {
+        return entityAlreadyExists(
+          workspace,
+          context,
+          commitmentCollision,
+          command.commitment.id,
+          "commit_today",
+        );
+      }
+      const capacityError = capacityErrorForSlots(
+        workspace,
+        command.commitment.localDate,
+        command.commitment.generatedAt,
+        command.commitment.slots,
+      );
+      if (capacityError !== undefined) {
+        return rejection(workspace, context, "CAPACITY_EXCEEDED", {
+          reason: capacityError,
+          gate: `daily_commitment:${command.commitment.id}:capacity`,
+          permittedNextCommand: "edit_today_draft",
+        });
+      }
+
+      let authoritative;
+      try {
+        authoritative = await generateTodayProposal(
+          workspace,
+          command.commitment.localDate,
+          command.commitment.generatedAt,
+        );
+      } catch (error) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason:
+            error instanceof Error
+              ? error.message
+              : "Today proposal could not be regenerated.",
+          gate: "today_proposal:freshness",
+          permittedNextCommand: "regenerate_today",
+        });
+      }
+      if (
+        authoritative.workspaceRevision !== command.commitment.workspaceRevision ||
+        authoritative.generatedAt !== command.commitment.generatedAt ||
+        authoritative.proposalHash !== command.commitment.proposalHash ||
+        !sameSnapshot(authoritative.slots, command.commitment.slots)
+      ) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason: "Today draft does not match its authoritative fresh proposal.",
+          gate: "today_proposal:freshness",
+          permittedNextCommand: "regenerate_today",
+        });
+      }
+
+      let planBuild;
+      try {
+        planBuild = await buildPlanVersionsForCommitment(
+          workspace,
+          authoritative.slots,
+          command.commitment.id,
+          context.actorId,
+          context.now,
+          "initial",
+        );
+      } catch (error) {
+        return planBuildRejection(
+          workspace,
+          context,
+          error,
+          "regenerate_today",
+        );
+      }
+      const reservedIds = [
+        ...draftReservations,
+        { entity: "DailyCommitment", id: command.commitment.id },
+      ];
+      for (const plan of planBuild.plans) {
+        const collision = entityIdCollision(workspace, plan.id, reservedIds);
+        if (collision !== undefined) {
+          return entityAlreadyExists(
+            workspace,
+            context,
+            collision,
+            plan.id,
+            "commit_today",
+          );
+        }
+        reservedIds.push({ entity: "PlanVersion", id: plan.id });
+      }
+      const commitment: DailyCommitment = {
+        id: command.commitment.id,
+        localDate: command.commitment.localDate,
+        version: 1,
+        proposalHash: command.commitment.proposalHash,
+        capacitySnapshot: structuredClone(workspace.capacityProfile),
+        slots: structuredClone(authoritative.slots),
+        actorId: context.actorId,
+        committedAt: context.now,
+      };
+      return {
+        ok: true,
+        workspace: {
+          ...workspace,
+          projects: planBuild.projects,
+          planVersions: [...workspace.planVersions, ...planBuild.plans],
+          dailyCommitments: [...workspace.dailyCommitments, commitment],
+        },
+      };
+    }
+
+    case "propose_replan": {
+      const receiptCollision = commandReceiptCollisionRejection(
+        workspace,
+        context,
+        command.type,
+      );
+      if (receiptCollision !== undefined) return receiptCollision;
+      const proposal = command.proposal;
+      const slotCollision = nonSlotEntityCollisionForSlots(
+        workspace,
+        proposal.proposedSlots,
+      );
+      if (slotCollision !== undefined) {
+        return entityAlreadyExists(
+          workspace,
+          context,
+          slotCollision.entity,
+          slotCollision.id,
+          "propose_replan",
+        );
+      }
+      if (proposal.status !== "open") {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason: "Only an open Replan Proposal may be recorded.",
+          gate: `replan:${proposal.id}:status`,
+          permittedNextCommand: "propose_replan",
+        });
+      }
+      if (proposal.baseRevision !== workspace.revision) {
+        return rejection(workspace, context, "REVISION_CONFLICT", {
+          reason: `Replan base revision ${proposal.baseRevision} does not match Workspace revision ${workspace.revision}.`,
+          gate: `replan:${proposal.id}:base_revision`,
+          permittedNextCommand: "regenerate_replan",
+        });
+      }
+      if (
+        proposal.createdBy !== context.actorId ||
+        !proposalTimestampIsFresh(proposal.createdAt, context.now) ||
+        workspace.capacityProfile === undefined ||
+        localDateAt(proposal.createdAt, workspace.capacityProfile.timeZone) !==
+          proposal.localDate ||
+        localDateAt(context.now, workspace.capacityProfile.timeZone) !==
+          proposal.localDate ||
+        proposal.reasonCodes.length === 0 ||
+        !sameSnapshot(
+          proposal.reasonCodes,
+          canonicalReplanReasonCodes(proposal.reasonCodes),
+        )
+      ) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason: "Replan Proposal metadata is stale or invalid.",
+          gate: `replan:${proposal.id}:freshness`,
+          permittedNextCommand: "regenerate_replan",
+        });
+      }
+      const baseCommitment = soleCommitmentLeafForLocalDate(
+        workspace,
+        proposal.localDate,
+      );
+      if (
+        baseCommitment === undefined ||
+        baseCommitment.id !== proposal.baseCommitmentId
+      ) {
+        return rejection(workspace, context, "REVISION_CONFLICT", {
+          reason: "Replan does not target the sole current Daily Commitment.",
+          gate: `replan:${proposal.id}:base_commitment`,
+          permittedNextCommand: "regenerate_replan",
+        });
+      }
+      if (Date.parse(proposal.createdAt) < Date.parse(baseCommitment.committedAt)) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason: `Replan Proposal ${proposal.id} cannot predate its base Daily Commitment.`,
+          gate: `replan:${proposal.id}:freshness`,
+          permittedNextCommand: "regenerate_replan",
+        });
+      }
+      const proposalReservations = [
+        { entity: "CommandReceipt", id: context.commandId },
+        ...proposal.proposedSlots.map(({ id }) => ({
+          entity: "CommitmentSlot",
+          id,
+        })),
+      ];
+      if (proposal.proposedSlots.some(({ id }) => id === context.commandId)) {
+        return entityAlreadyExists(
+          workspace,
+          context,
+          "CommitmentSlot",
+          context.commandId,
+          "propose_replan",
+        );
+      }
+      const collision = entityIdCollision(
+        workspace,
+        proposal.id,
+        proposalReservations,
+      );
+      if (collision !== undefined) {
+        return entityAlreadyExists(
+          workspace,
+          context,
+          collision,
+          proposal.id,
+          "propose_replan",
+        );
+      }
+      const frozenReviewProposal =
+        hasReviewOverdue(workspace) &&
+        sameSnapshot(baseCommitment.slots, proposal.proposedSlots);
+      const capacityError = frozenReviewProposal
+        ? undefined
+        : capacityErrorForSlots(
+            workspace,
+            proposal.localDate,
+            proposal.createdAt,
+            proposal.proposedSlots,
+          );
+      if (capacityError !== undefined) {
+        return rejection(workspace, context, "CAPACITY_EXCEEDED", {
+          reason: capacityError,
+          gate: `replan:${proposal.id}:capacity`,
+          permittedNextCommand: "edit_today_draft",
+        });
+      }
+      let authoritative;
+      try {
+        authoritative = await generateTodayProposal(
+          workspace,
+          proposal.localDate,
+          proposal.createdAt,
+        );
+      } catch (error) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason:
+            error instanceof Error
+              ? error.message
+              : "Replan could not be regenerated.",
+          gate: `replan:${proposal.id}:freshness`,
+          permittedNextCommand: "regenerate_replan",
+        });
+      }
+      if (
+        authoritative.proposalHash !== proposal.proposalHash ||
+        !sameSnapshot(authoritative.slots, proposal.proposedSlots)
+      ) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason: "Replan does not match the authoritative current proposal.",
+          gate: `replan:${proposal.id}:freshness`,
+          permittedNextCommand: "regenerate_replan",
+        });
+      }
+      if (
+        !hasReviewOverdue(workspace) &&
+        !(await replanHasMaterialChange(
+          workspace,
+          baseCommitment,
+          authoritative,
+        ))
+      ) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason: `Replan Proposal ${proposal.id} does not contain a material change from the current Daily Commitment.`,
+          gate: `replan:${proposal.id}:material_change`,
+          permittedNextCommand: "keep_current_commitment",
+        });
+      }
+      return {
+        ok: true,
+        workspace: {
+          ...workspace,
+          replanProposals: [
+            ...workspace.replanProposals,
+            structuredClone(proposal),
+          ],
+        },
+      };
+    }
+
+    case "accept_replan": {
+      if (hasReviewOverdue(workspace)) {
+        return reviewOverdueRejection(workspace, context, command.type);
+      }
+      const receiptCollision = commandReceiptCollisionRejection(
+        workspace,
+        context,
+        command.type,
+      );
+      if (receiptCollision !== undefined) return receiptCollision;
+      const matching = workspace.replanProposals.filter(
+        ({ id }) => id === command.proposalId,
+      );
+      if (matching.length !== 1) {
+        return entityNotFound(
+          workspace,
+          context,
+          "ReplanProposal",
+          command.proposalId,
+          "propose_replan",
+        );
+      }
+      const proposal = matching[0];
+      if (proposal.status !== "open") {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason: `Replan Proposal ${proposal.id} is not open.`,
+          gate: `replan:${proposal.id}:status`,
+          permittedNextCommand: "propose_replan",
+        });
+      }
+      if (command.commitmentId === proposal.baseCommitmentId) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason: "Accepting a Replan must create a new Daily Commitment ID.",
+          gate: `replan:${proposal.id}:commitment_id`,
+          permittedNextCommand: "accept_replan",
+        });
+      }
+      const receiptReservation = [
+        { entity: "CommandReceipt", id: context.commandId },
+      ];
+      const commitmentCollision = entityIdCollision(
+        workspace,
+        command.commitmentId,
+        receiptReservation,
+      );
+      if (commitmentCollision !== undefined) {
+        return entityAlreadyExists(
+          workspace,
+          context,
+          commitmentCollision,
+          command.commitmentId,
+          "accept_replan",
+        );
+      }
+      if (workspace.revision !== proposal.baseRevision + 1) {
+        return rejection(workspace, context, "REVISION_CONFLICT", {
+          reason: `Replan Proposal ${proposal.id} is stale after an intervening Workspace revision.`,
+          gate: `replan:${proposal.id}:base_revision`,
+          permittedNextCommand: "regenerate_replan",
+        });
+      }
+      const directRevisionReceipts = workspace.commandReceipts.filter(
+        (receipt) =>
+          receipt.status === "applied" &&
+          receipt.baseRevision === proposal.baseRevision &&
+          receipt.revision === proposal.baseRevision + 1,
+      );
+      const creationReceipt = directRevisionReceipts[0];
+      if (
+        directRevisionReceipts.length !== 1 ||
+        creationReceipt === undefined ||
+        creationReceipt.commandType !== "propose_replan" ||
+        creationReceipt.diff.length !== 1 ||
+        creationReceipt.diff[0].entity !== "ReplanProposal" ||
+        creationReceipt.diff[0].entityId !== proposal.id ||
+        creationReceipt.diff[0].field !== "created" ||
+        creationReceipt.diff[0].before !== null ||
+        !sameSnapshot(creationReceipt.diff[0].after, proposal)
+      ) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason: `Replan Proposal ${proposal.id} lacks its unique direct creation receipt.`,
+          gate: `replan:${proposal.id}:creation_receipt`,
+          permittedNextCommand: "regenerate_replan",
+        });
+      }
+      const { receiptHash, ...receiptBase } = creationReceipt;
+      const expectedPayloadHash = await stableHash({
+        type: "propose_replan",
+        proposal,
+      } as unknown as JsonValue);
+      const expectedReceiptHash = await stableHash(
+        receiptBase as unknown as JsonValue,
+      );
+      if (
+        creationReceipt.payloadHash !== expectedPayloadHash ||
+        receiptHash !== expectedReceiptHash
+      ) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason: `Replan Proposal ${proposal.id} has an invalid creation receipt hash.`,
+          gate: `replan:${proposal.id}:creation_receipt`,
+          permittedNextCommand: "regenerate_replan",
+        });
+      }
+      if (
+        workspace.capacityProfile === undefined ||
+        !proposalTimestampIsFresh(proposal.createdAt, context.now) ||
+        localDateAt(proposal.createdAt, workspace.capacityProfile.timeZone) !==
+          proposal.localDate ||
+        localDateAt(context.now, workspace.capacityProfile.timeZone) !==
+          proposal.localDate
+      ) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason: `Replan Proposal ${proposal.id} is no longer fresh.`,
+          gate: `replan:${proposal.id}:freshness`,
+          permittedNextCommand: "regenerate_replan",
+        });
+      }
+      const baseCommitment = soleCommitmentLeafForLocalDate(
+        workspace,
+        proposal.localDate,
+      );
+      if (
+        baseCommitment === undefined ||
+        baseCommitment.id !== proposal.baseCommitmentId
+      ) {
+        return rejection(workspace, context, "REVISION_CONFLICT", {
+          reason: "Replan base Daily Commitment is no longer current.",
+          gate: `replan:${proposal.id}:base_commitment`,
+          permittedNextCommand: "regenerate_replan",
+        });
+      }
+      if (Date.parse(proposal.createdAt) < Date.parse(baseCommitment.committedAt)) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason: `Replan Proposal ${proposal.id} cannot predate its base Daily Commitment.`,
+          gate: `replan:${proposal.id}:freshness`,
+          permittedNextCommand: "regenerate_replan",
+        });
+      }
+      const capacityError = capacityErrorForSlots(
+        workspace,
+        proposal.localDate,
+        proposal.createdAt,
+        proposal.proposedSlots,
+      );
+      if (capacityError !== undefined) {
+        return rejection(workspace, context, "CAPACITY_EXCEEDED", {
+          reason: capacityError,
+          gate: `replan:${proposal.id}:capacity`,
+          permittedNextCommand: "edit_today_draft",
+        });
+      }
+      const proposalWorkspace: WorkspaceV2 = {
+        ...workspace,
+        revision: proposal.baseRevision,
+      };
+      let authoritative;
+      try {
+        authoritative = await generateTodayProposal(
+          proposalWorkspace,
+          proposal.localDate,
+          proposal.createdAt,
+        );
+      } catch (error) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason:
+            error instanceof Error
+              ? error.message
+              : "Replan could not be regenerated.",
+          gate: `replan:${proposal.id}:freshness`,
+          permittedNextCommand: "regenerate_replan",
+        });
+      }
+      if (
+        authoritative.proposalHash !== proposal.proposalHash ||
+        !sameSnapshot(authoritative.slots, proposal.proposedSlots)
+      ) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason: "Replan Proposal does not match its authoritative snapshot.",
+          gate: `replan:${proposal.id}:freshness`,
+          permittedNextCommand: "regenerate_replan",
+        });
+      }
+      if (
+        !(await replanHasMaterialChange(
+          proposalWorkspace,
+          baseCommitment,
+          authoritative,
+        ))
+      ) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason: `Replan Proposal ${proposal.id} does not contain a material change from the current Daily Commitment.`,
+          gate: `replan:${proposal.id}:material_change`,
+          permittedNextCommand: "keep_current_commitment",
+        });
+      }
+
+      let planBuild;
+      try {
+        planBuild = await buildPlanVersionsForCommitment(
+          workspace,
+          proposal.proposedSlots,
+          command.commitmentId,
+          context.actorId,
+          context.now,
+          "replan",
+          [
+            ...new Set(
+              baseCommitment.slots.flatMap(({ target }) =>
+                target.kind === "work_item" ? [target.projectId] : [],
+              ),
+            ),
+          ],
+        );
+      } catch (error) {
+        return planBuildRejection(
+          workspace,
+          context,
+          error,
+          "regenerate_replan",
+        );
+      }
+      const reservedIds = [
+        ...receiptReservation,
+        { entity: "DailyCommitment", id: command.commitmentId },
+      ];
+      for (const plan of planBuild.plans) {
+        const collision = entityIdCollision(workspace, plan.id, reservedIds);
+        if (collision !== undefined) {
+          return entityAlreadyExists(
+            workspace,
+            context,
+            collision,
+            plan.id,
+            "accept_replan",
+          );
+        }
+        reservedIds.push({ entity: "PlanVersion", id: plan.id });
+      }
+      const commitment: DailyCommitment = {
+        id: command.commitmentId,
+        localDate: proposal.localDate,
+        version: baseCommitment.version + 1,
+        proposalHash: proposal.proposalHash,
+        capacitySnapshot: structuredClone(workspace.capacityProfile),
+        slots: structuredClone(proposal.proposedSlots),
+        actorId: context.actorId,
+        committedAt: context.now,
+        supersedesId: baseCommitment.id,
+      };
+      return {
+        ok: true,
+        workspace: {
+          ...workspace,
+          projects: planBuild.projects,
+          planVersions: [...workspace.planVersions, ...planBuild.plans],
+          dailyCommitments: [...workspace.dailyCommitments, commitment],
+          replanProposals: workspace.replanProposals.map((candidate) =>
+            candidate.id === proposal.id
+              ? { ...candidate, status: "accepted" }
+              : candidate,
+          ),
+        },
+      };
+    }
+
     case "record_actual":
     case "attach_evidence":
     case "approve_evidence_exception":

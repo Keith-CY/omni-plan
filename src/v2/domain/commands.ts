@@ -67,6 +67,8 @@ export type WorkItemPatch = Partial<
 export interface DailyCommitmentDraft {
   id: Id;
   localDate: string;
+  workspaceRevision: number;
+  generatedAt: ISODate;
   proposalHash: string;
   slots: CommitmentSlot[];
 }
@@ -817,6 +819,10 @@ function isStructurallyValidCommand(value: unknown): value is V2Command {
         isRecordValue(value.commitment) &&
         isStringValue(value.commitment.id) &&
         isStringValue(value.commitment.localDate) &&
+        isFiniteNumberValue(value.commitment.workspaceRevision) &&
+        Number.isInteger(value.commitment.workspaceRevision) &&
+        value.commitment.workspaceRevision >= 0 &&
+        isStringValue(value.commitment.generatedAt) &&
         isStringValue(value.commitment.proposalHash) &&
         areCommitmentSlotsValue(value.commitment.slots)
       );
@@ -1419,6 +1425,7 @@ function affectedRecordIds(
     }
     case "accept_replan":
       return uniqueIds([
+        command.commitmentId,
         ...recordIdsForStoredProposal(workspace, command.proposalId),
         ...recordIdsForStoredCommitment(workspace, command.commitmentId),
       ]);

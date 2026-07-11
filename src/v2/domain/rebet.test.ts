@@ -677,6 +677,8 @@ describe("Bet appetite boundary", () => {
         commitment: {
           id: "commitment-after-expiry",
           localDate: "2026-07-11",
+          workspaceRevision: expired.workspace.revision,
+          generatedAt: APPETITE_END,
           proposalHash: "proposal-after-expiry",
           slots: [
             {

@@ -10,6 +10,7 @@ import {
   type CapacityPlacementReason,
   type LocalDateCapacity,
 } from "./localTime";
+import { buildPlanSemanticSnapshot } from "./planning";
 import { stableHash } from "./stableHash";
 import type {
   ActualV2,
@@ -57,12 +58,36 @@ export interface TodayCapacityUsage {
 export interface TodayProposal {
   localDate: string;
   workspaceRevision: number;
+  generatedAt: ISODate;
   capacity: CapacityProfile;
   localCapacity: LocalDateCapacity;
   capacityUsage: TodayCapacityUsage;
   slots: CommitmentSlot[];
   later: LaterEntry[];
   proposalHash: string;
+}
+
+export const TODAY_PROPOSAL_MAX_AGE_SECONDS = 300;
+
+export interface ReplanProposalDraft {
+  id: Id;
+  localDate: string;
+  reasonCodes: string[];
+  createdAt: ISODate;
+  createdBy: Id;
+}
+
+export function canonicalReplanReasonCodes(reasonCodes: string[]): string[] {
+  return [...new Set(reasonCodes.map((reason) => reason.trim()))]
+    .filter((reason) => reason.length > 0)
+    .sort(compareText);
+}
+
+async function sameSemanticSnapshot(
+  left: JsonValue,
+  right: JsonValue,
+): Promise<boolean> {
+  return (await stableHash(left)) === (await stableHash(right));
 }
 
 function compareText(left: string, right: string): number {
@@ -110,10 +135,10 @@ function compareCommitmentRecency(
   );
 }
 
-function effectiveCommitmentForLocalDate(
+function commitmentLeavesForLocalDate(
   workspace: WorkspaceV2,
   localDate: string,
-): DailyCommitment | undefined {
+): DailyCommitment[] {
   const supersededIds = new Set(
     workspace.dailyCommitments
       .map(({ supersedesId }) => supersedesId)
@@ -125,7 +150,63 @@ function effectiveCommitmentForLocalDate(
         commitment.localDate === localDate &&
         !supersededIds.has(commitment.id),
     )
-    .sort(compareCommitmentRecency)[0];
+    .sort(compareCommitmentRecency);
+}
+
+export function effectiveCommitmentForLocalDate(
+  workspace: WorkspaceV2,
+  localDate: string,
+): DailyCommitment | undefined {
+  return commitmentLeavesForLocalDate(workspace, localDate)[0];
+}
+
+export function soleCommitmentLeafForLocalDate(
+  workspace: WorkspaceV2,
+  localDate: string,
+): DailyCommitment | undefined {
+  const history = workspace.dailyCommitments.filter(
+    (commitment) => commitment.localDate === localDate,
+  );
+  if (history.length === 0) return undefined;
+  const byId = new Map(history.map((commitment) => [commitment.id, commitment]));
+  const versions = new Set<number>();
+  const supersededIds = new Set<Id>();
+  for (const commitment of history) {
+    if (
+      !Number.isInteger(commitment.version) ||
+      commitment.version <= 0 ||
+      versions.has(commitment.version)
+    ) {
+      return undefined;
+    }
+    versions.add(commitment.version);
+    if (commitment.supersedesId === undefined) {
+      if (commitment.version !== 1) return undefined;
+      continue;
+    }
+    const parent = byId.get(commitment.supersedesId);
+    if (
+      parent === undefined ||
+      parent.id === commitment.id ||
+      commitment.version !== parent.version + 1
+    ) {
+      return undefined;
+    }
+    supersededIds.add(parent.id);
+  }
+  const leaves = history.filter(({ id }) => !supersededIds.has(id));
+  if (leaves.length !== 1) return undefined;
+  const visited = new Set<Id>();
+  let cursor: DailyCommitment | undefined = leaves[0];
+  while (cursor !== undefined) {
+    if (visited.has(cursor.id)) return undefined;
+    visited.add(cursor.id);
+    cursor =
+      cursor.supersedesId === undefined
+        ? undefined
+        : byId.get(cursor.supersedesId);
+  }
+  return visited.size === history.length ? leaves[0] : undefined;
 }
 
 function currentBet(
@@ -354,6 +435,20 @@ function actualAttentionUsage(
     usage[attention] = next;
   }
   return usage;
+}
+
+export function actualAttentionUsageForToday(
+  workspace: WorkspaceV2,
+  localDate: string,
+  generatedAt: ISODate,
+  timeZone: string,
+): Record<AttentionKind, Seconds> {
+  return actualAttentionUsage(
+    workspace,
+    actualsRecordedBy(workspace, generatedAt),
+    localDate,
+    timeZone,
+  );
 }
 
 function unelapsedCommittedUsage(
@@ -937,6 +1032,7 @@ export async function generateTodayProposal(
   const proposalBase = {
     localDate,
     workspaceRevision: workspace.revision,
+    generatedAt: now,
     capacity: structuredClone(capacityProfile),
     localCapacity: structuredClone(localCapacity),
     capacityUsage: {
@@ -950,5 +1046,141 @@ export async function generateTodayProposal(
   return {
     ...proposalBase,
     proposalHash: await stableHash(proposalBase as unknown as JsonValue),
+  };
+}
+
+export async function replanHasMaterialChange(
+  workspace: WorkspaceV2,
+  baseCommitment: DailyCommitment,
+  today: TodayProposal,
+): Promise<boolean> {
+  let committedLocalCapacity: LocalDateCapacity;
+  try {
+    committedLocalCapacity = capacityForLocalDate(
+      baseCommitment.capacitySnapshot,
+      baseCommitment.localDate,
+    );
+  } catch {
+    return true;
+  }
+  if (
+    !(await sameSemanticSnapshot(
+      {
+        localCapacity: committedLocalCapacity,
+        slots: baseCommitment.slots,
+      } as unknown as JsonValue,
+      {
+        localCapacity: today.localCapacity,
+        slots: today.slots,
+      } as unknown as JsonValue,
+    ))
+  ) {
+    return true;
+  }
+
+  const projectIds = [
+    ...new Set(
+      [...baseCommitment.slots, ...today.slots].flatMap(({ target }) =>
+        target.kind === "work_item" ? [target.projectId] : [],
+      ),
+    ),
+  ].sort(compareText);
+  for (const projectId of projectIds) {
+    const projects = workspace.projects.filter(({ id }) => id === projectId);
+    if (projects.length !== 1) return true;
+    const project = projects[0];
+    if (project.activePlanVersionId === undefined) return true;
+    const plans = workspace.planVersions.filter(
+      ({ id }) => id === project.activePlanVersionId,
+    );
+    if (plans.length !== 1) return true;
+    const plan = plans[0];
+    const bets = workspace.bets.filter(
+      ({ id, projectId: ownerId, invalidatedAt }) =>
+        id === project.activeBetId &&
+        ownerId === projectId &&
+        invalidatedAt === undefined,
+    );
+    if (bets.length !== 1 || plan.betId !== bets[0].id) return true;
+    let currentInputs;
+    try {
+      currentInputs = await buildPlanSemanticSnapshot(
+        workspace,
+        projectId,
+        bets[0],
+        today.generatedAt,
+      );
+    } catch {
+      return true;
+    }
+    const committedInputs = {
+      betId: plan.betId,
+      workItemRevisions: plan.workItemRevisions,
+      dependencyRevisions: plan.dependencyRevisions,
+      scopeMapping: plan.scopeMapping,
+      scheduleHash: plan.scheduleHash,
+      capacityIndependentDates: plan.capacityIndependentDates,
+    };
+    if (
+      !(await sameSemanticSnapshot(
+        committedInputs as unknown as JsonValue,
+        currentInputs as unknown as JsonValue,
+      ))
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export async function buildReplanProposal(
+  workspace: WorkspaceV2,
+  draft: ReplanProposalDraft,
+): Promise<WorkspaceV2["replanProposals"][number]> {
+  const baseCommitment = soleCommitmentLeafForLocalDate(
+    workspace,
+    draft.localDate,
+  );
+  if (baseCommitment === undefined) {
+    throw new RangeError(
+      `Replan requires exactly one current Daily Commitment for ${draft.localDate}.`,
+    );
+  }
+  if (Date.parse(draft.createdAt) < Date.parse(baseCommitment.committedAt)) {
+    throw new RangeError(
+      `Replan creation time cannot predate Daily Commitment ${baseCommitment.id}.`,
+    );
+  }
+  const reasonCodes = canonicalReplanReasonCodes(draft.reasonCodes);
+  if (reasonCodes.length === 0) {
+    throw new RangeError("Replan requires at least one reason code.");
+  }
+  const today = await generateTodayProposal(
+    workspace,
+    draft.localDate,
+    draft.createdAt,
+  );
+  const reviewOverdue = workspace.projects.some((project) =>
+    project.holds.some(({ type }) => type === "review_overdue"),
+  );
+  if (
+    !reviewOverdue &&
+    !(await replanHasMaterialChange(workspace, baseCommitment, today))
+  ) {
+    throw new RangeError(
+      `Replan for ${draft.localDate} requires a material change from Daily Commitment ${baseCommitment.id}.`,
+    );
+  }
+  return {
+    id: draft.id,
+    localDate: draft.localDate,
+    baseCommitmentId: baseCommitment.id,
+    baseRevision: workspace.revision,
+    reasonCodes,
+    proposedSlots: structuredClone(today.slots),
+    proposalHash: today.proposalHash,
+    createdAt: draft.createdAt,
+    createdBy: draft.createdBy,
+    status: "open",
   };
 }
