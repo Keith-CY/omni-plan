@@ -858,7 +858,7 @@ function hardGateReviewDrafts(
     );
 }
 
-function conflictProjectOwnership(
+export function conflictProjectOwnership(
   workspace: WorkspaceV2,
   conflict: WorkspaceV2["syncConflicts"][number],
 ): {
@@ -866,7 +866,10 @@ function conflictProjectOwnership(
   hasResolvedOwner: boolean;
   portfolioScope: boolean;
 } {
-  const projectIds: Array<Id | undefined> = [conflict.projectId];
+  const projectIds: Array<Id | undefined> = [
+    conflict.projectId,
+    ...(conflict.affectedProjectIds ?? []),
+  ];
   let portfolioScope = false;
   switch (conflict.recordType) {
     case "bet":
@@ -917,15 +920,17 @@ function conflictProjectOwnership(
       );
       break;
   }
-  const activeProjectIds = new Set(
+  const eligibleProjectIds = new Set(
     workspace.projects
-      .filter(({ stage }) => stage !== "closed")
+      .filter(
+        ({ stage }) => conflict.recordType === "close" || stage !== "closed",
+      )
       .map(({ id }) => id),
   );
   const resolvedProjectIds = uniqueSorted(projectIds);
   return {
     affectedProjectIds: resolvedProjectIds.filter((id) =>
-      activeProjectIds.has(id),
+      eligibleProjectIds.has(id),
     ),
     hasResolvedOwner: portfolioScope || resolvedProjectIds.length > 0,
     portfolioScope,
@@ -957,7 +962,11 @@ function syncConflictReviewDrafts(
         "sync_conflict",
         conflict.openedAt,
         ownership.affectedProjectIds,
-        [conflict.id, conflict.projectId, conflict.recordId],
+        [
+          conflict.id,
+          conflict.projectId,
+          ...(conflict.affectedRecordIds ?? [conflict.recordId]),
+        ],
       ),
     ];
   });

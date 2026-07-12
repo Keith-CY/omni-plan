@@ -9,6 +9,7 @@ import type {
   Seconds,
   WorkItem,
 } from "@/domain/types";
+import type { ProtectedEffectBundle } from "../repositories/syncConflictBundles";
 
 export type LifecycleStage =
   | "direction"
@@ -353,13 +354,20 @@ export interface SyncConflictRecord {
   id: Id;
   recordType: "bet" | "daily_commitment" | "review" | "exception" | "close";
   recordId: Id;
+  remoteRecordId?: Id;
   projectId?: Id;
+  logicalKey?: string;
+  affectedProjectIds?: Id[];
+  affectedRecordIds?: Id[];
   commonAncestorHash: string;
   localValue: JsonValue;
   remoteValue: JsonValue;
+  localBundle?: ProtectedEffectBundle;
+  remoteBundle?: ProtectedEffectBundle;
   openedAt: ISODate;
   resolvedAt?: ISODate;
   retainedVersion?: "local" | "remote";
+  retainedBundleHash?: string;
 }
 
 export interface AuditDiff {

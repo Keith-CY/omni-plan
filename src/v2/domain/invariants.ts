@@ -569,8 +569,9 @@ function isCanonicalExpiredBoundaryCatchUp(
 
 function validateBetRules(
   workspace: WorkspaceV2,
-  now: ISODate,
+  evaluationNow: ISODate,
   previousWorkspace: WorkspaceV2 | undefined,
+  eventNow: ISODate,
   add: AddViolation,
 ): void {
   const betsById = indexById(workspace.bets);
@@ -587,7 +588,11 @@ function validateBetRules(
     previousWorkspace?.dailyCommitments ?? [],
   );
   const canonicalExpiredBoundaryCatchUp =
-    isCanonicalExpiredBoundaryCatchUp(workspace, previousWorkspace, now);
+    isCanonicalExpiredBoundaryCatchUp(
+      workspace,
+      previousWorkspace,
+      eventNow,
+    );
 
   for (const project of sortedById(workspace.projects)) {
     const currentBets = sortedById(
@@ -665,7 +670,7 @@ function validateBetRules(
     if (
       project.stage === "executing" &&
       validActiveBet !== undefined &&
-      isAtOrBefore(validActiveBet.appetiteEnd, now) &&
+      isAtOrBefore(validActiveBet.appetiteEnd, evaluationNow) &&
       !canonicalExpiredBoundaryCatchUp
     ) {
       add(
@@ -1148,9 +1153,224 @@ function closedProjectSnapshot(workspace: WorkspaceV2, projectId: Id): unknown {
   };
 }
 
+function exactClosedCloseConflictOpen(
+  workspace: WorkspaceV2,
+  previousWorkspace: WorkspaceV2,
+  projectId: Id,
+  now: ISODate,
+): boolean {
+  if (
+    workspace.syncConflicts.length !== previousWorkspace.syncConflicts.length + 1 ||
+    workspace.reviews.length !== previousWorkspace.reviews.length + 1
+  ) {
+    return false;
+  }
+  const conflict = workspace.syncConflicts[workspace.syncConflicts.length - 1];
+  if (
+    conflict.recordType !== "close" ||
+    conflict.projectId !== projectId ||
+    conflict.openedAt !== now ||
+    conflict.resolvedAt !== undefined ||
+    conflict.retainedVersion !== undefined ||
+    previousWorkspace.syncConflicts.some(({ id }) => id === conflict.id)
+  ) {
+    return false;
+  }
+  const closeMatches = previousWorkspace.closeDecisions.filter(
+    ({ id, projectId: ownerId }) =>
+      id === conflict.recordId && ownerId === projectId,
+  );
+  if (
+    closeMatches.length !== 1 ||
+    !sameStructure(conflict.localValue, closeMatches[0])
+  ) {
+    return false;
+  }
+  const review = workspace.reviews[workspace.reviews.length - 1];
+  const triggerKey = `sync_conflict:${conflict.id}`;
+  const conflictAffectedRecordIds = conflict.affectedRecordIds ?? [
+    conflict.recordId,
+  ];
+  const conflictAffectedProjectIds = conflict.affectedProjectIds ?? [projectId];
+  const affectedRecordIds = [
+    conflict.id,
+    ...conflictAffectedProjectIds,
+    ...conflictAffectedRecordIds,
+  ].sort(compareText);
+  const expectedReview: typeof review = {
+    id: `review:${triggerKey}`,
+    kind: "event",
+    triggerKey,
+    triggerType: "sync_conflict",
+    status: "open",
+    affectedProjectIds: [...conflictAffectedProjectIds].sort(compareText),
+    affectedRecordIds,
+    dueAt: now,
+    createdAt: now,
+  };
+  if (!sameStructure(review, expectedReview)) return false;
+
+  const previousProjectMatches = previousWorkspace.projects.filter(
+    ({ id }) => id === projectId,
+  );
+  if (previousProjectMatches.length !== 1) return false;
+  const previousProject = previousProjectMatches[0];
+  const expectedProject: ProjectV2 = {
+    ...previousProject,
+    holds: [
+      ...previousProject.holds,
+      {
+        type: "sync_conflict",
+        sourceId: conflict.id,
+        affectedRecordIds: [...conflictAffectedRecordIds].sort(compareText),
+        createdAt: now,
+      },
+    ],
+    updatedAt: now,
+  };
+  const expected = structuredClone(previousWorkspace);
+  expected.syncConflicts.push(structuredClone(conflict));
+  expected.reviews.push(structuredClone(review));
+  expected.projects = expected.projects.map((project) =>
+    project.id === projectId ? expectedProject : project,
+  );
+  return sameStructure(workspace, expected);
+}
+
+function exactClosedCloseConflictResolution(
+  workspace: WorkspaceV2,
+  previousWorkspace: WorkspaceV2,
+  projectId: Id,
+  now: ISODate,
+): boolean {
+  const changedConflicts = previousWorkspace.syncConflicts
+    .map((conflict, index) => ({ conflict, index }))
+    .filter(({ conflict, index }) =>
+      !sameStructure(conflict, workspace.syncConflicts[index]),
+    );
+  if (
+    workspace.syncConflicts.length !== previousWorkspace.syncConflicts.length ||
+    workspace.reviews.length !== previousWorkspace.reviews.length ||
+    changedConflicts.length !== 1
+  ) {
+    return false;
+  }
+  const { conflict: previousConflict, index: conflictIndex } = changedConflicts[0];
+  const conflict = workspace.syncConflicts[conflictIndex];
+  if (
+    previousConflict.recordType !== "close" ||
+    previousConflict.projectId !== projectId ||
+    previousConflict.resolvedAt !== undefined ||
+    previousConflict.retainedVersion !== undefined ||
+    conflict.resolvedAt !== now ||
+    (conflict.retainedVersion !== "local" &&
+      conflict.retainedVersion !== "remote") ||
+    conflict.retainedBundleHash !==
+      (conflict.retainedVersion === "local"
+        ? previousConflict.localBundle?.hash
+        : previousConflict.remoteBundle?.hash) ||
+    !sameStructure(conflict, {
+      ...previousConflict,
+      resolvedAt: now,
+      retainedVersion: conflict.retainedVersion,
+      retainedBundleHash: conflict.retainedBundleHash,
+    })
+  ) {
+    return false;
+  }
+  const closeIndex = previousWorkspace.closeDecisions.findIndex(
+    ({ id, projectId: ownerId }) =>
+      id === previousConflict.recordId && ownerId === projectId,
+  );
+  if (
+    closeIndex < 0 ||
+    !sameStructure(
+      previousConflict.localValue,
+      previousWorkspace.closeDecisions[closeIndex],
+    )
+  ) {
+    return false;
+  }
+  const reviewId = `review:sync_conflict:${previousConflict.id}`;
+  const reviewIndex = previousWorkspace.reviews.findIndex(
+    ({ id }) => id === reviewId,
+  );
+  if (reviewIndex < 0) return false;
+  const previousReview = previousWorkspace.reviews[reviewIndex];
+  const review = workspace.reviews[reviewIndex];
+  const conclusion = review?.conclusion;
+  if (
+    previousReview.status !== "open" ||
+    previousReview.conclusion !== undefined ||
+    review === undefined ||
+    review.status !== "completed" ||
+    conclusion === undefined ||
+    conclusion.completedAt !== now ||
+    conclusion.summary.trim().length === 0 ||
+    conclusion.actorId.trim().length === 0 ||
+    !sameStructure(conclusion.decisionCodes, [
+      `sync_conflict_retained_${conflict.retainedVersion}`,
+    ]) ||
+    !sameStructure(review, {
+      ...previousReview,
+      status: "completed",
+      conclusion,
+    })
+  ) {
+    return false;
+  }
+  const previousProject = previousWorkspace.projects.find(
+    ({ id }) => id === projectId,
+  );
+  if (previousProject === undefined) return false;
+  const removedHolds = previousProject.holds.filter(
+    ({ type, sourceId }) =>
+      type === "sync_conflict" && sourceId === previousConflict.id,
+  );
+  if (removedHolds.length !== 1) return false;
+  const expectedProject: ProjectV2 = {
+    ...previousProject,
+    holds: previousProject.holds.filter(
+      ({ type, sourceId }) =>
+        !(type === "sync_conflict" && sourceId === previousConflict.id),
+    ),
+    updatedAt: now,
+  };
+  const expected = structuredClone(previousWorkspace);
+  expected.syncConflicts[conflictIndex] = structuredClone(conflict);
+  expected.reviews[reviewIndex] = structuredClone(review);
+  expected.projects = expected.projects.map((project) =>
+    project.id === projectId ? expectedProject : project,
+  );
+  expected.closeDecisions[closeIndex] = structuredClone(
+    conflict.retainedVersion === "remote"
+      ? previousConflict.remoteValue
+      : previousWorkspace.closeDecisions[closeIndex],
+  ) as WorkspaceV2["closeDecisions"][number];
+  return sameStructure(workspace, expected);
+}
+
+function exactClosedCloseConflictArtifactTransition(
+  workspace: WorkspaceV2,
+  previousWorkspace: WorkspaceV2,
+  projectId: Id,
+  now: ISODate,
+): boolean {
+  return (
+    exactClosedCloseConflictOpen(workspace, previousWorkspace, projectId, now) ||
+    exactClosedCloseConflictResolution(
+      workspace,
+      previousWorkspace,
+      projectId,
+      now,
+    )
+  );
+}
+
 function validateClosedProjectRules(
   workspace: WorkspaceV2,
   previousWorkspace: WorkspaceV2 | undefined,
+  now: ISODate,
   add: AddViolation,
 ): void {
   if (previousWorkspace === undefined) {
@@ -1168,6 +1388,16 @@ function validateClosedProjectRules(
     );
     const candidateSnapshot = closedProjectSnapshot(workspace, previousProject.id);
     if (sameStructure(previousSnapshot, candidateSnapshot)) {
+      continue;
+    }
+    if (
+      exactClosedCloseConflictArtifactTransition(
+        workspace,
+        previousWorkspace,
+        previousProject.id,
+        now,
+      )
+    ) {
       continue;
     }
 
@@ -1256,6 +1486,19 @@ function validateReferenceRules(
     knownRecordsById.set(workspace.migration.backupId, {
       id: workspace.migration.backupId,
     });
+  }
+  for (const conflict of workspace.syncConflicts) {
+    if (conflict.localBundle === undefined || conflict.remoteBundle === undefined) {
+      continue;
+    }
+    for (const recordId of conflict.affectedRecordIds ?? []) {
+      if (!knownRecordsById.has(recordId)) {
+        // A different-ID remote branch record is a valid embedded reference
+        // while the conflict is unresolved and does not yet exist in the
+        // selected Workspace projection.
+        knownRecordsById.set(recordId, { id: recordId });
+      }
+    }
   }
 
   function requireReference(
@@ -1791,13 +2034,40 @@ function validateReferenceRules(
       exception: exceptionsById,
       close: closeDecisionsById,
     }[conflict.recordType];
+    if (
+      conflict.localBundle !== undefined &&
+      conflict.remoteBundle !== undefined
+    ) {
+      const expectedRetainedBundleHash =
+        conflict.retainedVersion === "local"
+          ? conflict.localBundle.hash
+          : conflict.retainedVersion === "remote"
+            ? conflict.remoteBundle.hash
+            : undefined;
+      if (
+        (conflict.retainedVersion === undefined) !==
+          (conflict.resolvedAt === undefined) ||
+        conflict.retainedBundleHash !== expectedRetainedBundleHash
+      ) {
+        add(
+          "SYNC_CONFLICT",
+          `SyncConflictRecord ${conflict.id} retained side and bundle hash disagree.`,
+          `sync_conflict:${conflict.id}:retained_bundle`,
+          "repair_workspace_reference",
+        );
+      }
+    }
+    const retainedRecordId =
+      conflict.retainedVersion === "remote"
+        ? conflict.remoteRecordId ?? conflict.recordId
+        : conflict.recordId;
     requireReference(
       "SyncConflictRecord",
       conflict.id,
-      "recordId",
+      conflict.retainedVersion === "remote" ? "remoteRecordId" : "recordId",
       conflict.recordType,
-      conflict.recordId,
-      targetByType.get(conflict.recordId),
+      retainedRecordId,
+      targetByType.get(retainedRecordId),
     );
   }
 
@@ -2057,17 +2327,35 @@ function validateReviewRules(
 
 export function validateWorkspaceInvariants(
   workspace: WorkspaceV2,
-  now: ISODate,
+  eventNow: ISODate,
   previousWorkspace?: WorkspaceV2,
+  options: { evaluationNow?: ISODate } = {},
 ): InvariantViolation[] {
   const collector = createCollector();
+  const evaluationNow = options.evaluationNow ?? eventNow;
 
-  validateBetRules(workspace, now, previousWorkspace, collector.add);
+  validateBetRules(
+    workspace,
+    evaluationNow,
+    previousWorkspace,
+    eventNow,
+    collector.add,
+  );
   validateCapacityRules(workspace, collector.add);
   validateScopeRules(workspace, previousWorkspace, collector.add);
-  validateClosedProjectRules(workspace, previousWorkspace, collector.add);
+  validateClosedProjectRules(
+    workspace,
+    previousWorkspace,
+    eventNow,
+    collector.add,
+  );
   validateReferenceRules(workspace, collector.add);
-  validateReviewRules(workspace, now, previousWorkspace, collector.add);
+  validateReviewRules(
+    workspace,
+    evaluationNow,
+    previousWorkspace,
+    collector.add,
+  );
 
   return collector.result();
 }

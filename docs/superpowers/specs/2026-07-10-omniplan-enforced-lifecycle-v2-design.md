@@ -557,6 +557,16 @@ When remote and local state both change a Bet, Daily Commitment, Review, Excepti
 
 Until resolved, only unrelated records may change. The conflict does not silently overwrite a human commitment.
 
+Independent resolutions of the same conflict are also never collapsed by last-write-wins. If they retain the same canonical value, the later replay is recorded as an equivalent human confirmation without replacing the already-retained value. If they retain different values, sync opens a successor conflict over the two resolution outcomes; neither resolution silently wins and immutable history remains replayable.
+
+### 16.1 Sync security boundary
+
+Remote transport and storage are untrusted. V2 verifies namespace and manifest paths, authenticated encryption, immutable operation hashes, parent links, receipt and command fields, authority roots, and the exact receipt-to-conflict-bundle projection before replaying protected human decisions. Every non-payload operation header, including device, sequence, operation identity, and parent hash, is duplicated into the AES-GCM-authenticated plaintext binding; an outer path or unkeyed hash alone never supplies ancestry authority.
+
+A device that possesses the Workspace shared AES key is a trusted Workspace device. The symmetric key proves that an operation came from a key holder; it cannot distinguish an honest device from a compromised or malicious key holder that fabricates a self-consistent history. Byzantine protection between key-holding devices would require per-device signing identities, trusted-device admission, and key revocation or rotation, which are outside this solo-operator V2 scope.
+
+Manifest freshness is bounded by locally retained history. If an untrusted store omits or rolls back a head already known by the current device, the missing ancestor fails closed and no merge is applied. A fresh device cannot detect a previously unseen omitted branch or an old but self-consistent manifest without an external monotonic checkpoint or transparency service; that remains an availability and rollback residual, never authority to replace local commitments.
+
 ## 17. Accessibility and responsive behavior
 
 - Desktop navigation uses labeled sidebar entries.

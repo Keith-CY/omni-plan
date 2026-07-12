@@ -15,6 +15,7 @@ import type {
   LifecycleStage,
   ProjectHoldState,
   ProjectWorkItem,
+  JsonValue,
   SourceCapability,
   WorkspaceV2,
 } from "../domain/types";
@@ -140,6 +141,7 @@ const publicCommandTypeRecord = {
   mark_review_overdue: true,
   create_review: true,
   complete_review: true,
+  open_sync_conflict: true,
   resolve_sync_conflict: true,
   close_project: true,
   abandon_project: true,
@@ -677,6 +679,7 @@ const coverageTarget = {
   mark_review_overdue: "planning",
   create_review: "planning",
   complete_review: "planning",
+  open_sync_conflict: "planning",
   resolve_sync_conflict: "planning",
   close_project: "closing",
   abandon_project: "validating",
@@ -711,10 +714,14 @@ const coverageExpectedRejections = {
   request_validation: [],
   satisfy_validation: ["EVIDENCE_REQUIRED", "EXCEPTION_EXPIRED"],
   record_bet_boundary: ["INVALID_COMMAND"],
-  mark_review_overdue: [],
+  mark_review_overdue: ["HOLD_BLOCKS_COMMAND"],
   create_review: ["INVALID_COMMAND", "DUPLICATE_COMMAND"],
-  complete_review: [],
-  resolve_sync_conflict: ["COMMAND_NOT_IMPLEMENTED"],
+  complete_review: ["HOLD_BLOCKS_COMMAND"],
+  // Raw property-generated opens cannot carry the opaque provenance token.
+  // An incomplete draft fails shape validation; a complete raw draft must
+  // still fail the conflict-authority gate.
+  open_sync_conflict: ["INVALID_COMMAND", "SOURCE_NOT_AUTHORIZED"],
+  resolve_sync_conflict: ["INVALID_COMMAND", "ENTITY_NOT_FOUND"],
   close_project: [],
   abandon_project: ["ILLEGAL_LIFECYCLE_TRANSITION"],
   archive_project: [],
@@ -728,7 +735,8 @@ function coverageStep(
   const systemCommand =
     kind === "record_bet_boundary" ||
     kind === "mark_review_overdue" ||
-    kind === "create_review";
+    kind === "create_review" ||
+    kind === "open_sync_conflict";
   return {
     kind,
     value,
@@ -762,8 +770,8 @@ export const commandSequenceArbitrary: fc.Arbitrary<CommandSequenceCase> =
     randomizedAcceptedValue: fc.nat({ max: 1_000_000 }),
     randomizedRejectedValue: fc.nat({ max: 1_000_000 }),
     fuzzSteps: fc.array(fuzzStepArbitrary, {
-      minLength: 38,
-      maxLength: 38,
+      minLength: 37,
+      maxLength: 37,
     }),
   }).map(({
     seed,
@@ -1255,12 +1263,29 @@ const commandMaterializers = {
       followUpCommandIds: [],
     },
   }),
+  open_sync_conflict: ({ workspace, projectId, entityId }: MaterializerArgs) => {
+    const project = workspace.projects.find(({ id }) => id === projectId);
+    const bet = workspace.bets.find(({ id }) => id === project?.activeBetId);
+    return {
+      type: "open_sync_conflict" as const,
+      conflict: {
+        id: `conflict:${entityId}`,
+        recordType: "bet" as const,
+        recordId: bet?.id ?? `missing-bet:${projectId}`,
+        commonAncestorHash: `ancestor:${entityId}`,
+        remoteValue: structuredClone(
+          bet ?? { id: `missing-bet:${projectId}` },
+        ) as unknown as JsonValue,
+      },
+    };
+  },
   resolve_sync_conflict: ({ sequence }: MaterializerArgs) => ({
     type: "resolve_sync_conflict" as const,
     reviewId: `property-fixture-review:${sequence.seed}`,
     resolution: {
       conflictId: `property-fixture-conflict:${sequence.seed}`,
       retainedVersion: "local" as const,
+      retainedValue: { id: `property-fixture-record:${sequence.seed}` },
       rationale: "The local Review is the authoritative branch.",
     },
   }),

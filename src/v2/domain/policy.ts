@@ -491,7 +491,10 @@ function isBlockingHold(
       }
       return overdueReviewBlockedCommands.has(commandType);
     case "sync_conflict":
-      if (commandType === "resolve_sync_conflict") {
+      if (
+        commandType === "resolve_sync_conflict" ||
+        commandType === "open_sync_conflict"
+      ) {
         return false;
       }
       if (affectedRecordIds === undefined || affectedRecordIds.length === 0) {

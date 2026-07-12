@@ -15,6 +15,13 @@ import {
   type ExactCurrentCloseBet,
 } from "./close";
 import {
+  buildSyncConflictRecord,
+  conflictRemoteResolutionIsSafe,
+  conflictRemoteSemanticsAreValid,
+  lookupConflictTarget,
+  replaceConflictTargetWithRemote,
+} from "./conflicts";
+import {
   buildBetVersion,
   isDirectionComplete,
   isMaterialDirectionChange,
@@ -53,6 +60,7 @@ import {
 import { stableHash } from "./stableHash";
 import type {
   Action,
+  CommandReceipt,
   CommitmentSlot,
   DailyCommitment,
   DirectionBrief,
@@ -63,6 +71,12 @@ import type {
   ReviewRecord,
   WorkspaceV2,
 } from "./types";
+import {
+  applyRemoteProtectedEffectBundle,
+  protectedEffectBundleAffectedProjectIds,
+  protectedEffectBundleTouchedEntityIds,
+  validateProtectedEffectBundle,
+} from "../repositories/syncConflictBundles";
 
 export type CommandHandlerResult =
   | { ok: true; workspace: WorkspaceV2 }
@@ -90,6 +104,34 @@ function rejection(
       overrides,
     ),
   };
+}
+
+function isBoundedSemanticReplay(
+  context: CommandContext,
+  kind: "commit_today" | "propose_replan",
+): boolean {
+  return (
+    context.origin === "sync" &&
+    context.source.verified &&
+    context.source.capabilities.includes("replay_receipt") &&
+    new RegExp(`^sync-semantic:[a-f0-9]{64}:${kind}:`, "s").test(
+      context.source.sourceId,
+    )
+  );
+}
+
+function isBoundedSemanticReceipt(
+  receipt: Readonly<CommandReceipt>,
+  kind: "commit_today" | "propose_replan",
+): boolean {
+  return (
+    receipt.origin === "sync" &&
+    receipt.source.verified &&
+    receipt.source.capabilities.includes("replay_receipt") &&
+    new RegExp(`^sync-semantic:[a-f0-9]{64}:${kind}:`, "s").test(
+      receipt.source.sourceId,
+    )
+  );
 }
 
 function notImplemented(
@@ -444,6 +486,7 @@ function actionIdentityCandidates(command: V2Command): string[] {
     case "mark_review_overdue":
     case "create_review":
     case "complete_review":
+    case "open_sync_conflict":
     case "resolve_sync_conflict":
       return [];
   }
@@ -500,6 +543,31 @@ function canonicalSnapshot(value: unknown): unknown {
 function sameSnapshot(left: unknown, right: unknown): boolean {
   return JSON.stringify(canonicalSnapshot(left)) ===
     JSON.stringify(canonicalSnapshot(right));
+}
+
+function protectedRecordSnapshot(
+  workspace: Readonly<WorkspaceV2>,
+  recordType: "bet" | "daily_commitment" | "review" | "exception" | "close",
+  recordId: string,
+): JsonValue | undefined {
+  const collection = (() => {
+    switch (recordType) {
+      case "bet":
+        return workspace.bets;
+      case "daily_commitment":
+        return workspace.dailyCommitments;
+      case "review":
+        return workspace.reviews;
+      case "exception":
+        return workspace.exceptions;
+      case "close":
+        return workspace.closeDecisions;
+    }
+  })();
+  const matches = collection.filter(({ id }) => id === recordId);
+  return matches.length === 1
+    ? structuredClone(matches[0]) as unknown as JsonValue
+    : undefined;
 }
 
 function hasReviewOverdue(workspace: WorkspaceV2): boolean {
@@ -2744,7 +2812,8 @@ export async function applyCommandHandler(
       if (
         authoritative.workspaceRevision !== command.commitment.workspaceRevision ||
         authoritative.generatedAt !== command.commitment.generatedAt ||
-        authoritative.proposalHash !== command.commitment.proposalHash ||
+        (!isBoundedSemanticReplay(context, "commit_today") &&
+          authoritative.proposalHash !== command.commitment.proposalHash) ||
         !sameSnapshot(authoritative.slots, command.commitment.slots)
       ) {
         return rejection(workspace, context, "INVALID_COMMAND", {
@@ -2838,7 +2907,10 @@ export async function applyCommandHandler(
           permittedNextCommand: "propose_replan",
         });
       }
-      if (proposal.baseRevision !== workspace.revision) {
+      if (
+        proposal.baseRevision !== workspace.revision &&
+        !isBoundedSemanticReplay(context, "propose_replan")
+      ) {
         return rejection(workspace, context, "REVISION_CONFLICT", {
           reason: `Replan base revision ${proposal.baseRevision} does not match Workspace revision ${workspace.revision}.`,
           gate: `replan:${proposal.id}:base_revision`,
@@ -2952,7 +3024,8 @@ export async function applyCommandHandler(
         });
       }
       if (
-        authoritative.proposalHash !== proposal.proposalHash ||
+        (!isBoundedSemanticReplay(context, "propose_replan") &&
+          authoritative.proposalHash !== proposal.proposalHash) ||
         !sameSnapshot(authoritative.slots, proposal.proposedSlots)
       ) {
         return rejection(workspace, context, "INVALID_COMMAND", {
@@ -3041,7 +3114,28 @@ export async function applyCommandHandler(
           "accept_replan",
         );
       }
-      if (workspace.revision !== proposal.baseRevision + 1) {
+      const semanticCreationReceipts = workspace.commandReceipts.filter(
+        (receipt) =>
+          receipt.status === "applied" &&
+          receipt.commandType === "propose_replan" &&
+          isBoundedSemanticReceipt(receipt, "propose_replan") &&
+          receipt.diff.length === 1 &&
+          receipt.diff[0].entity === "ReplanProposal" &&
+          receipt.diff[0].entityId === proposal.id &&
+          receipt.diff[0].field === "created" &&
+          sameSnapshot(receipt.diff[0].after, proposal),
+      );
+      const semanticCreationReceipt = semanticCreationReceipts[0];
+      if (semanticCreationReceipts.length > 1) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason: `Replan Proposal ${proposal.id} has ambiguous semantic creation authority.`,
+          gate: `replan:${proposal.id}:creation_receipt`,
+          permittedNextCommand: "regenerate_replan",
+        });
+      }
+      const creationBaseRevision =
+        semanticCreationReceipt?.baseRevision ?? proposal.baseRevision;
+      if (workspace.revision !== creationBaseRevision + 1) {
         return rejection(workspace, context, "REVISION_CONFLICT", {
           reason: `Replan Proposal ${proposal.id} is stale after an intervening Workspace revision.`,
           gate: `replan:${proposal.id}:base_revision`,
@@ -3051,8 +3145,8 @@ export async function applyCommandHandler(
       const directRevisionReceipts = workspace.commandReceipts.filter(
         (receipt) =>
           receipt.status === "applied" &&
-          receipt.baseRevision === proposal.baseRevision &&
-          receipt.revision === proposal.baseRevision + 1,
+          receipt.baseRevision === creationBaseRevision &&
+          receipt.revision === creationBaseRevision + 1,
       );
       const creationReceipt = directRevisionReceipts[0];
       if (
@@ -4235,8 +4329,621 @@ export async function applyCommandHandler(
       return { ok: true, workspace: { ...workspace, reviews, projects } };
     }
 
-    case "resolve_sync_conflict":
-      return notImplemented(workspace, context);
+    case "open_sync_conflict": {
+      const draft = command.conflict;
+      if (
+        draft.id.trim().length === 0 ||
+        draft.recordId.trim().length === 0 ||
+        draft.remoteRecordId === undefined ||
+        draft.remoteRecordId.trim().length === 0 ||
+        draft.logicalKey === undefined ||
+        draft.logicalKey.trim().length === 0 ||
+        draft.affectedProjectIds === undefined ||
+        draft.affectedRecordIds === undefined ||
+        draft.localValue === undefined ||
+        draft.localBundle === undefined ||
+        draft.remoteBundle === undefined ||
+        draft.commonAncestorHash.trim().length === 0
+      ) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason: "Sync conflict identity, target, and common ancestor are required.",
+          gate: `sync_conflict:${draft.id || "missing"}:payload`,
+          permittedNextCommand: command.type,
+        });
+      }
+      const existingTargetConflict = workspace.syncConflicts.find(
+        (conflict) =>
+          conflict.resolvedAt === undefined &&
+          (conflict.logicalKey === draft.logicalKey ||
+            (conflict.logicalKey === undefined &&
+              conflict.recordType === draft.recordType &&
+              conflict.recordId === draft.recordId)),
+      );
+      if (existingTargetConflict !== undefined) {
+        return rejection(workspace, context, "DUPLICATE_COMMAND", {
+          reason: `Sync conflict ${existingTargetConflict.id} already protects ${draft.recordType} ${draft.recordId}.`,
+          gate: `sync_conflict_target:${draft.recordType}:${draft.recordId}`,
+          permittedNextCommand: "read_existing_sync_conflict",
+        });
+      }
+      if (
+        !(await validateProtectedEffectBundle(draft.localBundle)) ||
+        !(await validateProtectedEffectBundle(draft.remoteBundle)) ||
+        draft.localBundle.logicalKey !== draft.logicalKey ||
+        draft.remoteBundle.logicalKey !== draft.logicalKey ||
+        draft.localBundle.hash === draft.remoteBundle.hash
+      ) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason: `Sync conflict ${draft.id} requires two distinct, validated bundles for one logical record.`,
+          gate: `sync_conflict:${draft.id}:bundle`,
+          permittedNextCommand: command.type,
+        });
+      }
+      const expectedAffectedRecordIds = sortedUniqueIds([
+        draft.recordId,
+        draft.remoteRecordId,
+        ...protectedEffectBundleTouchedEntityIds(draft.localBundle),
+        ...protectedEffectBundleTouchedEntityIds(draft.remoteBundle),
+      ]);
+      const currentProjectIds = new Set(
+        workspace.projects.map(({ id }) => id),
+      );
+      const expectedAffectedProjectIds = sortedUniqueIds([
+        ...protectedEffectBundleAffectedProjectIds(draft.localBundle),
+        ...protectedEffectBundleAffectedProjectIds(draft.remoteBundle),
+      ]).filter((id) => currentProjectIds.has(id));
+      if (
+        !sameSnapshot(
+          sortedUniqueIds(draft.affectedRecordIds),
+          expectedAffectedRecordIds,
+        ) ||
+        !sameSnapshot(
+          sortedUniqueIds(draft.affectedProjectIds),
+          expectedAffectedProjectIds,
+        ) ||
+        draft.affectedRecordIds.length !== expectedAffectedRecordIds.length ||
+        draft.affectedProjectIds.length !== expectedAffectedProjectIds.length
+      ) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason: `Sync conflict ${draft.id} affected identities do not cover its complete bundle.`,
+          gate: `sync_conflict:${draft.id}:affected_records`,
+          permittedNextCommand: command.type,
+        });
+      }
+      const reviewId = `review:sync_conflict:${draft.id}`;
+      for (const id of [draft.id, reviewId]) {
+        const collision = entityIdCollision(workspace, id, [
+          { entity: "CommandReceipt", id: context.commandId },
+        ]);
+        if (collision !== undefined) {
+          return entityAlreadyExists(
+            workspace,
+            context,
+            collision,
+            id,
+            command.type,
+          );
+        }
+      }
+      const target = lookupConflictTarget(workspace, draft);
+      if (!target.ok) {
+        if (target.reason === "missing") {
+          return entityNotFound(
+            workspace,
+            context,
+            draft.recordType,
+            draft.recordId,
+            "repair_workspace_reference",
+          );
+        }
+        if (target.reason === "duplicate") {
+          return duplicateEntityIdentity(
+            workspace,
+            context,
+            draft.recordType,
+            draft.recordId,
+          );
+        }
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason: `Remote ${draft.recordType} must retain the exact record identity ${draft.recordId}.`,
+          gate: `sync_conflict:${draft.id}:remote_identity`,
+          permittedNextCommand: command.type,
+        });
+      }
+      if (!sameSnapshot(target.target.record, draft.localValue)) {
+        return rejection(workspace, context, "SYNC_CONFLICT", {
+          reason: `Sync conflict ${draft.id} local primary snapshot does not match its current protected record.`,
+          gate: `sync_conflict:${draft.id}:local_snapshot`,
+          permittedNextCommand: "repair_workspace_reference",
+        });
+      }
+      let remoteProjection: WorkspaceV2;
+      try {
+        remoteProjection = await applyRemoteProtectedEffectBundle({
+          workspace,
+          localBundle: draft.localBundle,
+          remoteBundle: draft.remoteBundle,
+          conflictId: draft.id,
+          now: context.now,
+        });
+      } catch {
+        return rejection(workspace, context, "SYNC_CONFLICT", {
+          reason: `Sync conflict ${draft.id} bundle projection no longer descends from the current local state.`,
+          gate: `sync_conflict:${draft.id}:bundle_projection`,
+          permittedNextCommand: "repair_workspace_reference",
+        });
+      }
+      const projectedRemote = protectedRecordSnapshot(
+        remoteProjection,
+        draft.recordType,
+        draft.remoteRecordId,
+      );
+      if (
+        projectedRemote === undefined ||
+        !sameSnapshot(projectedRemote, draft.remoteValue)
+      ) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason: `Sync conflict ${draft.id} remote primary snapshot is not produced by its verified bundle.`,
+          gate: `sync_conflict:${draft.id}:remote_projection`,
+          permittedNextCommand: command.type,
+        });
+      }
+      if (!(await conflictRemoteSemanticsAreValid(workspace, draft))) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason: `Remote ${draft.recordType} violates its authoritative lifecycle semantics.`,
+          gate: `sync_conflict:${draft.id}:remote_semantics`,
+          permittedNextCommand: command.type,
+        });
+      }
+      const conflict = buildSyncConflictRecord(
+        draft,
+        target.target,
+        context.now,
+      );
+      const provisionalWorkspace: WorkspaceV2 = {
+        ...workspace,
+        syncConflicts: [...workspace.syncConflicts, conflict],
+      };
+      const triggerKey = `sync_conflict:${draft.id}`;
+      const matchingReviewDrafts = deriveReviewQueue(
+        provisionalWorkspace,
+        context.now,
+      ).filter((review) => review.triggerKey === triggerKey);
+      if (matchingReviewDrafts.length !== 1) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason: `Sync conflict ${draft.id} must derive exactly one event Review.`,
+          gate: `sync_conflict:${draft.id}:review_derivation`,
+          permittedNextCommand: command.type,
+        });
+      }
+      const reviewDraft = matchingReviewDrafts[0];
+      if (reviewDraft.id !== reviewId) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason: `Sync conflict ${draft.id} derived an invalid Review identity.`,
+          gate: `sync_conflict:${draft.id}:review_identity`,
+          permittedNextCommand: command.type,
+        });
+      }
+      const projectIndexes: number[] = [];
+      for (const projectId of reviewDraft.affectedProjectIds) {
+        const matches = workspace.projects
+          .map((project, index) => ({ project, index }))
+          .filter(({ project }) => project.id === projectId);
+        if (matches.length === 0) {
+          return entityNotFound(
+            workspace,
+            context,
+            "ProjectV2",
+            projectId,
+            "repair_workspace_reference",
+          );
+        }
+        if (matches.length !== 1) {
+          return duplicateEntityIdentity(
+            workspace,
+            context,
+            "ProjectV2",
+            projectId,
+          );
+        }
+        projectIndexes.push(matches[0].index);
+      }
+      const projects = [...workspace.projects];
+      for (const index of projectIndexes) {
+        const project = projects[index];
+        projects[index] = {
+          ...project,
+          holds: [
+            ...project.holds,
+            {
+              type: "sync_conflict",
+              sourceId: conflict.id,
+              affectedRecordIds: structuredClone(expectedAffectedRecordIds),
+              createdAt: context.now,
+            },
+          ],
+          updatedAt: context.now,
+        };
+      }
+      return {
+        ok: true,
+        workspace: {
+          ...provisionalWorkspace,
+          projects,
+          reviews: [
+            ...workspace.reviews,
+            {
+              ...reviewDraft,
+              status: "open",
+              createdAt: context.now,
+            },
+          ],
+        },
+      };
+    }
+
+    case "resolve_sync_conflict": {
+      const conflictMatches = workspace.syncConflicts
+        .map((conflict, index) => ({ conflict, index }))
+        .filter(({ conflict }) => conflict.id === command.resolution.conflictId);
+      if (conflictMatches.length === 0) {
+        return entityNotFound(
+          workspace,
+          context,
+          "SyncConflictRecord",
+          command.resolution.conflictId,
+          "open_sync_conflict",
+        );
+      }
+      if (conflictMatches.length !== 1) {
+        return duplicateEntityIdentity(
+          workspace,
+          context,
+          "SyncConflictRecord",
+          command.resolution.conflictId,
+        );
+      }
+      const { conflict, index: conflictIndex } = conflictMatches[0];
+      if (conflict.resolvedAt !== undefined || conflict.retainedVersion !== undefined) {
+        return rejection(workspace, context, "REVISION_CONFLICT", {
+          reason: `Sync conflict ${conflict.id} is already resolved.`,
+          gate: `sync_conflict:${conflict.id}:resolution`,
+          permittedNextCommand: "read_resolved_sync_conflict",
+        });
+      }
+      if (
+        conflict.logicalKey === undefined ||
+        conflict.affectedProjectIds === undefined ||
+        conflict.affectedRecordIds === undefined ||
+        conflict.localBundle === undefined ||
+        conflict.remoteBundle === undefined ||
+        conflict.remoteRecordId === undefined ||
+        command.resolution.retainedBundleHash === undefined
+      ) {
+        return rejection(workspace, context, "SYNC_CONFLICT", {
+          reason: `Sync conflict ${conflict.id} has no complete verified bundle provenance.`,
+          gate: `sync_conflict:${conflict.id}:bundle`,
+          permittedNextCommand: "repair_workspace_reference",
+        });
+      }
+      const exactOpenCommand = {
+        type: "open_sync_conflict",
+        conflict: {
+          id: conflict.id,
+          recordType: conflict.recordType,
+          recordId: conflict.recordId,
+          remoteRecordId: conflict.remoteRecordId,
+          logicalKey: conflict.logicalKey,
+          affectedProjectIds: conflict.affectedProjectIds,
+          affectedRecordIds: conflict.affectedRecordIds,
+          commonAncestorHash: conflict.commonAncestorHash,
+          localValue: conflict.localValue,
+          remoteValue: conflict.remoteValue,
+          localBundle: conflict.localBundle,
+          remoteBundle: conflict.remoteBundle,
+        },
+      } as const;
+      const expectedOpenPayloadHash = await stableHash(
+        exactOpenCommand as unknown as JsonValue,
+      );
+      const conflictCreationReceipts = workspace.commandReceipts.filter(
+        (receipt) => {
+          if (
+            receipt.status !== "applied" ||
+            receipt.commandType !== "open_sync_conflict" ||
+            receipt.payloadHash !== expectedOpenPayloadHash
+          ) return false;
+          const conflictCreates = receipt.diff.filter(
+            (diff) =>
+              diff.entity === "SyncConflictRecord" &&
+              diff.entityId === conflict.id &&
+              diff.field === "created" &&
+              diff.before === null &&
+              sameSnapshot(diff.after, conflict),
+          );
+          return conflictCreates.length === 1;
+        },
+      );
+      const conflictCreationReceipt = conflictCreationReceipts[0];
+      if (conflictCreationReceipts.length !== 1 || conflictCreationReceipt === undefined) {
+        return rejection(workspace, context, "SYNC_CONFLICT", {
+          reason: `Sync conflict ${conflict.id} lacks its unique exact applied creation receipt.`,
+          gate: `sync_conflict:${conflict.id}:creation_receipt`,
+          permittedNextCommand: "repair_workspace_reference",
+        });
+      }
+      const {
+        receiptHash: storedConflictReceiptHash,
+        ...conflictCreationReceiptBase
+      } = conflictCreationReceipt;
+      if (
+        storedConflictReceiptHash !==
+          (await stableHash(conflictCreationReceiptBase as unknown as JsonValue))
+      ) {
+        return rejection(workspace, context, "SYNC_CONFLICT", {
+          reason: `Sync conflict ${conflict.id} creation receipt hash is invalid.`,
+          gate: `sync_conflict:${conflict.id}:creation_receipt`,
+          permittedNextCommand: "repair_workspace_reference",
+        });
+      }
+      const reviewMatches = workspace.reviews
+        .map((review, index) => ({ review, index }))
+        .filter(({ review }) => review.id === command.reviewId);
+      if (reviewMatches.length === 0) {
+        return entityNotFound(
+          workspace,
+          context,
+          "ReviewRecord",
+          command.reviewId,
+          "open_sync_conflict",
+        );
+      }
+      if (reviewMatches.length !== 1) {
+        return duplicateEntityIdentity(
+          workspace,
+          context,
+          "ReviewRecord",
+          command.reviewId,
+        );
+      }
+      const { review } = reviewMatches[0];
+      const expectedTriggerKey = `sync_conflict:${conflict.id}`;
+      const expectedReviewId = `review:${expectedTriggerKey}`;
+      if (
+        review.id !== expectedReviewId ||
+        review.triggerKey !== expectedTriggerKey ||
+        review.kind !== "event" ||
+        review.triggerType !== "sync_conflict" ||
+        review.status !== "open" ||
+        review.conclusion !== undefined
+      ) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason: `Sync conflict ${conflict.id} must resolve through its exact open Review ${expectedReviewId}.`,
+          gate: `sync_conflict:${conflict.id}:review`,
+          permittedNextCommand: "open_sync_conflict",
+        });
+      }
+      const rationale = command.resolution.rationale.trim();
+      if (rationale.length === 0) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason: "Conflict resolution requires a rationale.",
+          gate: `sync_conflict:${conflict.id}:rationale`,
+          permittedNextCommand: command.type,
+        });
+      }
+      if (
+        !(await conflictRemoteSemanticsAreValid(workspace, {
+          id: conflict.id,
+          recordType: conflict.recordType,
+          recordId: conflict.recordId,
+          remoteRecordId: conflict.remoteRecordId,
+          logicalKey: conflict.logicalKey,
+          affectedProjectIds: conflict.affectedProjectIds,
+          affectedRecordIds: conflict.affectedRecordIds,
+          commonAncestorHash: conflict.commonAncestorHash,
+          localValue: conflict.localValue,
+          remoteValue: conflict.remoteValue,
+          localBundle: conflict.localBundle,
+          remoteBundle: conflict.remoteBundle,
+        }))
+      ) {
+        return rejection(workspace, context, "SYNC_CONFLICT", {
+          reason: `Sync conflict ${conflict.id} remote snapshot no longer satisfies authoritative semantics.`,
+          gate: `sync_conflict:${conflict.id}:remote_semantics`,
+          permittedNextCommand: "repair_workspace_reference",
+        });
+      }
+      if (
+        !(await validateProtectedEffectBundle(conflict.localBundle)) ||
+        !(await validateProtectedEffectBundle(conflict.remoteBundle))
+      ) {
+        return rejection(workspace, context, "SYNC_CONFLICT", {
+          reason: `Sync conflict ${conflict.id} bundle provenance was tampered after opening.`,
+          gate: `sync_conflict:${conflict.id}:bundle`,
+          permittedNextCommand: "repair_workspace_reference",
+        });
+      }
+      const selectsLocal =
+        command.resolution.retainedBundleHash === conflict.localBundle.hash;
+      const selectsRemote =
+        command.resolution.retainedBundleHash === conflict.remoteBundle.hash;
+      if (selectsLocal === selectsRemote) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason: `Sync conflict ${conflict.id} resolution must identify one preserved bundle hash.`,
+          gate: `sync_conflict:${conflict.id}:retained_bundle`,
+          permittedNextCommand: command.type,
+        });
+      }
+      const retainedVersion = selectsLocal ? "local" : "remote";
+      const selectedValue = selectsLocal
+        ? conflict.localValue
+        : conflict.remoteValue;
+      if (!sameSnapshot(command.resolution.retainedValue, selectedValue)) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason: `Sync conflict ${conflict.id} retained value does not match its retained bundle hash.`,
+          gate: `sync_conflict:${conflict.id}:retained_value`,
+          permittedNextCommand: command.type,
+        });
+      }
+      if (
+        context.origin !== "sync" &&
+        command.resolution.retainedVersion !== retainedVersion
+      ) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason: `Sync conflict ${conflict.id} retained snapshot does not match the selected local or remote side.`,
+          gate: `sync_conflict:${conflict.id}:retained_value`,
+          permittedNextCommand: command.type,
+        });
+      }
+      const expectedProjectIds = [...conflict.affectedProjectIds].sort();
+      const expectedAffectedRecordIds = sortedUniqueIds([
+        conflict.id,
+        ...conflict.affectedRecordIds,
+        ...conflict.affectedProjectIds,
+      ]);
+      if (
+        JSON.stringify([...review.affectedProjectIds].sort()) !==
+          JSON.stringify([...expectedProjectIds].sort()) ||
+        JSON.stringify([...review.affectedRecordIds].sort()) !==
+          JSON.stringify(expectedAffectedRecordIds) ||
+        review.createdAt !== conflict.openedAt ||
+        review.dueAt !== conflict.openedAt ||
+        review.cadenceTimeZone !== undefined ||
+        review.overdueMarkedAt !== undefined
+      ) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason: `Sync conflict ${conflict.id} Review artifacts no longer match the protected record.`,
+          gate: `sync_conflict:${conflict.id}:review_artifacts`,
+          permittedNextCommand: "repair_workspace_reference",
+        });
+      }
+      const expectedOwners = new Set(expectedProjectIds);
+      for (const project of workspace.projects) {
+        const matchingHolds = project.holds.filter(
+          ({ type, sourceId }) =>
+            type === "sync_conflict" && sourceId === conflict.id,
+        );
+        if (!expectedOwners.has(project.id)) {
+          if (matchingHolds.length !== 0) {
+            return rejection(workspace, context, "INVALID_COMMAND", {
+              reason: `Sync conflict ${conflict.id} has a hold on unrelated Project ${project.id}.`,
+              gate: `sync_conflict:${conflict.id}:hold_ownership`,
+              permittedNextCommand: "repair_workspace_reference",
+            });
+          }
+          continue;
+        }
+        if (
+          matchingHolds.length !== 1 ||
+          matchingHolds[0].createdAt !== conflict.openedAt ||
+          JSON.stringify([...matchingHolds[0].affectedRecordIds].sort()) !==
+            JSON.stringify([...conflict.affectedRecordIds].sort())
+        ) {
+          return rejection(workspace, context, "INVALID_COMMAND", {
+            reason: `Sync conflict ${conflict.id} must own one exact affected-record hold on Project ${project.id}.`,
+            gate: `sync_conflict:${conflict.id}:hold_artifacts`,
+            permittedNextCommand: "repair_workspace_reference",
+          });
+        }
+      }
+      const currentLocalValue = protectedRecordSnapshot(
+        workspace,
+        conflict.recordType,
+        conflict.recordId,
+      );
+      if (!sameSnapshot(currentLocalValue, conflict.localValue)) {
+        return rejection(workspace, context, "SYNC_CONFLICT", {
+          reason: `Sync conflict ${conflict.id} local snapshot no longer matches its protected record.`,
+          gate: `sync_conflict:${conflict.id}:local_snapshot`,
+          permittedNextCommand: "repair_workspace_reference",
+        });
+      }
+      let resolvedWorkspace: WorkspaceV2;
+      try {
+        resolvedWorkspace = await applyRemoteProtectedEffectBundle({
+          workspace,
+          localBundle: conflict.localBundle,
+          remoteBundle: selectsLocal
+            ? conflict.localBundle
+            : conflict.remoteBundle,
+          conflictId: conflict.id,
+          now: context.now,
+        });
+      } catch {
+        return rejection(workspace, context, "SYNC_CONFLICT", {
+          reason: `Sync conflict ${conflict.id} current bundle projection drifted before resolution.`,
+          gate: `sync_conflict:${conflict.id}:bundle_projection`,
+          permittedNextCommand: "repair_workspace_reference",
+        });
+      }
+      const selectedRecordId = selectsLocal
+        ? conflict.recordId
+        : conflict.remoteRecordId;
+      const retainedPrimary = protectedRecordSnapshot(
+        resolvedWorkspace,
+        conflict.recordType,
+        selectedRecordId,
+      );
+      if (!sameSnapshot(retainedPrimary, selectedValue)) {
+        return rejection(workspace, context, "SYNC_CONFLICT", {
+          reason: `Sync conflict ${conflict.id} retained bundle did not produce its declared primary record.`,
+          gate: `sync_conflict:${conflict.id}:retained_projection`,
+          permittedNextCommand: "repair_workspace_reference",
+        });
+      }
+      const syncConflicts = [...resolvedWorkspace.syncConflicts];
+      syncConflicts[conflictIndex] = {
+        ...conflict,
+        resolvedAt: context.now,
+        retainedVersion,
+        retainedBundleHash: command.resolution.retainedBundleHash,
+      };
+      const reviews = [...resolvedWorkspace.reviews];
+      const resolvedReviewIndex = reviews.findIndex(
+        ({ id }) => id === review.id,
+      );
+      if (resolvedReviewIndex < 0) {
+        return rejection(workspace, context, "SYNC_CONFLICT", {
+          reason: `Sync conflict ${conflict.id} lost its resolution Review during bundle projection.`,
+          gate: `sync_conflict:${conflict.id}:review_projection`,
+          permittedNextCommand: "repair_workspace_reference",
+        });
+      }
+      reviews[resolvedReviewIndex] = {
+        ...review,
+        status: "completed",
+        conclusion: {
+          summary: rationale,
+          decisionCodes: [
+            `sync_conflict_retained_${retainedVersion}`,
+          ],
+          followUpCommandIds:
+            command.resolution.reappliedCommandId === undefined
+              ? []
+              : [command.resolution.reappliedCommandId],
+          actorId: context.actorId,
+          completedAt: context.now,
+        },
+      };
+      const projects = resolvedWorkspace.projects.map((project) => {
+        const holds = project.holds.filter(
+          ({ type, sourceId }) =>
+            !(type === "sync_conflict" && sourceId === conflict.id),
+        );
+        return holds.length === project.holds.length
+          ? project
+          : { ...project, holds, updatedAt: context.now };
+      });
+      return {
+        ok: true,
+        workspace: {
+          ...resolvedWorkspace,
+          syncConflicts,
+          reviews,
+          projects,
+        },
+      };
+    }
 
     case "close_project": {
       const subject = prepareCloseSubject(

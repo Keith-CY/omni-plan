@@ -6,6 +6,7 @@ import type { CommandReceipt, MigrationRecord, WorkspaceV2 } from "../domain/typ
 import { buildWorkspaceV2 } from "../tests/builders";
 import {
   BrowserWorkspaceRepository,
+  type PreparedSyncOperation,
   type RepositoryTransactionOperation,
   type SyncOutboxEntry,
 } from "./browserWorkspaceRepository";
@@ -21,6 +22,20 @@ import {
 const V1_STORAGE_KEY = "omni-plan-personal.workspace.v1";
 const NOW = "2026-07-12T00:00:00.000Z";
 
+function preparedOperation(
+  suffix = "1",
+): PreparedSyncOperation {
+  return {
+    operationHash: `operation-hash-${suffix}`,
+    path: `v2/workspaces/workspace-mark-sent/operations/device-1/1-operation-hash-${suffix}.json.enc`,
+    envelopeJson: JSON.stringify({
+      schemaVersion: 2,
+      protocol: "omniplan-v2-command-log",
+      nonce: suffix,
+    }),
+  };
+}
+
 async function checksumText(value: string): Promise<string> {
   const digest = await crypto.subtle.digest(
     "SHA-256",
@@ -31,7 +46,11 @@ async function checksumText(value: string): Promise<string> {
   ).join("");
 }
 
-function context(commandId: string, revision: number): CommandContext {
+function context(
+  commandId: string,
+  revision: number,
+  now: string = NOW,
+): CommandContext {
   return {
     commandId,
     expectedRevision: revision,
@@ -43,7 +62,7 @@ function context(commandId: string, revision: number): CommandContext {
       verified: true,
       capabilities: ["human_decision"],
     },
-    now: NOW,
+    now,
   };
 }
 
@@ -58,13 +77,14 @@ function capture(commandId: string): V2Command {
 async function acceptedTuple(
   workspace: WorkspaceV2,
   commandId: string,
+  now: string = NOW,
 ): Promise<{
   workspace: WorkspaceV2;
   outboxEntry: SyncOutboxEntry;
   receipt: CommandReceipt;
 }> {
   const command = capture(commandId);
-  const commandContext = context(commandId, workspace.revision);
+  const commandContext = context(commandId, workspace.revision, now);
   const result = await executeCommand(workspace, command, commandContext);
   if (!result.ok) throw new Error(`Expected accepted fixture: ${result.rejection.code}`);
   return {
@@ -1076,6 +1096,13 @@ describe("BrowserWorkspaceRepository", () => {
       outboxEntry: tuple.outboxEntry,
     });
 
+    await expect(
+      repo.markOutboxSent("outbox-send-1", "operation-hash-1", NOW),
+    ).rejects.toThrow(/matching prepared operation/i);
+    await repo.prepareOutboxOperation(
+      "outbox-send-1",
+      preparedOperation(),
+    );
     await repo.markOutboxSent("outbox-send-1", "operation-hash-1", NOW);
     await expect(
       repo.markOutboxSent(
@@ -1100,6 +1127,148 @@ describe("BrowserWorkspaceRepository", () => {
     await expect(
       repo.markOutboxSent("outbox-send-1", "hash", "not-a-time"),
     ).rejects.toThrow(/canonical time/i);
+  });
+
+  it("persists one exact prepared encrypted upload unit and reuses it idempotently", async () => {
+    const repo = repository("prepare-operation");
+    const initial = buildWorkspaceV2("workspace-mark-sent");
+    await repo.initialize(initial);
+    const tuple = await acceptedTuple(initial, "prepare-1");
+    await repo.commit({
+      expectedRevision: 0,
+      workspace: tuple.workspace,
+      outboxEntry: tuple.outboxEntry,
+    });
+    const prepared = preparedOperation();
+
+    await expect(
+      repo.prepareOutboxOperation(tuple.outboxEntry.id, prepared),
+    ).resolves.toEqual(
+      expect.objectContaining({
+        id: tuple.outboxEntry.id,
+        status: "pending",
+        preparedOperation: prepared,
+      }),
+    );
+    await expect(
+      repo.prepareOutboxOperation(tuple.outboxEntry.id, structuredClone(prepared)),
+    ).resolves.toEqual(
+      expect.objectContaining({ preparedOperation: prepared }),
+    );
+    expect(await repo.listPendingOutbox()).toEqual([
+      expect.objectContaining({ preparedOperation: prepared }),
+    ]);
+    await expect(
+      repo.prepareOutboxOperation(tuple.outboxEntry.id, preparedOperation("other")),
+    ).rejects.toThrow(/different prepared operation/i);
+  });
+
+  it("replaces a stale prepared upload only when its exact old hash still owns the pending entry", async () => {
+    const repo = repository("replace-prepared-operation");
+    const initial = buildWorkspaceV2("workspace-mark-sent");
+    await repo.initialize(initial);
+    const tuple = await acceptedTuple(initial, "replace-prepared-1");
+    await repo.commit({
+      expectedRevision: 0,
+      workspace: tuple.workspace,
+      outboxEntry: tuple.outboxEntry,
+    });
+    const stale = preparedOperation("stale");
+    const rebased = preparedOperation("rebased");
+    await repo.prepareOutboxOperation(tuple.outboxEntry.id, stale);
+
+    await expect(
+      repo.replacePreparedOutboxOperation(
+        tuple.outboxEntry.id,
+        stale.operationHash,
+        rebased,
+      ),
+    ).resolves.toEqual(
+      expect.objectContaining({ preparedOperation: rebased, status: "pending" }),
+    );
+    await expect(
+      repo.replacePreparedOutboxOperation(
+        tuple.outboxEntry.id,
+        stale.operationHash,
+        preparedOperation("loser"),
+      ),
+    ).rejects.toThrow(/changed before replacement/i);
+    expect(await repo.listPendingOutbox()).toEqual([
+      expect.objectContaining({ preparedOperation: rebased }),
+    ]);
+  });
+
+  it("lists pending operations by causal revision even when clocks move backward", async () => {
+    const repo = repository("causal-outbox-order");
+    const initial = buildWorkspaceV2("workspace-causal-order");
+    await repo.initialize(initial);
+    const first = await acceptedTuple(
+      initial,
+      "revision-1-late-clock",
+      "2026-07-12T10:00:00.000Z",
+    );
+    await repo.commit({
+      expectedRevision: 0,
+      workspace: first.workspace,
+      outboxEntry: first.outboxEntry,
+    });
+    const second = await acceptedTuple(
+      first.workspace,
+      "revision-2-early-clock",
+      "2026-07-12T01:00:00.000Z",
+    );
+    await repo.commit({
+      expectedRevision: 1,
+      workspace: second.workspace,
+      outboxEntry: second.outboxEntry,
+    });
+
+    expect(
+      (await repo.listPendingOutbox()).map(({ commandId }) => commandId),
+    ).toEqual(["revision-1-late-clock", "revision-2-early-clock"]);
+  });
+
+  it("never prepares a missing or sent entry and leaves an aborted prepare pending without ciphertext", async () => {
+    const aborted = repository("prepare-abort", {
+      beforeTransactionComplete: abortOnce("prepareOutboxOperation"),
+    });
+    const initial = buildWorkspaceV2("workspace-mark-sent");
+    await aborted.initialize(initial);
+    const tuple = await acceptedTuple(initial, "prepare-abort");
+    await aborted.commit({
+      expectedRevision: 0,
+      workspace: tuple.workspace,
+      outboxEntry: tuple.outboxEntry,
+    });
+
+    await expect(
+      aborted.prepareOutboxOperation(tuple.outboxEntry.id, preparedOperation()),
+    ).rejects.toThrow();
+    expect(await aborted.listPendingOutbox()).toEqual([
+      expect.not.objectContaining({ preparedOperation: expect.anything() }),
+    ]);
+    await expect(
+      aborted.prepareOutboxOperation("outbox-missing", preparedOperation()),
+    ).rejects.toThrow(/not found/i);
+
+    const normal = repository("prepare-sent");
+    await normal.initialize(initial);
+    const sentTuple = await acceptedTuple(initial, "prepare-sent");
+    await normal.commit({
+      expectedRevision: 0,
+      workspace: sentTuple.workspace,
+      outboxEntry: sentTuple.outboxEntry,
+    });
+    const prepared = preparedOperation("sent");
+    await normal.prepareOutboxOperation(sentTuple.outboxEntry.id, prepared);
+    await normal.markOutboxSent(
+      sentTuple.outboxEntry.id,
+      prepared.operationHash,
+      NOW,
+    );
+    await expect(
+      normal.prepareOutboxOperation(sentTuple.outboxEntry.id, prepared),
+    ).rejects.toThrow(/already sent/i);
   });
 
   it("never writes or removes the V1 localStorage sentinel", async () => {

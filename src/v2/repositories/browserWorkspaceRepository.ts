@@ -19,6 +19,13 @@ import {
 
 const CURRENT_WORKSPACE_KEY = "current";
 
+export interface PreparedSyncOperation {
+  operationHash: string;
+  path: string;
+  /** Exact canonical ciphertext envelope uploaded to the immutable remote path. */
+  envelopeJson: string;
+}
+
 export interface SyncOutboxEntry {
   id: string;
   workspaceId: string;
@@ -31,8 +38,28 @@ export interface SyncOutboxEntry {
   receiptId: string;
   createdAt: ISODate;
   status: "pending" | "sent";
+  preparedOperation?: PreparedSyncOperation;
   sentAt?: ISODate;
   operationHash?: string;
+}
+
+export interface SyncOutboxRepository {
+  load(): Promise<WorkspaceV2 | undefined>;
+  listPendingOutbox(): Promise<SyncOutboxEntry[]>;
+  prepareOutboxOperation(
+    id: string,
+    operation: PreparedSyncOperation,
+  ): Promise<SyncOutboxEntry>;
+  replacePreparedOutboxOperation(
+    id: string,
+    expectedOperationHash: string,
+    operation: PreparedSyncOperation,
+  ): Promise<SyncOutboxEntry>;
+  markOutboxSent(
+    id: string,
+    operationHash: string,
+    sentAt: ISODate,
+  ): Promise<void>;
 }
 
 export interface AtomicWorkspaceRepository {
@@ -90,6 +117,8 @@ export type RepositoryTransactionOperation =
   | "saveMigrationRecovery"
   | "clearMigrationRecovery"
   | "clearMatchingMigrationRecovery"
+  | "prepareOutboxOperation"
+  | "replacePreparedOutboxOperation"
   | "markOutboxSent"
   | "appendRejectedReceipt";
 
@@ -227,15 +256,18 @@ async function assertAtomicCommandTuple(input: {
   ) {
     throw new Error("Invalid atomic command tuple: Workspace revision mismatch.");
   }
-  if (
-    outboxEntry.workspaceId !== workspace.workspaceId ||
-    outboxEntry.baseRevision !== expectedRevision ||
-    outboxEntry.revision !== workspace.revision ||
-    outboxEntry.status !== "pending" ||
-    outboxEntry.sentAt !== undefined ||
-    outboxEntry.operationHash !== undefined ||
-    outboxEntry.id !== `outbox-${outboxEntry.commandId}`
-  ) {
+  const identityMatches =
+    outboxEntry.workspaceId === workspace.workspaceId &&
+    outboxEntry.baseRevision === expectedRevision &&
+    outboxEntry.revision === workspace.revision &&
+    outboxEntry.id === `outbox-${outboxEntry.commandId}`;
+  const isPendingLocal =
+    identityMatches &&
+    outboxEntry.status === "pending" &&
+    outboxEntry.preparedOperation === undefined &&
+    outboxEntry.sentAt === undefined &&
+    outboxEntry.operationHash === undefined;
+  if (!isPendingLocal) {
     throw new Error("Invalid atomic command tuple: outbox state mismatch.");
   }
 
@@ -847,10 +879,174 @@ export class BrowserWorkspaceRepository implements AtomicWorkspaceRepository {
       return structuredClone(
         entries.sort(
           (left, right) =>
+            left.baseRevision - right.baseRevision ||
+            left.revision - right.revision ||
             compareText(left.createdAt, right.createdAt) ||
             compareText(left.id, right.id),
         ),
       );
+    } finally {
+      database.close();
+    }
+  }
+
+  async prepareOutboxOperation(
+    idValue: string,
+    operationValue: PreparedSyncOperation,
+  ): Promise<SyncOutboxEntry> {
+    const id = structuredClone(idValue);
+    const operation = structuredClone(operationValue);
+    if (
+      id.trim().length === 0 ||
+      operation === null ||
+      typeof operation !== "object" ||
+      typeof operation.operationHash !== "string" ||
+      operation.operationHash.trim().length === 0 ||
+      typeof operation.path !== "string" ||
+      operation.path.trim().length === 0 ||
+      typeof operation.envelopeJson !== "string" ||
+      operation.envelopeJson.trim().length === 0
+    ) {
+      throw new Error(
+        "Outbox identity and an exact prepared sync operation are required.",
+      );
+    }
+    try {
+      JSON.parse(operation.envelopeJson);
+    } catch {
+      throw new Error("Prepared sync operation envelope must be valid JSON.");
+    }
+
+    const database = await this.open();
+    try {
+      const transaction = database.transaction(
+        V2_OBJECT_STORES.outbox,
+        "readwrite",
+      );
+      const completion = transactionComplete(transaction);
+      const store = transaction.objectStore(V2_OBJECT_STORES.outbox);
+      const entry = await requestResult<SyncOutboxEntry | undefined>(store.get(id));
+      if (entry === undefined) {
+        transaction.abort();
+        await completion.catch(() => undefined);
+        throw new Error(`Outbox entry ${id} was not found.`);
+      }
+      if (entry.status === "sent") {
+        transaction.abort();
+        await completion.catch(() => undefined);
+        throw new Error(`Outbox entry ${id} is already sent.`);
+      }
+      if (entry.preparedOperation !== undefined) {
+        if (
+          entry.preparedOperation.operationHash === operation.operationHash &&
+          entry.preparedOperation.path === operation.path &&
+          entry.preparedOperation.envelopeJson === operation.envelopeJson
+        ) {
+          await completion;
+          return structuredClone(entry);
+        }
+        transaction.abort();
+        await completion.catch(() => undefined);
+        throw new Error(`Outbox entry ${id} has a different prepared operation.`);
+      }
+
+      const preparedEntry = {
+        ...entry,
+        preparedOperation: operation,
+      } satisfies SyncOutboxEntry;
+      const request = store.put(preparedEntry);
+      this.inject("prepareOutboxOperation", transaction);
+      try {
+        await requestResult(request);
+        await completion;
+        return structuredClone(preparedEntry);
+      } catch (error) {
+        await completion.catch(() => undefined);
+        throw error;
+      }
+    } finally {
+      database.close();
+    }
+  }
+
+  async replacePreparedOutboxOperation(
+    idValue: string,
+    expectedOperationHashValue: string,
+    operationValue: PreparedSyncOperation,
+  ): Promise<SyncOutboxEntry> {
+    const id = structuredClone(idValue);
+    const expectedOperationHash = structuredClone(expectedOperationHashValue);
+    const operation = structuredClone(operationValue);
+    if (
+      id.trim().length === 0 ||
+      expectedOperationHash.trim().length === 0 ||
+      operation === null ||
+      typeof operation !== "object" ||
+      typeof operation.operationHash !== "string" ||
+      operation.operationHash.trim().length === 0 ||
+      typeof operation.path !== "string" ||
+      operation.path.trim().length === 0 ||
+      typeof operation.envelopeJson !== "string" ||
+      operation.envelopeJson.trim().length === 0
+    ) {
+      throw new Error(
+        "Outbox identity, expected hash, and replacement sync operation are required.",
+      );
+    }
+    try {
+      JSON.parse(operation.envelopeJson);
+    } catch {
+      throw new Error("Replacement sync operation envelope must be valid JSON.");
+    }
+
+    const database = await this.open();
+    try {
+      const transaction = database.transaction(
+        V2_OBJECT_STORES.outbox,
+        "readwrite",
+      );
+      const completion = transactionComplete(transaction);
+      const store = transaction.objectStore(V2_OBJECT_STORES.outbox);
+      const entry = await requestResult<SyncOutboxEntry | undefined>(store.get(id));
+      if (entry === undefined) {
+        transaction.abort();
+        await completion.catch(() => undefined);
+        throw new Error(`Outbox entry ${id} was not found.`);
+      }
+      if (entry.status === "sent") {
+        transaction.abort();
+        await completion.catch(() => undefined);
+        throw new Error(`Outbox entry ${id} is already sent.`);
+      }
+      if (entry.preparedOperation?.operationHash !== expectedOperationHash) {
+        transaction.abort();
+        await completion.catch(() => undefined);
+        throw new Error(
+          `Outbox entry ${id} changed before replacement could commit.`,
+        );
+      }
+      if (
+        entry.preparedOperation.operationHash === operation.operationHash &&
+        entry.preparedOperation.path === operation.path &&
+        entry.preparedOperation.envelopeJson === operation.envelopeJson
+      ) {
+        await completion;
+        return structuredClone(entry);
+      }
+      const replacedEntry = {
+        ...entry,
+        preparedOperation: operation,
+      } satisfies SyncOutboxEntry;
+      const request = store.put(replacedEntry);
+      this.inject("replacePreparedOutboxOperation", transaction);
+      try {
+        await requestResult(request);
+        await completion;
+        return structuredClone(replacedEntry);
+      } catch (error) {
+        await completion.catch(() => undefined);
+        throw error;
+      }
     } finally {
       database.close();
     }
@@ -897,6 +1093,13 @@ export class BrowserWorkspaceRepository implements AtomicWorkspaceRepository {
         }
         await completion;
         return;
+      }
+      if (entry.preparedOperation?.operationHash !== operationHash) {
+        transaction.abort();
+        await completion.catch(() => undefined);
+        throw new Error(
+          `Outbox entry ${id} does not have the matching prepared operation.`,
+        );
       }
       const request = store.put({
         ...entry,

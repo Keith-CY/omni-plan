@@ -427,11 +427,23 @@ const ALL_COMMANDS = [
     },
   },
   {
+    type: "open_sync_conflict",
+    conflict: {
+      id: "conflict-1",
+      recordType: "bet",
+      recordId: "bet-1",
+      commonAncestorHash: "ancestor-1",
+      remoteValue: { id: "bet-1" },
+    },
+  },
+  {
     type: "resolve_sync_conflict",
     reviewId: "review-1",
     resolution: {
       conflictId: "conflict-1",
       retainedVersion: "local",
+      retainedValue: { id: "bet-1" },
+      retainedBundleHash: "a".repeat(64),
       rationale: "Local decision was authoritative",
     },
   },
@@ -493,6 +505,7 @@ const EXPECTED_COMMAND_TYPES = [
   "mark_review_overdue",
   "create_review",
   "complete_review",
+  "open_sync_conflict",
   "resolve_sync_conflict",
   "close_project",
   "abandon_project",
@@ -2410,53 +2423,87 @@ describe("executeCommand trusted policy projection", () => {
     });
   });
 
-  it("keeps resolve_sync_conflict allowed through an overlapping hold", async () => {
-    const workspace = buildProjectWorkspace("sync_conflict", {
+  it("does not policy-block resolve_sync_conflict through an overlapping hold", async () => {
+    const targetReview = {
+      id: "review-target",
+      kind: "event" as const,
+      triggerKey: "hard_gate:review-target",
+      triggerType: "hard_gate" as const,
+      status: "open" as const,
+      affectedProjectIds: ["project-1"],
+      affectedRecordIds: ["project-1"],
+      dueAt: LATER,
+      createdAt: NOW,
+    };
+    const workspace = buildProjectWorkspace(undefined, {
+      directionBriefs: [
+        buildDirectionBrief({
+          id: "brief-1",
+          projectId: "project-1",
+          createdAt: NOW,
+          updatedAt: NOW,
+        }),
+      ],
       reviews: [
+        targetReview,
         {
-          id: "review-conflict",
+          id: "review:sync_conflict:conflict-1",
           kind: "event",
-          triggerKey: "conflict-trigger",
+          triggerKey: "sync_conflict:conflict-1",
           triggerType: "sync_conflict",
           status: "open",
           affectedProjectIds: ["project-1"],
-          affectedRecordIds: [WORK_ITEM.id],
-          dueAt: LATER,
+          affectedRecordIds: ["conflict-1", "project-1", "review-target"],
+          dueAt: NOW,
           createdAt: NOW,
         },
       ],
       syncConflicts: [
         {
           id: "conflict-1",
-          recordType: "daily_commitment",
-          recordId: WORK_ITEM.id,
+          recordType: "review",
+          recordId: targetReview.id,
           projectId: "project-1",
           commonAncestorHash: "ancestor-hash",
-          localValue: { side: "local" },
-          remoteValue: { side: "remote" },
+          localValue: targetReview,
+          remoteValue: targetReview,
           openedAt: NOW,
         },
       ],
     });
+    workspace.projects[0].holds = [
+      {
+        type: "sync_conflict",
+        sourceId: "conflict-1",
+        affectedRecordIds: [targetReview.id],
+        createdAt: NOW,
+      },
+    ];
     const command = {
       type: "resolve_sync_conflict",
-      reviewId: "review-conflict",
+      reviewId: "review:sync_conflict:conflict-1",
       resolution: {
         conflictId: "conflict-1",
         retainedVersion: "local",
+        retainedValue: targetReview as unknown as JsonValue,
+        retainedBundleHash: "a".repeat(64),
         rationale: "Local is authoritative",
       },
     } as const satisfies V2Command;
 
-    const result = rejected(
-      await executeCommand(
-        workspace,
-        command,
-        buildContext({ expectedRevision: 11 }),
-      ),
+    const result = await executeCommand(
+      workspace,
+      command,
+      buildContext({ expectedRevision: 11 }),
     );
 
-    expect(result.rejection.code).toBe("COMMAND_NOT_IMPLEMENTED");
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("Expected missing bundle provenance rejection");
+    expect(result.rejection).toMatchObject({
+      code: "SYNC_CONFLICT",
+      gate: "sync_conflict:conflict-1:bundle",
+    });
+    expect(result.rejection.code).not.toBe("HOLD_BLOCKS_COMMAND");
   });
 
   it("uses only effective unsuperseded commitments for overdue-review execution", async () => {

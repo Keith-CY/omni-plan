@@ -1,6 +1,16 @@
 import type { Baseline, Evidence, Id, ISODate } from "@/domain/types";
 
+import {
+  isAuthorizedEquivalentConflictResolutionFor,
+  isAuthorizedConflictOpenFor,
+  type AuthorizedEquivalentConflictResolution,
+  type AuthorizedConflictOpen,
+} from "../repositories/syncConflictOpenAuthorization";
 import { applyCommandHandler } from "./commandHandlers";
+import {
+  lookupConflictTarget,
+  type SyncConflictDraft,
+} from "./conflicts";
 import {
   exactCanonicalAppetiteBoundaryHold,
   selectExactCurrentCloseBet,
@@ -92,6 +102,10 @@ export type ReviewDraft = Omit<
 export interface ConflictResolution {
   conflictId: Id;
   retainedVersion: "local" | "remote";
+  /** Stable selected snapshot; sync maps this identity to each device's side. */
+  retainedValue: JsonValue;
+  /** Stable across devices even when each device labels the sides oppositely. */
+  retainedBundleHash?: string;
   reappliedCommandId?: Id;
   rationale: string;
 }
@@ -186,6 +200,7 @@ export type V2Command =
       reviewId: Id;
       conclusion: ReviewConclusion;
     }
+  | { type: "open_sync_conflict"; conflict: SyncConflictDraft }
   | {
       type: "resolve_sync_conflict";
       reviewId: Id;
@@ -235,6 +250,7 @@ const knownCommandTypes = new Set(
     mark_review_overdue: true,
     create_review: true,
     complete_review: true,
+    open_sync_conflict: true,
     resolve_sync_conflict: true,
     close_project: true,
     abandon_project: true,
@@ -713,8 +729,34 @@ function isConflictResolutionValue(value: unknown): boolean {
     isRecordValue(value) &&
     isStringValue(value.conflictId) &&
     isOneOf(value.retainedVersion, ["local", "remote"]) &&
+    value.retainedValue !== undefined &&
+    isStringValue(value.retainedBundleHash) &&
     isOptionalStringValue(value.reappliedCommandId) &&
     isStringValue(value.rationale)
+  );
+}
+
+function isSyncConflictDraftValue(value: unknown): boolean {
+  return (
+    isRecordValue(value) &&
+    isStringValue(value.id) &&
+    isOneOf(value.recordType, [
+      "bet",
+      "daily_commitment",
+      "review",
+      "exception",
+      "close",
+    ]) &&
+    isStringValue(value.recordId) &&
+    isStringValue(value.remoteRecordId) &&
+    isStringValue(value.logicalKey) &&
+    isStringArrayValue(value.affectedProjectIds) &&
+    isStringArrayValue(value.affectedRecordIds) &&
+    isStringValue(value.commonAncestorHash) &&
+    value.localValue !== undefined &&
+    value.remoteValue !== undefined &&
+    isRecordValue(value.localBundle) &&
+    isRecordValue(value.remoteBundle)
   );
 }
 
@@ -877,6 +919,8 @@ function isStructurallyValidCommand(value: unknown): value is V2Command {
         isStringValue(value.reviewId) &&
         isReviewConclusionValue(value.conclusion)
       );
+    case "open_sync_conflict":
+      return isSyncConflictDraftValue(value.conflict);
     case "resolve_sync_conflict":
       return (
         isStringValue(value.reviewId) &&
@@ -1275,6 +1319,12 @@ function affectedExistingProjectIds(
       candidates = [];
       break;
 
+    case "open_sync_conflict": {
+      const target = lookupConflictTarget(workspace, command.conflict);
+      candidates = target.ok ? target.target.projectIds : [];
+      break;
+    }
+
     case "resolve_sync_conflict": {
       candidates = uniqueIds([
         ...projectIdsForStoredReview(workspace, command.reviewId),
@@ -1526,6 +1576,11 @@ function affectedRecordIds(
         ...command.review.affectedProjectIds,
         ...command.review.affectedRecordIds,
       ]);
+    case "open_sync_conflict":
+      return uniqueIds([
+        command.conflict.id,
+        command.conflict.recordId,
+      ]);
     case "resolve_sync_conflict":
       return uniqueIds([
         ...recordIdsForStoredReview(workspace, command.reviewId),
@@ -1682,6 +1737,7 @@ function targetWasCommitted(
     case "mark_review_overdue":
     case "create_review":
     case "complete_review":
+    case "open_sync_conflict":
     case "resolve_sync_conflict":
     case "close_project":
     case "abandon_project":
@@ -1726,6 +1782,8 @@ function deterministicTriggerKey(command: V2Command): string | undefined {
       return command.triggerKey;
     case "create_review":
       return command.review.triggerKey;
+    case "open_sync_conflict":
+      return `sync_conflict:${command.conflict.id}`;
     case "configure_capacity":
     case "capture_inbox":
     case "confirm_action_triage":
@@ -1807,8 +1865,21 @@ function buildAuthorizationContext(
   const scopedHolds = [
     ...new Set([...projectHolds, ...matchingGlobalSyncHolds]),
   ];
+  const syntheticGlobalSyncHolds: ProjectHoldState[] = workspace.syncConflicts
+    .filter(
+      (conflict) =>
+        conflict.resolvedAt === undefined &&
+        mutationTargetSet.has(conflict.recordId),
+    )
+    .map((conflict) => ({
+      type: "sync_conflict",
+      sourceId: conflict.id,
+      affectedRecordIds: [conflict.recordId],
+      createdAt: conflict.openedAt,
+    }));
   const syntheticReviewHolds: ProjectHoldState[] = workspace.reviews
     .filter((review) => {
+      if (review.triggerType === "sync_conflict") return false;
       const dueAt = Date.parse(review.dueAt);
       const now = Date.parse(context.now);
       const appliesToCommand =
@@ -1844,7 +1915,11 @@ function buildAuthorizationContext(
     origin: context.origin,
     source: context.source,
     workspaceRevision: workspace.revision,
-    projectHolds: [...scopedHolds, ...syntheticReviewHolds],
+    projectHolds: [
+      ...scopedHolds,
+      ...syntheticGlobalSyncHolds,
+      ...syntheticReviewHolds,
+    ],
     affectedRecordIds: mutationTargetIds,
     targetWasCommitted: targetWasCommitted(workspace, command, context.now),
     expandsScope,
@@ -2204,10 +2279,18 @@ export async function executeCommand(
   workspace: WorkspaceV2,
   command: V2Command,
   context: CommandContext,
+  options: {
+    evaluationNow?: ISODate;
+    authorizedConflictOpen?: AuthorizedConflictOpen;
+    authorizedEquivalentConflictResolution?: AuthorizedEquivalentConflictResolution;
+  } = {},
 ): Promise<CommandResult> {
   const commandSnapshot: unknown = structuredClone(command);
   const commandType = normalizedCommandType(commandSnapshot);
   const contextSnapshot = structuredClone(context);
+  const evaluationNow = structuredClone(
+    options.evaluationNow ?? contextSnapshot.now,
+  );
   const baseRevision = workspace.revision;
   const rejectionContext = {
     actorKind: contextSnapshot.actorKind,
@@ -2308,6 +2391,30 @@ export async function executeCommand(
     );
   }
 
+  if (
+    commandSnapshot.type === "open_sync_conflict" &&
+    !isAuthorizedConflictOpenFor(
+      options.authorizedConflictOpen,
+      workspace,
+      commandSnapshot,
+      contextSnapshot,
+    )
+  ) {
+    return rejectedResult(
+      workspace,
+      commandSnapshot,
+      commandType,
+      contextSnapshot,
+      createCommandRejection("SOURCE_NOT_AUTHORIZED", rejectionContext, {
+        reason:
+          "A sync conflict may open only from an opaque locally reconstructed replay projection.",
+        gate: `sync_conflict:${commandSnapshot.conflict.id || "missing"}:provenance_authority`,
+        permittedNextCommand: "authorize_verified_sync_conflict",
+      }),
+      baseRevision,
+    );
+  }
+
   if (commandType === "record_bet_boundary") {
     const payloadHash = await stableHash(toJsonValue(commandSnapshot));
     const appliedReplay = workspace.commandReceipts.find(
@@ -2334,11 +2441,21 @@ export async function executeCommand(
 
   const baselineSnapshot = structuredClone(workspace);
   const handlerWorkspace = structuredClone(baselineSnapshot);
-  const handlerResult = await applyCommandHandler(
-    handlerWorkspace,
-    commandSnapshot,
-    contextSnapshot,
-  );
+  const isEquivalentResolutionConfirmation =
+    commandSnapshot.type === "resolve_sync_conflict" &&
+    isAuthorizedEquivalentConflictResolutionFor(
+      options.authorizedEquivalentConflictResolution,
+      workspace,
+      commandSnapshot,
+      contextSnapshot,
+    );
+  const handlerResult = isEquivalentResolutionConfirmation
+    ? { ok: true as const, workspace: handlerWorkspace }
+    : await applyCommandHandler(
+        handlerWorkspace,
+        commandSnapshot,
+        contextSnapshot,
+      );
   if (!handlerResult.ok) {
     return rejectedResult(
       workspace,
@@ -2355,6 +2472,7 @@ export async function executeCommand(
     candidate,
     contextSnapshot.now,
     baselineSnapshot,
+    { evaluationNow },
   );
   if (invariantViolation !== undefined) {
     return rejectedResult(

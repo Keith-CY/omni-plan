@@ -6,12 +6,26 @@ import {
   type CommandResult,
   type V2Command,
 } from "../domain/commands";
+import type { ISODate } from "@/domain/types";
+import { canonicalJson } from "../../domain/canonical";
 import { stableHash } from "../domain/stableHash";
 import type { CommandReceipt, JsonValue, WorkspaceV2 } from "../domain/types";
 import type {
   AtomicWorkspaceRepository,
   SyncOutboxEntry,
 } from "./browserWorkspaceRepository";
+import {
+  isAuthorizedEquivalentConflictResolutionFor,
+  isAuthorizedConflictOpenFor,
+  type AuthorizedEquivalentConflictResolution,
+  type AuthorizedConflictOpen,
+} from "./syncConflictOpenAuthorization";
+import {
+  isAuthorizedSemanticSyncReplay,
+  isAuthorizedSyncReplay,
+  type AuthorizedSemanticSyncReplay,
+  type AuthorizedSyncReplay,
+} from "./syncProtocol";
 
 const RETRYABLE_SYSTEM_COMMANDS = new Set<V2Command["type"]>([
   "record_bet_boundary",
@@ -53,6 +67,22 @@ async function canRetrySystemCasConflict(
   );
 }
 
+export type CommandServiceBoundaryErrorCode =
+  | "VERIFIED_SYNC_REPLAY_REQUIRED"
+  | "SYNC_WORKSPACE_MISMATCH"
+  | "AUTHORIZED_CONFLICT_OPEN_REQUIRED"
+  | "AUTHORIZED_EQUIVALENT_RESOLUTION_REQUIRED";
+
+export class CommandServiceBoundaryError extends Error {
+  constructor(
+    readonly code: CommandServiceBoundaryErrorCode,
+    message: string,
+  ) {
+    super(message);
+    this.name = "CommandServiceBoundaryError";
+  }
+}
+
 export class CommandService {
   constructor(
     private readonly repository: AtomicWorkspaceRepository,
@@ -62,12 +92,25 @@ export class CommandService {
   async dispatch(
     commandInput: V2Command,
     contextInput: CommandContext,
+    options: { evaluationNow?: ISODate } = {},
   ): Promise<CommandResult> {
     // Snapshot synchronously before the first await. Callers may reuse mutable
     // form objects while IndexedDB is opening; those later writes must not alter
     // the command, receipt, or outbox tuple being persisted.
     const command = structuredClone(commandInput);
     const context = structuredClone(contextInput);
+    if (command.type === "open_sync_conflict") {
+      throw new CommandServiceBoundaryError(
+        "AUTHORIZED_CONFLICT_OPEN_REQUIRED",
+        "Raw conflict-open commands are forbidden; use a locally reconstructed opaque conflict authority.",
+      );
+    }
+    if (context.origin === "sync") {
+      throw new CommandServiceBoundaryError(
+        "VERIFIED_SYNC_REPLAY_REQUIRED",
+        "Raw sync-origin contexts are forbidden; replay an opaque verified operation.",
+      );
+    }
 
     const workspace = await this.repository.load();
     if (!workspace || workspace.workspaceId !== this.workspaceId) {
@@ -75,11 +118,208 @@ export class CommandService {
         "V2 Workspace must be initialized by BootstrapService before dispatch.",
       );
     }
+    return this.dispatchAgainstWorkspace(
+      command,
+      context,
+      workspace,
+      options.evaluationNow,
+    );
+  }
+
+  async dispatchVerifiedReplay(
+    replayInput: AuthorizedSyncReplay,
+    options: { evaluationNow?: ISODate } = {},
+  ): Promise<CommandResult> {
+    if (!isAuthorizedSyncReplay(replayInput)) {
+      throw new CommandServiceBoundaryError(
+        "VERIFIED_SYNC_REPLAY_REQUIRED",
+        "Only protocol-verified sync replay values may cross this boundary.",
+      );
+    }
+    if (replayInput.workspaceId !== this.workspaceId) {
+      throw new CommandServiceBoundaryError(
+        "SYNC_WORKSPACE_MISMATCH",
+        "The verified operation belongs to another Workspace.",
+      );
+    }
+    if (replayInput.command.type === "open_sync_conflict") {
+      throw new CommandServiceBoundaryError(
+        "AUTHORIZED_CONFLICT_OPEN_REQUIRED",
+        "A replayed conflict-open command must be re-authorized from its exact source-operation bundles.",
+      );
+    }
+    const replay = replayInput;
+    const workspace = await this.repository.load();
+    if (!workspace || workspace.workspaceId !== this.workspaceId) {
+      throw new Error(
+        "V2 Workspace must be initialized by BootstrapService before dispatch.",
+      );
+    }
+    const sourceCapabilities = Array.from(
+      new Set([...replay.receipt.source.capabilities, "replay_receipt" as const]),
+    );
+    const context: CommandContext = {
+      commandId: replay.receipt.commandId,
+      expectedRevision: workspace.revision,
+      actorId: replay.receipt.actorId,
+      actorKind: replay.receipt.actorKind,
+      origin: "sync",
+      source: {
+        sourceId: `sync-replay:${replay.operationHash}:${replay.receipt.source.sourceId}`,
+        verified: replay.receipt.source.verified,
+        capabilities: sourceCapabilities,
+      },
+      now: replay.receipt.createdAt,
+    };
+    return this.dispatchAgainstWorkspace(
+      structuredClone(replay.command) as V2Command,
+      context,
+      workspace,
+      options.evaluationNow,
+    );
+  }
+
+  async dispatchAuthorizedConflictOpen(
+    authorization: AuthorizedConflictOpen,
+    options: { evaluationNow?: ISODate } = {},
+  ): Promise<CommandResult> {
+    const workspace = await this.repository.load();
+    if (!workspace || workspace.workspaceId !== this.workspaceId) {
+      throw new Error(
+        "V2 Workspace must be initialized by BootstrapService before dispatch.",
+      );
+    }
+    if (
+      !isAuthorizedConflictOpenFor(
+        authorization,
+        workspace,
+        authorization.command,
+        authorization.context,
+      )
+    ) {
+      throw new CommandServiceBoundaryError(
+        "AUTHORIZED_CONFLICT_OPEN_REQUIRED",
+        "Conflict authority is not an opaque proof for the exact current Workspace.",
+      );
+    }
+    return this.dispatchAgainstWorkspace(
+      structuredClone(authorization.command) as V2Command,
+      structuredClone(authorization.context),
+      workspace,
+      options.evaluationNow,
+      authorization,
+    );
+  }
+
+  async dispatchAuthorizedEquivalentConflictResolution(
+    authorization: AuthorizedEquivalentConflictResolution,
+    options: { evaluationNow?: ISODate } = {},
+  ): Promise<CommandResult> {
+    const workspace = await this.repository.load();
+    if (!workspace || workspace.workspaceId !== this.workspaceId) {
+      throw new Error(
+        "V2 Workspace must be initialized by BootstrapService before dispatch.",
+      );
+    }
+    if (
+      !isAuthorizedEquivalentConflictResolutionFor(
+        authorization,
+        workspace,
+        authorization.command,
+        authorization.context,
+      )
+    ) {
+      throw new CommandServiceBoundaryError(
+        "AUTHORIZED_EQUIVALENT_RESOLUTION_REQUIRED",
+        "Equivalent resolution confirmation requires opaque authority for the exact current Workspace.",
+      );
+    }
+    return this.dispatchAgainstWorkspace(
+      structuredClone(authorization.command) as V2Command,
+      structuredClone(authorization.context),
+      workspace,
+      options.evaluationNow,
+      undefined,
+      authorization,
+    );
+  }
+
+  async dispatchAuthorizedSemanticReplay(
+    replayInput: AuthorizedSemanticSyncReplay,
+    options: { evaluationNow?: ISODate } = {},
+  ): Promise<CommandResult> {
+    if (!isAuthorizedSemanticSyncReplay(replayInput)) {
+      throw new CommandServiceBoundaryError(
+        "VERIFIED_SYNC_REPLAY_REQUIRED",
+        "Only protocol-authorized semantic sync replay may cross this boundary.",
+      );
+    }
+    if (replayInput.workspaceId !== this.workspaceId) {
+      throw new CommandServiceBoundaryError(
+        "SYNC_WORKSPACE_MISMATCH",
+        "The semantic replay belongs to another Workspace.",
+      );
+    }
+    const workspace = await this.repository.load();
+    if (!workspace || workspace.workspaceId !== this.workspaceId) {
+      throw new Error(
+        "V2 Workspace must be initialized by BootstrapService before dispatch.",
+      );
+    }
+    if (canonicalJson(workspace) !== replayInput.expectedWorkspaceCanonical) {
+      throw new CommandServiceBoundaryError(
+        "SYNC_WORKSPACE_MISMATCH",
+        "The Workspace changed after semantic replay authorization.",
+      );
+    }
+    const sourceCapabilities = Array.from(
+      new Set([
+        ...replayInput.receipt.source.capabilities,
+        "replay_receipt" as const,
+      ]),
+    );
+    const context: CommandContext = {
+      commandId: replayInput.receipt.commandId,
+      expectedRevision: workspace.revision,
+      actorId: replayInput.receipt.actorId,
+      actorKind: replayInput.receipt.actorKind,
+      origin: "sync",
+      source: {
+        sourceId: `sync-semantic:${replayInput.operationHash}:${replayInput.semanticKind}:${replayInput.receipt.source.sourceId}`,
+        verified: replayInput.receipt.source.verified,
+        capabilities: sourceCapabilities,
+      },
+      now: replayInput.receipt.createdAt,
+    };
+    return this.dispatchAgainstWorkspace(
+      structuredClone(replayInput.command) as V2Command,
+      context,
+      workspace,
+      options.evaluationNow,
+    );
+  }
+
+  private async dispatchAgainstWorkspace(
+    command: V2Command,
+    context: CommandContext,
+    workspace: WorkspaceV2,
+    evaluationNow?: ISODate,
+    authorizedConflictOpen?: AuthorizedConflictOpen,
+    authorizedEquivalentConflictResolution?: AuthorizedEquivalentConflictResolution,
+  ): Promise<CommandResult> {
 
     // The pure domain contract deliberately checks revision before duplicate
     // identity. Preserve that order at the persistence boundary.
     if (context.expectedRevision !== workspace.revision) {
-      const stale = await executeCommand(workspace, command, context);
+      const stale = await executeCommand(workspace, command, context, {
+        ...(evaluationNow === undefined ? {} : { evaluationNow }),
+        ...(authorizedConflictOpen === undefined
+          ? {}
+          : { authorizedConflictOpen }),
+        ...(authorizedEquivalentConflictResolution === undefined
+          ? {}
+          : { authorizedEquivalentConflictResolution }),
+      });
       if (stale.ok) {
         throw new Error("A stale command unexpectedly passed domain validation.");
       }
@@ -117,7 +357,15 @@ export class CommandService {
       );
     }
 
-    const result = await executeCommand(workspace, command, context);
+    const result = await executeCommand(workspace, command, context, {
+      ...(evaluationNow === undefined ? {} : { evaluationNow }),
+      ...(authorizedConflictOpen === undefined
+        ? {}
+        : { authorizedConflictOpen }),
+      ...(authorizedEquivalentConflictResolution === undefined
+        ? {}
+        : { authorizedEquivalentConflictResolution }),
+    });
     if (!result.ok) {
       const collision = await this.persistRejectedOnce(result.receipt);
       return collision === undefined
