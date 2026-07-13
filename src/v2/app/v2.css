@@ -427,6 +427,239 @@ button {
   border: 0;
 }
 
+.v2-setup-card {
+  width: min(100%, 1180px);
+}
+
+.v2-capacity-editor {
+  display: grid;
+  gap: 28px;
+}
+
+.v2-capacity-section {
+  min-width: 0;
+  margin: 0;
+  padding: 24px;
+  background: rgba(243, 239, 229, 0.42);
+  border: 1px solid var(--v2-rule);
+}
+
+.v2-capacity-section > legend {
+  padding: 0 10px 0 0;
+  font-family: "Iowan Old Style", Charter, Georgia, serif;
+  font-size: 25px;
+}
+
+.v2-capacity-section > p {
+  max-width: 66ch;
+  margin: 4px 0 20px;
+  color: var(--v2-muted);
+  line-height: 1.55;
+}
+
+.v2-field,
+.v2-check-field {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+  color: var(--v2-muted);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.v2-field input,
+.v2-field select,
+.v2-unavailable-block input {
+  width: 100%;
+  min-width: 0;
+  padding: 9px 11px;
+  color: var(--v2-ink);
+  background: var(--v2-sheet);
+  border: 1px solid var(--v2-rule);
+  border-radius: 0;
+}
+
+.v2-field input:disabled {
+  color: #777f7b;
+  background: #e7e2d8;
+}
+
+.v2-field--wide {
+  max-width: 420px;
+}
+
+.v2-capacity-days {
+  display: grid;
+  gap: 12px;
+}
+
+.v2-capacity-day {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: 118px minmax(0, 1fr);
+  align-items: center;
+  gap: 18px;
+  margin: 0;
+  padding: 18px;
+  background: var(--v2-sheet);
+  border: 1px solid var(--v2-rule);
+}
+
+.v2-capacity-day > legend {
+  padding: 0 8px;
+  color: var(--v2-ink);
+  font-weight: 700;
+}
+
+.v2-check-field {
+  display: flex;
+  min-height: 44px;
+  align-items: center;
+  gap: 10px;
+  color: var(--v2-ink);
+}
+
+.v2-check-field input {
+  width: 22px;
+  min-block-size: 22px;
+  height: 22px;
+  margin: 0;
+}
+
+.v2-capacity-day__fields {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: repeat(5, minmax(100px, 1fr));
+  gap: 12px;
+}
+
+.v2-unavailable-list {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.v2-unavailable-block {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(180px, 1fr)) auto;
+  align-items: end;
+  gap: 12px;
+  margin: 0;
+  padding: 16px;
+  background: var(--v2-sheet);
+  border: 1px solid var(--v2-rule);
+}
+
+.v2-unavailable-block > legend {
+  padding: 0 8px;
+  font-weight: 700;
+}
+
+.v2-unavailable-block label {
+  display: grid;
+  gap: 7px;
+  color: var(--v2-muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.v2-capacity-editor button,
+.v2-command-rejection button {
+  padding: 9px 16px;
+  color: var(--v2-ink);
+  background: var(--v2-sheet);
+  border: 1px solid var(--v2-ink);
+}
+
+.v2-capacity-editor button[type="submit"] {
+  min-width: 180px;
+  color: white;
+  background: var(--v2-dark);
+  border-color: var(--v2-dark);
+}
+
+.v2-capacity-editor button:hover:not(:disabled),
+.v2-command-rejection button:hover:not(:disabled) {
+  color: white;
+  background: var(--v2-signal-text);
+  border-color: var(--v2-signal-text);
+}
+
+.v2-capacity-editor button:disabled {
+  cursor: wait;
+  opacity: 0.62;
+}
+
+.v2-form-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding-top: 22px;
+  border-top: 1px solid var(--v2-rule);
+}
+
+.v2-form-actions p {
+  max-width: 56ch;
+  margin: 0;
+  color: var(--v2-muted);
+  line-height: 1.5;
+}
+
+.v2-inline-validation,
+.v2-command-rejection {
+  padding: 20px 22px;
+  background: #fff3ed;
+  border: 1px solid #c56747;
+  border-left: 5px solid var(--v2-signal-text);
+}
+
+.v2-inline-validation p,
+.v2-command-rejection p {
+  margin: 8px 0;
+  line-height: 1.5;
+}
+
+.v2-inline-validation code,
+.v2-command-rejection code {
+  overflow-wrap: anywhere;
+  color: var(--v2-muted);
+}
+
+.v2-command-rejection h2,
+.v2-top-action-card h2,
+.v2-empty-state h2 {
+  margin: 0 0 10px;
+  font-family: "Iowan Old Style", Charter, Georgia, serif;
+  font-size: 28px;
+  font-weight: 500;
+}
+
+.v2-top-action-card {
+  padding: 22px 24px;
+  background: var(--v2-signal-soft);
+  border-left: 5px solid var(--v2-signal);
+}
+
+.v2-top-action-card > p:not(.v2-eyebrow) {
+  max-width: 64ch;
+  margin: 0;
+  color: var(--v2-muted);
+  line-height: 1.5;
+}
+
+.v2-top-action-card__action {
+  margin-top: 16px;
+}
+
+.v2-empty-state {
+  padding: 34px;
+  text-align: center;
+  background: var(--v2-sheet);
+  border: 1px dashed var(--v2-rule);
+}
+
 @media (max-width: 760px) {
   .v2-app-shell {
     display: block;
@@ -511,6 +744,42 @@ button {
   .v2-readout {
     padding: 22px 20px 22px 26px;
     box-shadow: 5px 5px 0 rgba(20, 37, 34, 0.08);
+  }
+
+  .v2-setup-shell {
+    padding: 0;
+    place-items: start;
+  }
+
+  .v2-setup-card {
+    padding: 30px 20px;
+    border-width: 1px 0;
+    box-shadow: none;
+  }
+
+  .v2-capacity-section {
+    padding: 18px;
+  }
+
+  .v2-capacity-day {
+    grid-template-columns: 1fr;
+  }
+
+  .v2-capacity-day__fields {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .v2-unavailable-block {
+    grid-template-columns: 1fr;
+  }
+
+  .v2-form-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .v2-form-actions button {
+    width: 100%;
   }
 
   .v2-mobile-nav {

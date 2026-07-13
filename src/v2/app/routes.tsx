@@ -1,6 +1,7 @@
 import { Navigate, Route, Routes, useParams } from "react-router-dom";
 
 import type { WorkspaceV2 } from "../domain/types";
+import { CapacitySetupPage } from "./setup/CapacitySetupPage";
 import { AppShell } from "./shell/AppShell";
 import { useV2Workspace } from "./state/V2WorkspaceProvider";
 
@@ -329,24 +330,6 @@ function BootingRoute() {
   );
 }
 
-function SetupRoute() {
-  const state = useV2Workspace();
-  if (state.status !== "setup_required") return null;
-  return (
-    <BootstrapFrame
-      eyebrow="Required once"
-      title="Set your capacity"
-      summary="OmniPlan will not create commitments until your real working limits are explicit."
-    >
-      <dl className="v2-metric-grid">
-        <Metric label="Workspace" value={state.workspace.workspaceId} />
-        <Metric label="Capacity profile" value="Required" />
-        <RevisionMetric workspace={state.workspace} />
-      </dl>
-    </BootstrapFrame>
-  );
-}
-
 function MigrationRoute() {
   const state = useV2Workspace();
   if (state.status !== "migration_required") return null;
@@ -426,7 +409,7 @@ export function V2Routes() {
     case "setup_required":
       return (
         <Routes>
-          <Route path="/setup" element={<SetupRoute />} />
+          <Route path="/setup" element={<CapacitySetupPage />} />
           <Route path="*" element={<Navigate to="/setup" replace />} />
         </Routes>
       );
