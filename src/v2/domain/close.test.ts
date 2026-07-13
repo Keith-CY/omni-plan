@@ -363,22 +363,26 @@ describe("structured Close", () => {
     {
       name: "a missing follow-up ID",
       draft: decision("follow_up_project", { followUpProjectId: undefined }),
+      gate: "command_payload:close_project",
     },
     {
       name: "a blank follow-up ID",
       draft: decision("follow_up_project", { followUpProjectId: "   " }),
+      gate: "project:project-1:close_decision",
     },
     {
       name: "an untrimmed follow-up ID",
       draft: decision("follow_up_project", {
         followUpProjectId: " project-follow-up ",
       }),
+      gate: "project:project-1:close_decision",
     },
     {
       name: "a stray follow-up ID on another disposition",
       draft: decision("discard", { followUpProjectId: "stray-project" }),
+      gate: "project:project-1:close_decision",
     },
-  ])("rejects $name", async ({ draft }) => {
+  ])("rejects $name", async ({ draft, gate }) => {
     const result = rejected(
       await executeCommand(
         closingWorkspace(),
@@ -389,7 +393,7 @@ describe("structured Close", () => {
 
     expect(result.rejection).toMatchObject({
       code: "INVALID_COMMAND",
-      gate: "project:project-1:close_decision",
+      gate,
       permittedNextCommand: "close_project",
     });
   });

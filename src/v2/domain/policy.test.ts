@@ -286,9 +286,6 @@ describe("authorizeCommand authority matrix", () => {
     "propose_replan",
     "upsert_dependency",
     "remove_dependency",
-    "remove_work_item",
-    "capture_baseline",
-    "complete_work_item",
   ] as const;
   const systemOnly = [
     "record_bet_boundary",
@@ -301,6 +298,9 @@ describe("authorizeCommand authority matrix", () => {
     "update_project_metadata",
     "update_action",
     "complete_action",
+    "remove_work_item",
+    "capture_baseline",
+    "complete_work_item",
     "resolve_evidence_exception",
     "request_validation",
     "satisfy_validation",
@@ -545,7 +545,7 @@ describe("authorizeCommand authority matrix", () => {
       expect(authorizeCommand(commandType, buildContext("human"))).toBeUndefined();
       expect(authorizeCommand(commandType, buildContext("agent"))).toMatchObject({
         code: "ACTOR_NOT_AUTHORIZED",
-        permittedNextCommand: "submit_command_proposal",
+        permittedNextCommand: commandType,
       });
       expect(authorizeCommand(commandType, buildContext("system"))).toMatchObject({
         code: "ACTOR_NOT_AUTHORIZED",

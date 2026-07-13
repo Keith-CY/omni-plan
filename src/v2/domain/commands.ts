@@ -6,7 +6,10 @@ import {
   type AuthorizedEquivalentConflictResolution,
   type AuthorizedConflictOpen,
 } from "../repositories/syncConflictOpenAuthorization";
-import { applyCommandHandler } from "./commandHandlers";
+import {
+  applyCommandHandler,
+  type CommandHandlerResult,
+} from "./commandHandlers";
 import {
   lookupConflictTarget,
   type SyncConflictDraft,
@@ -31,11 +34,15 @@ import {
   type AuthorizationContext,
 } from "./policy";
 import { stableHash } from "./stableHash";
-import { soleCommitmentLeafForLocalDate } from "./today";
+import {
+  generateTodayProposal,
+  soleCommitmentLeafForLocalDate,
+} from "./today";
 import {
   isPortfolioReviewScope,
   reviewAffectedActiveProjectIds,
 } from "./review";
+import { isProposableCommandType } from "./agentAuthority";
 import type {
   Action,
   ActorKind,
@@ -43,6 +50,7 @@ import type {
   AuditDiff,
   CapacityProfile,
   CloseDecision,
+  CommandProposal,
   CommandOrigin,
   CommandReceipt,
   CommandSource,
@@ -112,7 +120,7 @@ export interface ConflictResolution {
 }
 export type CloseDecisionDraft = Omit<CloseDecision, "actorId" | "closedAt">;
 
-export type V2Command =
+export type CoreV2Command =
   | { type: "configure_capacity"; profile: CapacityProfile }
   | { type: "capture_inbox"; id: Id; text: string; desiredDate?: ISODate }
   | {
@@ -219,6 +227,30 @@ export type V2Command =
     }
   | { type: "archive_project"; projectId: Id; archived: boolean };
 
+export type ProposableV2Command = Extract<
+  CoreV2Command,
+  {
+    type:
+      | "update_direction"
+      | "create_work_item"
+      | "update_work_item"
+      | "propose_replan"
+      | "upsert_dependency"
+      | "remove_dependency";
+  }
+>;
+
+export type V2Command =
+  | CoreV2Command
+  | {
+      type: "submit_command_proposal";
+      proposalId: Id;
+      command: ProposableV2Command;
+      rationale: string;
+    }
+  | { type: "accept_command_proposal"; proposalId: Id }
+  | { type: "dismiss_command_proposal"; proposalId: Id };
+
 const knownCommandTypes = new Set(
   Object.keys({
     configure_capacity: true,
@@ -256,6 +288,9 @@ const knownCommandTypes = new Set(
     close_project: true,
     abandon_project: true,
     archive_project: true,
+    submit_command_proposal: true,
+    accept_command_proposal: true,
+    dismiss_command_proposal: true,
   } satisfies Record<V2Command["type"], true>),
 );
 
@@ -321,6 +356,11 @@ const commandKeyShapes = {
   close_project: { required: ["type", "projectId", "decision"] },
   abandon_project: { required: ["type", "projectId", "decision"] },
   archive_project: { required: ["type", "projectId", "archived"] },
+  submit_command_proposal: {
+    required: ["type", "proposalId", "command", "rationale"],
+  },
+  accept_command_proposal: { required: ["type", "proposalId"] },
+  dismiss_command_proposal: { required: ["type", "proposalId"] },
 } as const satisfies Record<
   V2Command["type"],
   { required: readonly string[]; optional?: readonly string[] }
@@ -387,35 +427,85 @@ function isFiniteNumberValue(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
 }
 
-function isJsonValue(value: unknown, seen = new Set<object>()): value is JsonValue {
-  if (
-    value === null ||
-    typeof value === "string" ||
-    typeof value === "boolean"
-  ) return true;
-  if (typeof value === "number") return Number.isFinite(value);
-  if (typeof value !== "object" || seen.has(value)) return false;
+type CanonicalGraphLeafPredicate = (value: unknown) => boolean;
+
+function isCanonicalGraph(
+  value: unknown,
+  isLeaf: CanonicalGraphLeafPredicate,
+  seen = new Set<object>(),
+): boolean {
+  if (value === null || typeof value !== "object") return isLeaf(value);
+  if (seen.has(value)) return false;
   seen.add(value);
+
   if (Array.isArray(value)) {
     if (!isDenseArrayValue(value)) {
       seen.delete(value);
       return false;
     }
-    const valid = value.every((entry) => isJsonValue(entry, seen));
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    const valid = Reflect.ownKeys(descriptors).every((key) => {
+      const descriptor = descriptors[key as keyof typeof descriptors];
+      if (descriptor === undefined || !("value" in descriptor)) return false;
+      if (key === "length") return descriptor.enumerable === false;
+      return (
+        typeof key === "string" &&
+        descriptor.enumerable === true &&
+        isCanonicalGraph(descriptor.value, isLeaf, seen)
+      );
+    });
     seen.delete(value);
     return valid;
   }
+
   const prototype = Object.getPrototypeOf(value);
-  if (
-    (prototype !== Object.prototype && prototype !== null) ||
-    !hasOnlyEnumerableStringKeys(value)
-  ) {
+  if (prototype !== Object.prototype && prototype !== null) {
     seen.delete(value);
     return false;
   }
-  const valid = Object.values(value).every((entry) => isJsonValue(entry, seen));
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const valid = Reflect.ownKeys(descriptors).every((key) => {
+    const descriptor = descriptors[key as keyof typeof descriptors];
+    return (
+      typeof key === "string" &&
+      descriptor !== undefined &&
+      descriptor.enumerable === true &&
+      "value" in descriptor &&
+      isCanonicalGraph(descriptor.value, isLeaf, seen)
+    );
+  });
   seen.delete(value);
   return valid;
+}
+
+/**
+ * Rejects runtime graphs that cannot be safely snapshotted before command
+ * validation. Clone-safe primitive leaves remain admissible so ordinary
+ * malformed payloads still reach the domain's exact structural rejection.
+ */
+export function isCanonicalCommandRuntimeGraph(value: unknown): boolean {
+  return isCanonicalGraph(value, (leaf) => {
+    const kind = typeof leaf;
+    return (
+      leaf === null ||
+      kind === "undefined" ||
+      kind === "string" ||
+      kind === "boolean" ||
+      kind === "number" ||
+      kind === "bigint"
+    );
+  });
+}
+
+function isJsonValue(value: unknown): value is JsonValue {
+  return isCanonicalGraph(value, (leaf) => {
+    if (
+      leaf === null ||
+      typeof leaf === "string" ||
+      typeof leaf === "boolean"
+    ) return true;
+    return typeof leaf === "number" && Number.isFinite(leaf);
+  });
 }
 
 function isOptionalStringValue(value: unknown): boolean {
@@ -1206,7 +1296,12 @@ function isDecisionValue(
 export function isStructurallyValidCommand(
   value: unknown,
 ): value is V2Command {
-  if (!isRecordValue(value) || !isKnownV2CommandType(value.type)) {
+  if (
+    !isCanonicalCommandRuntimeGraph(value) ||
+    !isJsonValue(value) ||
+    !isRecordValue(value) ||
+    !isKnownV2CommandType(value.type)
+  ) {
     return false;
   }
   const keyShape = commandKeyShapes[value.type];
@@ -1352,7 +1447,25 @@ export function isStructurallyValidCommand(
       return (
         isStringValue(value.projectId) && typeof value.archived === "boolean"
       );
+    case "submit_command_proposal":
+      return (
+        isStringValue(value.proposalId) &&
+        isStringValue(value.rationale) &&
+        isProposableV2Command(value.command)
+      );
+    case "accept_command_proposal":
+    case "dismiss_command_proposal":
+      return isStringValue(value.proposalId);
   }
+}
+
+export function isProposableV2Command(
+  value: unknown,
+): value is ProposableV2Command {
+  return (
+    isStructurallyValidCommand(value) &&
+    isProposableCommandType(value.type)
+  );
 }
 
 function normalizedCommandType(value: unknown): string {
@@ -1406,6 +1519,7 @@ export function isStructurallyValidCommandContext(
   value: unknown,
 ): value is CommandContext {
   if (
+    !isCanonicalCommandRuntimeGraph(value) ||
     !isRecordValue(value) ||
     !hasExactKeys(value, [
       "commandId",
@@ -1634,6 +1748,9 @@ function affectedExistingProjectIds(
     case "confirm_action_triage":
     case "confirm_project_triage":
     case "promote_action_to_project":
+    case "submit_command_proposal":
+    case "accept_command_proposal":
+    case "dismiss_command_proposal":
       candidates = [];
       break;
 
@@ -1924,6 +2041,10 @@ function affectedRecordIds(
   switch (command.type) {
     case "configure_capacity":
       return [];
+    case "submit_command_proposal":
+    case "accept_command_proposal":
+    case "dismiss_command_proposal":
+      return [command.proposalId];
     case "capture_inbox":
       return [command.id];
     case "confirm_action_triage":
@@ -2225,6 +2346,9 @@ function targetWasCommitted(
     case "close_project":
     case "abandon_project":
     case "archive_project":
+    case "submit_command_proposal":
+    case "accept_command_proposal":
+    case "dismiss_command_proposal":
       return undefined;
   }
 
@@ -2298,6 +2422,9 @@ function deterministicTriggerKey(command: V2Command): string | undefined {
     case "close_project":
     case "abandon_project":
     case "archive_project":
+    case "submit_command_proposal":
+    case "accept_command_proposal":
+    case "dismiss_command_proposal":
       return undefined;
   }
 }
@@ -2697,6 +2824,24 @@ async function rejectedResult(
   };
 }
 
+function snapshotCommandRuntimeInput(value: unknown): unknown {
+  if (!isCanonicalCommandRuntimeGraph(value)) {
+    throw new TypeError(
+      "Command input must be a cloneable canonical data-property graph.",
+    );
+  }
+  return structuredClone(value);
+}
+
+function snapshotCommandContextInput(value: unknown): CommandContext {
+  if (!isCanonicalCommandRuntimeGraph(value)) {
+    throw new TypeError(
+      "Command context must be a cloneable canonical data-property graph.",
+    );
+  }
+  return structuredClone(value) as CommandContext;
+}
+
 /**
  * Persistence adapters use this helper when a command ID was already observed
  * outside the current Workspace (for example in the append-only rejection
@@ -2709,8 +2854,8 @@ export async function duplicateCommandResult(
   context: CommandContext,
   existingReceipt?: CommandReceipt,
 ): Promise<Extract<CommandResult, { ok: false }>> {
-  const commandSnapshot: unknown = structuredClone(command);
-  const contextSnapshot = structuredClone(context);
+  const commandSnapshot = snapshotCommandRuntimeInput(command);
+  const contextSnapshot = snapshotCommandContextInput(context);
   const commandType = normalizedCommandType(commandSnapshot);
   return rejectedResult(
     workspace,
@@ -2742,8 +2887,8 @@ export async function revisionConflictResult(
   command: V2Command,
   context: CommandContext,
 ): Promise<Extract<CommandResult, { ok: false }>> {
-  const commandSnapshot: unknown = structuredClone(command);
-  const contextSnapshot = structuredClone(context);
+  const commandSnapshot = snapshotCommandRuntimeInput(command);
+  const contextSnapshot = snapshotCommandContextInput(context);
   return rejectedResult(
     workspace,
     commandSnapshot,
@@ -2758,6 +2903,269 @@ export async function revisionConflictResult(
   );
 }
 
+interface VerifiedOpenCommandProposal {
+  proposal: CommandProposal;
+  command: ProposableV2Command;
+}
+
+type ProposalVerification =
+  | { ok: true; value: VerifiedOpenCommandProposal }
+  | { ok: false; code: "REVISION_CONFLICT" | "INVALID_COMMAND"; reason: string };
+
+async function verifyOpenCommandProposal(
+  workspace: WorkspaceV2,
+  proposalId: Id,
+): Promise<ProposalVerification> {
+  const matches = workspace.commandProposals.filter(({ id }) => id === proposalId);
+  if (matches.length !== 1) {
+    return {
+      ok: false,
+      code: matches.length === 0 ? "REVISION_CONFLICT" : "INVALID_COMMAND",
+      reason:
+        matches.length === 0
+          ? `Command Proposal ${proposalId} is not present in the current Workspace.`
+          : `Command Proposal ${proposalId} has ambiguous identity.`,
+    };
+  }
+  const proposal = matches[0];
+  if (
+    proposal.status !== "open" ||
+    workspace.revision !== proposal.baseRevision + 1
+  ) {
+    return {
+      ok: false,
+      code: "REVISION_CONFLICT",
+      reason: `Command Proposal ${proposalId} is stale and must be regenerated or consciously reapplied.`,
+    };
+  }
+  if (
+    !isProposableV2Command(proposal.payload) ||
+    proposal.payload.type !== proposal.commandType
+  ) {
+    return {
+      ok: false,
+      code: "INVALID_COMMAND",
+      reason: `Command Proposal ${proposalId} does not contain one exact allowlisted V2 command.`,
+    };
+  }
+  const nested = structuredClone(proposal.payload) as ProposableV2Command;
+  const directReceipts = workspace.commandReceipts.filter(
+    (receipt) =>
+      receipt.status === "applied" &&
+      receipt.baseRevision === proposal.baseRevision &&
+      receipt.revision === proposal.baseRevision + 1,
+  );
+  if (directReceipts.length !== 1) {
+    return {
+      ok: false,
+      code: "REVISION_CONFLICT",
+      reason: `Command Proposal ${proposalId} lacks one exact direct submission receipt.`,
+    };
+  }
+  const receipt = directReceipts[0];
+  const creationDiffs = receipt.diff.filter(
+    (diff) =>
+      diff.entity === "CommandProposal" &&
+      diff.entityId === proposal.id &&
+      diff.field === "created" &&
+      diff.before === null,
+  );
+  const expectedSubmitCommand = {
+    type: "submit_command_proposal",
+    proposalId: proposal.id,
+    command: nested,
+    rationale: proposal.rationale,
+  } as const;
+  const { receiptHash, ...receiptBase } = receipt;
+  if (
+    receipt.commandType !== "submit_command_proposal" ||
+    receipt.actorKind !== "agent" ||
+    receipt.actorId !== proposal.agentActorId ||
+    receipt.createdAt !== proposal.createdAt ||
+    !receipt.source.verified ||
+    !receipt.source.capabilities.includes("submit_proposal") ||
+    creationDiffs.length !== 1 ||
+    !sameJson(creationDiffs[0].after, proposal) ||
+    receipt.payloadHash !==
+      (await stableHash(toJsonValue(expectedSubmitCommand))) ||
+    receiptHash !== (await stableHash(receiptBase as unknown as JsonValue))
+  ) {
+    return {
+      ok: false,
+      code: "INVALID_COMMAND",
+      reason: `Command Proposal ${proposalId} has invalid submission provenance.`,
+    };
+  }
+  return { ok: true, value: { proposal, command: nested } };
+}
+
+async function commandForProposalAcceptance(
+  workspace: WorkspaceV2,
+  verified: VerifiedOpenCommandProposal,
+  context: CommandContext,
+): Promise<
+  | { ok: true; command: ProposableV2Command }
+  | { ok: false; code: "REVISION_CONFLICT" | "INVALID_COMMAND"; reason: string }
+> {
+  const nested = verified.command;
+  if (nested.type !== "propose_replan") {
+    return { ok: true, command: structuredClone(nested) };
+  }
+  if (
+    (nested.proposal.baseRevision !== verified.proposal.baseRevision &&
+      context.origin !== "sync") ||
+    nested.proposal.createdBy !== verified.proposal.agentActorId ||
+    nested.proposal.createdAt !== verified.proposal.createdAt
+  ) {
+    return {
+      ok: false,
+      code: "INVALID_COMMAND",
+      reason:
+        "The proposed Replan is not bound to the Agent submission revision and identity.",
+    };
+  }
+  try {
+    const current = await generateTodayProposal(
+      workspace,
+      nested.proposal.localDate,
+      context.now,
+    );
+    if (!sameJson(current.slots, nested.proposal.proposedSlots)) {
+      return {
+        ok: false,
+        code: "REVISION_CONFLICT",
+        reason:
+          "The proposed Replan no longer matches the current scheduling read set.",
+      };
+    }
+    return {
+      ok: true,
+      command: {
+        type: "propose_replan",
+        proposal: {
+          ...structuredClone(nested.proposal),
+          baseRevision: workspace.revision,
+          proposedSlots: structuredClone(current.slots),
+          proposalHash: current.proposalHash,
+          createdAt: context.now,
+          createdBy: context.actorId,
+        },
+      },
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      code: "REVISION_CONFLICT",
+      reason:
+        error instanceof Error
+          ? error.message
+          : "The proposed Replan could not be regenerated.",
+    };
+  }
+}
+
+async function applyAcceptedCommandProposal(
+  workspace: WorkspaceV2,
+  command: Extract<V2Command, { type: "accept_command_proposal" }>,
+  context: CommandContext,
+): Promise<CommandHandlerResult> {
+  const verified = await verifyOpenCommandProposal(workspace, command.proposalId);
+  if (!verified.ok) {
+    return {
+      ok: false,
+      rejection: createCommandRejection(verified.code, {
+        actorKind: context.actorKind,
+        origin: context.origin,
+        workspaceRevision: workspace.revision,
+      }, {
+        reason: verified.reason,
+        gate: `command_proposal:${command.proposalId}:freshness`,
+        permittedNextCommand: "submit_command_proposal",
+      }),
+    };
+  }
+  const effective = await commandForProposalAcceptance(
+    workspace,
+    verified.value,
+    context,
+  );
+  if (!effective.ok) {
+    return {
+      ok: false,
+      rejection: createCommandRejection(effective.code, {
+        actorKind: context.actorKind,
+        origin: context.origin,
+        workspaceRevision: workspace.revision,
+      }, {
+        reason: effective.reason,
+        gate: `command_proposal:${command.proposalId}:nested_command`,
+        permittedNextCommand: "submit_command_proposal",
+      }),
+    };
+  }
+  const nested = effective.command;
+  if (!isStructurallyValidCommand(nested)) {
+    return {
+      ok: false,
+      rejection: createCommandRejection("INVALID_COMMAND", {
+        actorKind: context.actorKind,
+        origin: context.origin,
+        workspaceRevision: workspace.revision,
+      }, {
+        reason: "The proposed nested command is structurally invalid.",
+        gate: `command_proposal:${command.proposalId}:nested_command`,
+        permittedNextCommand: "submit_command_proposal",
+      }),
+    };
+  }
+  const identityRejection = authorizeCommandIdentity(
+    nested.type,
+    buildAuthorizationContext(workspace, nested, context),
+  );
+  if (identityRejection !== undefined) {
+    return { ok: false, rejection: identityRejection };
+  }
+  const authorizationRejection = authorizeCommand(
+    nested.type,
+    buildAuthorizationContext(workspace, nested, context),
+  );
+  if (authorizationRejection !== undefined) {
+    return { ok: false, rejection: authorizationRejection };
+  }
+  const nestedResult = await applyCommandHandler(workspace, nested, context);
+  if (!nestedResult.ok) return nestedResult;
+  return {
+    ok: true,
+    workspace: {
+      ...nestedResult.workspace,
+      commandProposals: nestedResult.workspace.commandProposals.map((proposal) =>
+        proposal.id === command.proposalId
+          ? { ...proposal, status: "accepted" as const }
+          : proposal,
+      ),
+    },
+  };
+}
+
+function stalePreviouslyOpenCommandProposals(
+  baseline: WorkspaceV2,
+  candidate: WorkspaceV2,
+): WorkspaceV2 {
+  const previouslyOpen = new Set(
+    baseline.commandProposals
+      .filter(({ status }) => status === "open")
+      .map(({ id }) => id),
+  );
+  return {
+    ...candidate,
+    commandProposals: candidate.commandProposals.map((proposal) =>
+      previouslyOpen.has(proposal.id) && proposal.status === "open"
+        ? { ...proposal, status: "stale" as const }
+        : proposal,
+    ),
+  };
+}
+
 export async function executeCommand(
   workspace: WorkspaceV2,
   command: V2Command,
@@ -2768,9 +3176,9 @@ export async function executeCommand(
     authorizedEquivalentConflictResolution?: AuthorizedEquivalentConflictResolution;
   } = {},
 ): Promise<CommandResult> {
-  const commandSnapshot: unknown = structuredClone(command);
+  const commandSnapshot = snapshotCommandRuntimeInput(command);
   const commandType = normalizedCommandType(commandSnapshot);
-  const contextSnapshot = structuredClone(context);
+  const contextSnapshot = snapshotCommandContextInput(context);
   const evaluationNow = structuredClone(
     options.evaluationNow ?? contextSnapshot.now,
   );
@@ -2934,11 +3342,17 @@ export async function executeCommand(
     );
   const handlerResult = isEquivalentResolutionConfirmation
     ? { ok: true as const, workspace: handlerWorkspace }
-    : await applyCommandHandler(
-        handlerWorkspace,
-        commandSnapshot,
-        contextSnapshot,
-      );
+    : commandSnapshot.type === "accept_command_proposal"
+      ? await applyAcceptedCommandProposal(
+          handlerWorkspace,
+          commandSnapshot,
+          contextSnapshot,
+        )
+      : await applyCommandHandler(
+          handlerWorkspace,
+          commandSnapshot,
+          contextSnapshot,
+        );
   if (!handlerResult.ok) {
     return rejectedResult(
       workspace,
@@ -2949,7 +3363,10 @@ export async function executeCommand(
       baseRevision,
     );
   }
-  const candidate = handlerResult.workspace;
+  const candidate = stalePreviouslyOpenCommandProposals(
+    baselineSnapshot,
+    handlerResult.workspace,
+  );
 
   const [invariantViolation] = validateWorkspaceInvariants(
     candidate,

@@ -12,7 +12,9 @@ import {
 } from "../tests/builders";
 import {
   executeCommand,
+  isCanonicalCommandRuntimeGraph,
   isStructurallyValidCommand,
+  isStructurallyValidCommandContext,
   type CommandContext,
   type CommandResult,
   type V2Command,
@@ -473,6 +475,30 @@ const ALL_COMMANDS = [
     },
   },
   { type: "archive_project", projectId: "project-1", archived: true },
+  {
+    type: "submit_command_proposal",
+    proposalId: "command-proposal-1",
+    command: {
+      type: "update_direction",
+      projectId: "project-1",
+      brief: {
+        id: "brief-1",
+        projectId: "project-1",
+        audienceAndProblem: "Audience and problem",
+        successEvidence: "Success evidence",
+        appetiteSeconds: 86_400,
+        validationMethod: "Run tests",
+        firstScope: [
+          { id: "scope-1", title: "Scope", description: "Committed scope" },
+        ],
+        noGoOrKill: "Stop on invariant failure",
+        advancedNotes: "",
+      },
+    },
+    rationale: "Agent found a clearer Direction.",
+  },
+  { type: "accept_command_proposal", proposalId: "command-proposal-1" },
+  { type: "dismiss_command_proposal", proposalId: "command-proposal-1" },
 ] as const satisfies readonly V2Command[];
 
 const EXPECTED_COMMAND_TYPES = [
@@ -511,6 +537,9 @@ const EXPECTED_COMMAND_TYPES = [
   "close_project",
   "abandon_project",
   "archive_project",
+  "submit_command_proposal",
+  "accept_command_proposal",
+  "dismiss_command_proposal",
 ] as const;
 
 function commandSample(type: V2Command["type"]): V2Command {
@@ -803,6 +832,164 @@ describe("V2Command public contract", () => {
       expect(isStructurallyValidCommand(command)).toBe(false);
     },
   );
+
+  it("rejects a top-level enumerable accessor without invoking it", () => {
+    const command = commandSample("capture_inbox");
+    let getterCalls = 0;
+    Object.defineProperty(command, "text", {
+      configurable: true,
+      enumerable: true,
+      get() {
+        getterCalls += 1;
+        return "Accessor text";
+      },
+    });
+
+    expect(isStructurallyValidCommand(command)).toBe(false);
+    expect(getterCalls).toBe(0);
+  });
+
+  it("rejects a CommandContext accessor without invoking it", () => {
+    const context = buildContext();
+    let getterCalls = 0;
+    Object.defineProperty(context.source, "sourceId", {
+      configurable: true,
+      enumerable: true,
+      get() {
+        getterCalls += 1;
+        return "accessor-source";
+      },
+    });
+
+    expect(isStructurallyValidCommandContext(context)).toBe(false);
+    expect(getterCalls).toBe(0);
+  });
+
+  it("rejects an accessor inside a submitted command without invoking it", () => {
+    const proposal = commandSample("submit_command_proposal");
+    if (proposal.type !== "submit_command_proposal") {
+      throw new Error("Expected command proposal");
+    }
+    let getterCalls = 0;
+    Object.defineProperty(proposal.command, "projectId", {
+      configurable: true,
+      enumerable: true,
+      get() {
+        getterCalls += 1;
+        return "project-accessor";
+      },
+    });
+
+    expect(isStructurallyValidCommand(proposal)).toBe(false);
+    expect(getterCalls).toBe(0);
+  });
+
+  it("rejects a top-level command accessor before executeCommand can clone it", async () => {
+    const command = commandSample("capture_inbox");
+    let getterCalls = 0;
+    Object.defineProperty(command, "text", {
+      configurable: true,
+      enumerable: true,
+      get() {
+        getterCalls += 1;
+        return "Accessor text";
+      },
+    });
+
+    await expect(
+      executeCommand(
+        buildWorkspaceV2("workspace-accessor-command"),
+        command,
+        buildContext(),
+      ),
+    ).rejects.toThrow("canonical data-property graph");
+    expect(getterCalls).toBe(0);
+  });
+
+  it("rejects a nested proposal accessor before executeCommand can clone it", async () => {
+    const proposal = commandSample("submit_command_proposal");
+    if (proposal.type !== "submit_command_proposal") {
+      throw new Error("Expected command proposal");
+    }
+    let getterCalls = 0;
+    Object.defineProperty(proposal.command, "projectId", {
+      configurable: true,
+      enumerable: true,
+      get() {
+        getterCalls += 1;
+        return "project-accessor";
+      },
+    });
+
+    await expect(
+      executeCommand(
+        buildWorkspaceV2("workspace-accessor-proposal"),
+        proposal,
+        buildContext(),
+      ),
+    ).rejects.toThrow("canonical data-property graph");
+    expect(getterCalls).toBe(0);
+  });
+
+  it("rejects a context accessor before executeCommand can clone it", async () => {
+    const context = buildContext();
+    let getterCalls = 0;
+    Object.defineProperty(context.source, "sourceId", {
+      configurable: true,
+      enumerable: true,
+      get() {
+        getterCalls += 1;
+        return "accessor-source";
+      },
+    });
+
+    await expect(
+      executeCommand(
+        buildWorkspaceV2("workspace-accessor-context"),
+        commandSample("capture_inbox"),
+        context,
+      ),
+    ).rejects.toThrow("canonical data-property graph");
+    expect(getterCalls).toBe(0);
+  });
+
+  it("rejects non-canonical runtime graph topology before cloning", () => {
+    const withSymbolKey = { type: "capture_inbox" } as Record<
+      PropertyKey,
+      unknown
+    >;
+    withSymbolKey[Symbol("unexpected")] = true;
+
+    const withSymbolValue = { type: Symbol("capture_inbox") };
+
+    const withNonEnumerable = { type: "capture_inbox" };
+    Object.defineProperty(withNonEnumerable, "id", {
+      configurable: true,
+      enumerable: false,
+      value: "hidden-id",
+    });
+
+    const cyclic: Record<string, unknown> = { type: "capture_inbox" };
+    cyclic.self = cyclic;
+
+    expect(isCanonicalCommandRuntimeGraph(withSymbolKey)).toBe(false);
+    expect(isCanonicalCommandRuntimeGraph(withSymbolValue)).toBe(false);
+    expect(isCanonicalCommandRuntimeGraph(withNonEnumerable)).toBe(false);
+    expect(isCanonicalCommandRuntimeGraph(cyclic)).toBe(false);
+  });
+
+  it("allows clone-safe leaves to reach the exact structural validator", () => {
+    const ordinaryButInvalid = {
+      type: "capture_inbox",
+      id: undefined,
+      text: 1n,
+      desiredDate: Number.NaN,
+      nested: [undefined, 1n, Number.POSITIVE_INFINITY],
+    };
+
+    expect(isCanonicalCommandRuntimeGraph(ordinaryButInvalid)).toBe(true);
+    expect(isStructurallyValidCommand(ordinaryButInvalid)).toBe(false);
+  });
 
   it.each(NESTED_EXACT_KEY_CASES)(
     "rejects an unknown key in $name",

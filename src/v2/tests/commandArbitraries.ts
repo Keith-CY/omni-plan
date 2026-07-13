@@ -146,6 +146,9 @@ const publicCommandTypeRecord = {
   close_project: true,
   abandon_project: true,
   archive_project: true,
+  submit_command_proposal: true,
+  accept_command_proposal: true,
+  dismiss_command_proposal: true,
 } as const satisfies Record<V2Command["type"], true>;
 
 export const publicCommandTypes = Object.keys(
@@ -684,6 +687,9 @@ const coverageTarget = {
   close_project: "closing",
   abandon_project: "validating",
   archive_project: "closed",
+  submit_command_proposal: "direction",
+  accept_command_proposal: "direction",
+  dismiss_command_proposal: "direction",
 } as const satisfies Record<V2Command["type"], LifecycleStage>;
 
 const coverageExpectedRejections = {
@@ -725,6 +731,16 @@ const coverageExpectedRejections = {
   close_project: [],
   abandon_project: ["ILLEGAL_LIFECYCLE_TRANSITION"],
   archive_project: [],
+  submit_command_proposal: [],
+  accept_command_proposal: [
+    "INVALID_COMMAND",
+    "REVISION_CONFLICT",
+    "ILLEGAL_LIFECYCLE_TRANSITION",
+    "HOLD_BLOCKS_COMMAND",
+    "PROJECT_CLOSED",
+    "ENTITY_NOT_FOUND",
+  ],
+  dismiss_command_proposal: ["REVISION_CONFLICT", "ENTITY_NOT_FOUND"],
 } as const satisfies Record<V2Command["type"], readonly RejectionCode[]>;
 
 function coverageStep(
@@ -737,6 +753,7 @@ function coverageStep(
     kind === "mark_review_overdue" ||
     kind === "create_review" ||
     kind === "open_sync_conflict";
+  const agentProposalCommand = kind === "submit_command_proposal";
   return {
     kind,
     value,
@@ -746,8 +763,12 @@ function coverageStep(
     expectation:
       expectedRejectionCodes.length === 0 ? "must_apply" : "state_dependent",
     expectedRejectionCodes,
-    contextProfile: systemCommand ? "system" : "authorized",
-    origin: systemCommand ? "agent" : "ui",
+    contextProfile: systemCommand
+      ? "system"
+      : agentProposalCommand
+        ? "agent"
+        : "authorized",
+    origin: systemCommand || agentProposalCommand ? "agent" : "ui",
     revisionMode: "current",
     payloadValid: true,
     timeJitterSeconds: value % 60,
@@ -770,8 +791,8 @@ export const commandSequenceArbitrary: fc.Arbitrary<CommandSequenceCase> =
     randomizedAcceptedValue: fc.nat({ max: 1_000_000 }),
     randomizedRejectedValue: fc.nat({ max: 1_000_000 }),
     fuzzSteps: fc.array(fuzzStepArbitrary, {
-      minLength: 37,
-      maxLength: 37,
+      minLength: 34,
+      maxLength: 34,
     }),
   }).map(({
     seed,
@@ -1317,6 +1338,37 @@ const commandMaterializers = {
     type: "archive_project" as const,
     projectId,
     archived: step.value % 2 === 1,
+  }),
+  submit_command_proposal: ({
+    workspace,
+    projectId,
+    entityId,
+    step,
+  }: MaterializerArgs) => ({
+    type: "submit_command_proposal" as const,
+    proposalId: `command-proposal:${entityId}`,
+    command: {
+      type: "update_direction" as const,
+      projectId,
+      brief: completeDirection(workspace, projectId),
+    },
+    rationale: step.payloadValid
+      ? "The Agent found a bounded Direction update for human review."
+      : "",
+  }),
+  accept_command_proposal: ({ workspace, entityId }: MaterializerArgs) => ({
+    type: "accept_command_proposal" as const,
+    proposalId:
+      workspace.commandProposals.find(({ status }) => status === "open")?.id ??
+      workspace.commandProposals[0]?.id ??
+      `missing-command-proposal:${entityId}`,
+  }),
+  dismiss_command_proposal: ({ workspace, entityId }: MaterializerArgs) => ({
+    type: "dismiss_command_proposal" as const,
+    proposalId:
+      workspace.commandProposals.find(({ status }) => status === "open")?.id ??
+      workspace.commandProposals[0]?.id ??
+      `missing-command-proposal:${entityId}`,
   }),
 } satisfies {
   [K in V2Command["type"]]: CommandMaterializer<K>;

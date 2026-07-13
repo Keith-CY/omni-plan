@@ -416,21 +416,53 @@ Capturing Inbox items and drafting Direction remain available.
 
 ### 13.1 Automatic low-risk commands
 
-The Agent may automatically:
+The Agent may automatically execute exactly these three commands, and only
+through a verified Agent source carrying the matching narrow capability:
 
-- capture Inbox items;
-- record actual effort;
-- attach evidence supplied by an authorized source.
+- `capture_inbox` with `capture_inbox`;
+- `record_actual` with `record_actual`;
+- `attach_evidence` with `attach_evidence`.
+
+Every public V2 command has one explicit disposition in the exhaustive Agent
+authority table. Adding a command without choosing `automatic`,
+`proposal_submission`, `proposal_only`, `human_confirmation`,
+`human_mutation`, or `system_only` is a compile-time error.
 
 ### 13.2 Proposal-only commands
 
-The Agent may draft, but not apply:
+The Agent may submit, but not directly apply, exactly these six nested command
+types:
 
-- Direction decisions;
-- plans and work breakdowns;
-- Replan proposals;
-- scope changes;
-- dependency changes.
+- `update_direction`;
+- `create_work_item`;
+- `update_work_item`;
+- `propose_replan`;
+- `upsert_dependency`;
+- `remove_dependency`.
+
+`submit_command_proposal` stores the complete nested command, base revision,
+rationale, Agent actor, creation time, and open state. Submission does not
+mutate the proposed domain entity. All public and nested commands must be
+canonical JSON graphs; explicitly present `undefined`, sparse arrays, accessors,
+and non-finite numbers are rejected before persistence. `accept_command_proposal` and
+`dismiss_command_proposal` are human-only.
+
+Acceptance revalidates the exact stored submission receipt and nested command
+shape, then reauthorizes that command against current policy and holds. A valid
+acceptance applies the nested effects and the proposal status transition as one
+outer command: one revision, one receipt, and one invariant check. Replan
+proposals may be safely regenerated against the current revision only when the
+current scheduler read set and slot intent still match; otherwise acceptance
+returns a revision conflict. A successful command marks all other pre-existing
+open command proposals stale. A rejected command changes neither the proposal
+nor the Workspace.
+
+Accepted material effects retain both identities: the exact Agent submission
+payload and the outer human acceptance receipt. Backup restore binds that
+payload to the resulting protected record diffs. Persisted sync conflict
+projections accept a proposal submission only when it is the exact fresh
+predecessor in the acceptance operation's verified ancestry; a same-revision
+sibling operation is never authority.
 
 ### 13.3 Human-only commands
 
@@ -444,6 +476,29 @@ Only a human may:
 - close a project.
 
 Agent attempts outside its authority return a rejected Command receipt with the required human action. They never partially mutate the Workspace.
+
+### 13.4 Agent protocol and bootstrap boundary
+
+The V2 Agent protocol is `2026-07-10.v2`. It preserves these machine-readable
+routes:
+
+- `/agent/manual.txt`;
+- `/agent/projects.txt` and `/agent/projects.json`;
+- `/agent/projects/:id.txt` and `/agent/projects/:id.json`;
+- `/agent/commands`.
+
+All routes inspect bootstrap state before reading the Workspace. Before setup or
+migration is resolved, reads return only the required human bootstrap action
+and writes are rejected. Inspection does not initialize an empty Workspace,
+clear recovery state, or mutate V1 storage. Once ready, reads expose sanitized
+text or JSON projections. Writes accept the exact public command envelope and
+flow only through `AgentAdapter` into `CommandService`; caller-supplied
+`actorKind`, `origin`, verification state, and capabilities are not envelope
+fields. The envelope contains only `command`, `commandId`, `expectedRevision`,
+`actorId`, `sourceId`, and `now`. `AgentAdapter` resolves `sourceId` and
+`actorId` through an injected trusted source resolver, then fixes
+`actorKind: agent` and `origin: agent`. A stale `expectedRevision` is rejected;
+it is never silently rebound to the currently loaded Workspace revision.
 
 ## 14. V2 architecture
 

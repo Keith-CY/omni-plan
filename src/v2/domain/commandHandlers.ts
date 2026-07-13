@@ -68,6 +68,7 @@ import type {
   InboxItem,
   JsonValue,
   ProjectV2,
+  ReplanProposal,
   ReviewRecord,
   WorkspaceV2,
 } from "./types";
@@ -486,6 +487,9 @@ function actionIdentityCandidates(command: V2Command): string[] {
     case "complete_review":
     case "open_sync_conflict":
     case "resolve_sync_conflict":
+    case "submit_command_proposal":
+    case "accept_command_proposal":
+    case "dismiss_command_proposal":
       return [];
   }
 }
@@ -541,6 +545,117 @@ function canonicalSnapshot(value: unknown): unknown {
 function sameSnapshot(left: unknown, right: unknown): boolean {
   return JSON.stringify(canonicalSnapshot(left)) ===
     JSON.stringify(canonicalSnapshot(right));
+}
+
+function jsonRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+async function isAcceptedCommandProposalReplanReceipt(
+  workspace: WorkspaceV2,
+  proposal: ReplanProposal,
+  receipt: CommandReceipt,
+): Promise<boolean> {
+  if (
+    receipt.status !== "applied" ||
+    receipt.commandType !== "accept_command_proposal" ||
+    receipt.actorKind !== "human" ||
+    !receipt.source.verified ||
+    receipt.baseRevision + 1 !== receipt.revision
+  ) return false;
+  const statusDiffs = receipt.diff.filter(
+    (diff) =>
+      diff.entity === "CommandProposal" &&
+      diff.field === "status" &&
+      diff.before === "open" &&
+      diff.after === "accepted",
+  );
+  const replanCreates = receipt.diff.filter(
+    (diff) =>
+      diff.entity === "ReplanProposal" &&
+      diff.entityId === proposal.id &&
+      diff.field === "created" &&
+      diff.before === null &&
+      sameSnapshot(diff.after, proposal),
+  );
+  if (statusDiffs.length !== 1 || replanCreates.length !== 1) return false;
+  const commandProposalMatches = workspace.commandProposals.filter(
+    (candidate) =>
+      candidate.id === statusDiffs[0].entityId &&
+      candidate.status === "accepted" &&
+      candidate.commandType === "propose_replan",
+  );
+  const commandProposal = commandProposalMatches[0];
+  if (commandProposalMatches.length !== 1 || commandProposal === undefined) {
+    return false;
+  }
+  if (
+    receipt.baseRevision !== commandProposal.baseRevision + 1 ||
+    proposal.baseRevision !== receipt.baseRevision ||
+    proposal.createdAt !== receipt.createdAt ||
+    proposal.createdBy !== receipt.actorId ||
+    !jsonRecord(commandProposal.payload) ||
+    commandProposal.payload.type !== "propose_replan" ||
+    !jsonRecord(commandProposal.payload.proposal)
+  ) return false;
+  const submittedProposal = commandProposal.payload.proposal;
+  for (const field of [
+    "id",
+    "localDate",
+    "baseCommitmentId",
+    "reasonCodes",
+    "proposedSlots",
+    "status",
+  ] as const) {
+    if (!sameSnapshot(submittedProposal[field], proposal[field])) return false;
+  }
+  const submitReceipts = workspace.commandReceipts.filter(
+    (candidate) =>
+      candidate.status === "applied" &&
+      candidate.commandType === "submit_command_proposal" &&
+      candidate.baseRevision === commandProposal.baseRevision &&
+      candidate.revision === commandProposal.baseRevision + 1,
+  );
+  const submitReceipt = submitReceipts[0];
+  if (
+    submitReceipts.length !== 1 ||
+    submitReceipt === undefined ||
+    submitReceipt.actorKind !== "agent" ||
+    submitReceipt.actorId !== commandProposal.agentActorId ||
+    submitReceipt.createdAt !== commandProposal.createdAt ||
+    !submitReceipt.source.verified ||
+    !submitReceipt.source.capabilities.includes("submit_proposal")
+  ) return false;
+  const openSnapshot = { ...commandProposal, status: "open" as const };
+  const submitCreates = submitReceipt.diff.filter(
+    (diff) =>
+      diff.entity === "CommandProposal" &&
+      diff.entityId === commandProposal.id &&
+      diff.field === "created" &&
+      diff.before === null &&
+      sameSnapshot(diff.after, openSnapshot),
+  );
+  const expectedSubmit = {
+    type: "submit_command_proposal",
+    proposalId: commandProposal.id,
+    command: commandProposal.payload,
+    rationale: commandProposal.rationale,
+  };
+  const expectedAccept = {
+    type: "accept_command_proposal",
+    proposalId: commandProposal.id,
+  };
+  const { receiptHash: submitHash, ...submitBase } = submitReceipt;
+  const { receiptHash: acceptHash, ...acceptBase } = receipt;
+  return (
+    submitCreates.length === 1 &&
+    submitReceipt.payloadHash ===
+      (await stableHash(expectedSubmit as unknown as JsonValue)) &&
+    submitHash === (await stableHash(submitBase as unknown as JsonValue)) &&
+    receipt.payloadHash ===
+      (await stableHash(expectedAccept as unknown as JsonValue)) &&
+    acceptHash === (await stableHash(acceptBase as unknown as JsonValue))
+  );
 }
 
 function protectedRecordSnapshot(
@@ -3147,16 +3262,27 @@ export async function applyCommandHandler(
           receipt.revision === creationBaseRevision + 1,
       );
       const creationReceipt = directRevisionReceipts[0];
+      const isDirectReplanCreation =
+        creationReceipt !== undefined &&
+        creationReceipt.commandType === "propose_replan" &&
+        creationReceipt.diff.length === 1 &&
+        creationReceipt.diff[0].entity === "ReplanProposal" &&
+        creationReceipt.diff[0].entityId === proposal.id &&
+        creationReceipt.diff[0].field === "created" &&
+        creationReceipt.diff[0].before === null &&
+        sameSnapshot(creationReceipt.diff[0].after, proposal);
+      const isAcceptedProposalCreation =
+        creationReceipt === undefined
+          ? false
+          : await isAcceptedCommandProposalReplanReceipt(
+              workspace,
+              proposal,
+              creationReceipt,
+            );
       if (
         directRevisionReceipts.length !== 1 ||
         creationReceipt === undefined ||
-        creationReceipt.commandType !== "propose_replan" ||
-        creationReceipt.diff.length !== 1 ||
-        creationReceipt.diff[0].entity !== "ReplanProposal" ||
-        creationReceipt.diff[0].entityId !== proposal.id ||
-        creationReceipt.diff[0].field !== "created" ||
-        creationReceipt.diff[0].before !== null ||
-        !sameSnapshot(creationReceipt.diff[0].after, proposal)
+        (!isDirectReplanCreation && !isAcceptedProposalCreation)
       ) {
         return rejection(workspace, context, "INVALID_COMMAND", {
           reason: `Replan Proposal ${proposal.id} lacks its unique direct creation receipt.`,
@@ -3165,17 +3291,16 @@ export async function applyCommandHandler(
         });
       }
       const { receiptHash, ...receiptBase } = creationReceipt;
-      const expectedPayloadHash = await stableHash({
-        type: "propose_replan",
-        proposal,
-      } as unknown as JsonValue);
-      const expectedReceiptHash = await stableHash(
-        receiptBase as unknown as JsonValue,
-      );
-      if (
-        creationReceipt.payloadHash !== expectedPayloadHash ||
-        receiptHash !== expectedReceiptHash
-      ) {
+      const directReceiptHashIsValid =
+        !isDirectReplanCreation ||
+        (creationReceipt.payloadHash ===
+          (await stableHash({
+            type: "propose_replan",
+            proposal,
+          } as unknown as JsonValue)) &&
+          receiptHash ===
+            (await stableHash(receiptBase as unknown as JsonValue)));
+      if (!directReceiptHashIsValid) {
         return rejection(workspace, context, "INVALID_COMMAND", {
           reason: `Replan Proposal ${proposal.id} has an invalid creation receipt hash.`,
           gate: `replan:${proposal.id}:creation_receipt`,
@@ -5116,6 +5241,110 @@ export async function applyCommandHandler(
         closedProject,
         prepared.artifacts,
       );
+    }
+
+    case "submit_command_proposal": {
+      if (command.rationale.trim().length === 0) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason: "A command proposal requires a non-empty rationale.",
+          gate: `command_proposal:${command.proposalId}:rationale`,
+          permittedNextCommand: "submit_command_proposal",
+        });
+      }
+      const collision = entityIdCollision(workspace, command.proposalId, [
+        { entity: "CommandReceipt", id: context.commandId },
+      ]);
+      if (collision !== undefined) {
+        return entityAlreadyExists(
+          workspace,
+          context,
+          collision,
+          command.proposalId,
+          "submit_command_proposal",
+        );
+      }
+      if (
+        command.command.type === "propose_replan" &&
+        ((command.command.proposal.baseRevision !== workspace.revision &&
+          context.origin !== "sync") ||
+          command.command.proposal.createdBy !== context.actorId ||
+          command.command.proposal.createdAt !== context.now)
+      ) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason:
+            "A proposed Replan must be generated by the submitting Agent from the current Workspace revision.",
+          gate: `command_proposal:${command.proposalId}:replan_provenance`,
+          permittedNextCommand: "regenerate_replan",
+        });
+      }
+      return {
+        ok: true,
+        workspace: {
+          ...workspace,
+          commandProposals: [
+            ...workspace.commandProposals,
+            {
+              id: command.proposalId,
+              commandType: command.command.type,
+              payload: structuredClone(command.command) as unknown as JsonValue,
+              baseRevision: workspace.revision,
+              rationale: command.rationale,
+              agentActorId: context.actorId,
+              createdAt: context.now,
+              status: "open",
+            },
+          ],
+        },
+      };
+    }
+
+    case "accept_command_proposal":
+      return rejection(workspace, context, "COMMAND_NOT_IMPLEMENTED", {
+        reason:
+          "Proposal acceptance must be orchestrated atomically by the command engine.",
+        gate: `command_proposal:${command.proposalId}:atomic_acceptance`,
+        permittedNextCommand: "accept_command_proposal",
+      });
+
+    case "dismiss_command_proposal": {
+      const matches = workspace.commandProposals.filter(
+        ({ id }) => id === command.proposalId,
+      );
+      if (matches.length === 0) {
+        return entityNotFound(
+          workspace,
+          context,
+          "CommandProposal",
+          command.proposalId,
+          "submit_command_proposal",
+        );
+      }
+      if (matches.length !== 1) {
+        return duplicateEntityIdentity(
+          workspace,
+          context,
+          "CommandProposal",
+          command.proposalId,
+        );
+      }
+      if (matches[0].status !== "open") {
+        return rejection(workspace, context, "REVISION_CONFLICT", {
+          reason: `Command Proposal ${command.proposalId} is no longer open.`,
+          gate: `command_proposal:${command.proposalId}:status`,
+          permittedNextCommand: "read_current_command_proposal",
+        });
+      }
+      return {
+        ok: true,
+        workspace: {
+          ...workspace,
+          commandProposals: workspace.commandProposals.map((proposal) =>
+            proposal.id === command.proposalId
+              ? { ...proposal, status: "dismissed" as const }
+              : proposal,
+          ),
+        },
+      };
     }
 
     case "archive_project": {

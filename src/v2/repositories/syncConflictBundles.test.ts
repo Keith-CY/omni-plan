@@ -1755,7 +1755,7 @@ describe("sync conflict effect bundles", () => {
       briefSnapshot: oldBrief,
       committedScope: oldBrief.firstScope,
       appetiteStart: oldBrief.createdAt,
-      appetiteEnd: "2026-07-13T00:00:00.000Z",
+      appetiteEnd: "2026-07-12T00:01:00.000Z",
       actorId: "human-1",
       approvedAt: oldBrief.createdAt,
     });
@@ -4509,6 +4509,529 @@ describe("sync conflict effect bundles", () => {
       code: "SOURCE_NOT_AUTHORIZED",
       gate: "sync_conflict:conflict-self-asserted-provenance:provenance_authority",
     });
+  });
+
+  it("rejects an accepted Agent proposal whose matching submit is only a same-revision sibling", async () => {
+    const workspaceId = "workspace-agent-proposal-sibling";
+    const base = createEmptyWorkspaceV2(workspaceId);
+    const brief = buildDirectionBrief({
+      id: "project-agent-sibling:direction-brief:1",
+      projectId: "project-agent-sibling",
+      version: 1,
+      audienceAndProblem: "Operators cannot see the next bounded action.",
+      successEvidence: "Five operators finish without coaching.",
+      appetiteSeconds: 60,
+      validationMethod: "Observe five bounded runs.",
+      firstScope: [{
+        id: "scope-agent-sibling",
+        title: "Bounded start",
+        description: "Only the approved start.",
+      }],
+      noGoOrKill: "Stop if coaching is required.",
+      advancedNotes: "",
+      createdAt: "2026-07-12T00:00:00.000Z",
+      updatedAt: "2026-07-12T00:00:00.000Z",
+    });
+    const bet = buildBetVersion({
+      id: "bet-agent-sibling",
+      projectId: "project-agent-sibling",
+      version: 1,
+      briefId: brief.id,
+      briefHash: await stableHash(brief as unknown as JsonValue),
+      briefSnapshot: structuredClone(brief),
+      committedScope: structuredClone(brief.firstScope),
+      appetiteStart: "2026-07-12T00:00:00.000Z",
+      appetiteEnd: "2026-07-12T00:01:00.000Z",
+      actorId: "human-seed",
+      approvedAt: "2026-07-12T00:00:00.000Z",
+    });
+    base.directionBriefs.push(brief);
+    base.bets.push(bet);
+    base.projects.push(buildProjectV2({
+      id: "project-agent-sibling",
+      name: "Agent sibling ancestry",
+      stage: "executing",
+      activeDirectionBriefId: brief.id,
+      activeBetId: bet.id,
+      createdAt: brief.createdAt,
+      updatedAt: brief.updatedAt,
+    }));
+
+    const directionCommand = (successEvidence: string) => ({
+      type: "update_direction" as const,
+      projectId: "project-agent-sibling",
+      brief: {
+        id: brief.id,
+        projectId: brief.projectId,
+        audienceAndProblem: brief.audienceAndProblem,
+        successEvidence,
+        appetiteSeconds: brief.appetiteSeconds,
+        validationMethod: brief.validationMethod,
+        firstScope: structuredClone(brief.firstScope),
+        noGoOrKill: brief.noGoOrKill,
+        advancedNotes: brief.advancedNotes,
+      },
+    });
+    const humanContext = (
+      commandId: string,
+      expectedRevision: number,
+      now: string,
+    ): CommandContext => ({
+      commandId,
+      expectedRevision,
+      actorId: "human-agent-sibling",
+      actorKind: "human",
+      origin: "ui",
+      source: {
+        sourceId: "verified-human-agent-sibling",
+        verified: true,
+        capabilities: ["human_decision"],
+      },
+      now,
+    });
+    const boundaryCommand = {
+      type: "record_bet_boundary" as const,
+      projectId: "project-agent-sibling",
+      boundary: "expired" as const,
+      triggerKey: `${bet.id}:expired`,
+    };
+    const boundary = await executeCommand(
+      base,
+      boundaryCommand,
+      {
+        commandId: "local-bet-boundary",
+        expectedRevision: 0,
+        actorId: "system-clock",
+        actorKind: "system",
+        origin: "agent",
+        source: {
+          sourceId: "verified-system-clock",
+          verified: true,
+          capabilities: ["system_time"],
+        },
+        now: "2026-07-12T00:01:01.000Z",
+      },
+    );
+    if (!boundary.ok) {
+      throw new Error(
+        `Expected local Bet boundary: ${JSON.stringify(boundary.rejection)}`,
+      );
+    }
+    const localRebetCommand = {
+      type: "place_bet" as const,
+      projectId: "project-agent-sibling",
+      betId: "bet-agent-sibling-local",
+      start: "2026-07-12T00:01:10.000Z",
+    };
+    const local = await executeCommand(
+      boundary.workspace,
+      localRebetCommand,
+      humanContext("local-rebet", 1, localRebetCommand.start),
+    );
+    if (!local.ok) throw new Error("Expected local Re-bet");
+
+    const proposedCommand = directionCommand(
+      "Seven operators finish without coaching.",
+    );
+    const submitCommand = {
+      type: "submit_command_proposal" as const,
+      proposalId: "proposal-agent-sibling",
+      command: proposedCommand,
+      rationale: "Bounded Agent recommendation for human review.",
+    };
+    const submitted = await executeCommand(base, submitCommand, {
+      commandId: "submit-agent-sibling",
+      expectedRevision: 0,
+      actorId: "agent-planner",
+      actorKind: "agent",
+      origin: "agent",
+      source: {
+        sourceId: "verified-agent-planner",
+        verified: true,
+        capabilities: ["submit_proposal"],
+      },
+      now: "2026-07-12T00:00:30.000Z",
+    });
+    if (!submitted.ok) {
+      throw new Error(
+        `Expected Agent proposal submission: ${JSON.stringify(submitted.rejection)}`,
+      );
+    }
+    const acceptCommand = {
+      type: "accept_command_proposal" as const,
+      proposalId: submitCommand.proposalId,
+    };
+    const accepted = await executeCommand(
+      submitted.workspace,
+      acceptCommand,
+      humanContext("accept-agent-sibling", 1, "2026-07-12T00:00:40.000Z"),
+    );
+    if (!accepted.ok) throw new Error("Expected human proposal acceptance");
+    const sibling = await executeCommand(
+      base,
+      {
+        type: "capture_inbox",
+        id: "inbox-sibling-parent",
+        text: "Unrelated same-revision sibling.",
+      },
+      {
+        commandId: "unrelated-sibling-parent",
+        expectedRevision: 0,
+        actorId: "agent-capture",
+        actorKind: "agent",
+        origin: "agent",
+        source: {
+          sourceId: "verified-agent-capture",
+          verified: true,
+          capabilities: ["capture_inbox"],
+        },
+        now: "2026-07-12T00:00:35.000Z",
+      },
+    );
+    if (!sibling.ok) throw new Error("Expected unrelated sibling operation");
+
+    const createOperation = (input: {
+      deviceId: string;
+      operationId: string;
+      command: V2Command;
+      receipt: CommandReceipt;
+      previousOperationHash?: string;
+    }) => createSyncOperationV2({
+      workspaceId,
+      deviceId: input.deviceId,
+      sequence: 1,
+      operationId: input.operationId,
+      command: input.command,
+      receipt: input.receipt,
+      ...(input.previousOperationHash === undefined
+        ? {}
+        : { previousOperationHash: input.previousOperationHash }),
+      passphrase: PASSPHRASE,
+    });
+    const boundaryOperation = await createOperation({
+      deviceId: "local-boundary-device",
+      operationId: "operation-local-bet-boundary",
+      command: boundaryCommand,
+      receipt: boundary.receipt,
+    });
+    const localOperation = await createOperation({
+      deviceId: "local-rebet-device",
+      operationId: "operation-local-rebet",
+      command: localRebetCommand,
+      receipt: local.receipt,
+      previousOperationHash: boundaryOperation.operationHash,
+    });
+    const submitOperation = await createOperation({
+      deviceId: "agent-submit-device",
+      operationId: "operation-agent-submit",
+      command: submitCommand,
+      receipt: submitted.receipt,
+    });
+    const siblingOperation = await createOperation({
+      deviceId: "sibling-device",
+      operationId: "operation-unrelated-sibling",
+      command: {
+        type: "capture_inbox",
+        id: "inbox-sibling-parent",
+        text: "Unrelated same-revision sibling.",
+      },
+      receipt: sibling.receipt,
+    });
+    const legitimateAcceptOperation = await createOperation({
+      deviceId: "legitimate-accept-device",
+      operationId: "operation-legitimate-agent-accept",
+      command: acceptCommand,
+      receipt: accepted.receipt,
+      previousOperationHash: submitOperation.operationHash,
+    });
+    const forgedAcceptOperation = await createOperation({
+      deviceId: "forged-accept-device",
+      operationId: "operation-forged-agent-accept",
+      command: acceptCommand,
+      receipt: accepted.receipt,
+      previousOperationHash: siblingOperation.operationHash,
+    });
+    const verifyOperation = (created: Awaited<ReturnType<typeof createOperation>>) =>
+      decryptAndVerifySyncOperationV2({
+        envelope: created.envelope,
+        path: created.path,
+        passphrase: PASSPHRASE,
+        expectedWorkspaceId: workspaceId,
+        expectedOperationHash: created.operationHash,
+      });
+    const [
+      boundaryReplay,
+      localReplay,
+      submitReplay,
+      siblingReplay,
+      legitimateAcceptReplay,
+      forgedAcceptReplay,
+    ] = await Promise.all([
+      boundaryOperation,
+      localOperation,
+      submitOperation,
+      siblingOperation,
+      legitimateAcceptOperation,
+      forgedAcceptOperation,
+    ].map(verifyOperation));
+    const manifestHead = (replay: VerifiedSyncReplay) => ({
+      sequence: replay.sequence,
+      operationHash: replay.operationHash,
+      revision: replay.receipt.revision,
+      updatedAt: replay.receipt.createdAt,
+    });
+    const legitimateHistory = verifySyncHistoryV2(
+      createSyncManifestV2({
+        workspaceId,
+        heads: {
+          [boundaryReplay.deviceId]: manifestHead(boundaryReplay),
+          [localReplay.deviceId]: manifestHead(localReplay),
+          [submitReplay.deviceId]: manifestHead(submitReplay),
+          [legitimateAcceptReplay.deviceId]: manifestHead(
+            legitimateAcceptReplay,
+          ),
+        },
+        updatedAt: local.receipt.createdAt,
+      }),
+      [boundaryReplay, localReplay, submitReplay, legitimateAcceptReplay],
+    );
+    const [localBranch, legitimateRemoteBranch] = await Promise.all([
+      authorizeSyncBranchV2({
+        history: legitimateHistory,
+        trustedAncestorWorkspace: base,
+        headOperationHash: localReplay.operationHash,
+      }),
+      authorizeSyncBranchV2({
+        history: legitimateHistory,
+        trustedAncestorWorkspace: base,
+        headOperationHash: legitimateAcceptReplay.operationHash,
+      }),
+    ]);
+    const boundaryBundle = await projectProtectedEffectBundle({
+      workspace: base,
+      command: boundaryCommand,
+      commandId: boundary.receipt.commandId,
+      authorityRootOperationHash: boundaryReplay.operationHash,
+      sourceOperationHash: boundaryReplay.operationHash,
+      receiptHash: boundary.receipt.receiptHash,
+      payloadHash: boundary.receipt.payloadHash,
+      createdAt: boundary.receipt.createdAt,
+      diff: boundary.receipt.diff,
+    });
+    const rebetBundle = await projectProtectedEffectBundle({
+      workspace: boundary.workspace,
+      command: localRebetCommand,
+      commandId: local.receipt.commandId,
+      authorityRootOperationHash: localReplay.operationHash,
+      sourceOperationHash: localReplay.operationHash,
+      receiptHash: local.receipt.receiptHash,
+      payloadHash: local.receipt.payloadHash,
+      createdAt: local.receipt.createdAt,
+      diff: local.receipt.diff,
+    });
+    const legitimateRemoteBundle = await projectProtectedEffectBundle({
+      workspace: submitted.workspace,
+      command: acceptCommand,
+      commandId: accepted.receipt.commandId,
+      authorityRootOperationHash: legitimateAcceptReplay.operationHash,
+      sourceOperationHash: legitimateAcceptReplay.operationHash,
+      receiptHash: accepted.receipt.receiptHash,
+      payloadHash: accepted.receipt.payloadHash,
+      createdAt: accepted.receipt.createdAt,
+      diff: accepted.receipt.diff,
+    });
+    if (
+      boundaryBundle === undefined ||
+      rebetBundle === undefined ||
+      legitimateRemoteBundle === undefined
+    ) {
+      throw new Error("Expected local Re-bet and remote Direction bundles");
+    }
+    const localBundle = await combineProtectedEffectBundles([
+      boundaryBundle,
+      rebetBundle,
+    ]);
+    const localValue = local.workspace.bets.find(
+      ({ id }) => id === localRebetCommand.betId,
+    );
+    const remoteValue = accepted.workspace.bets.find(({ id }) => id === bet.id);
+    if (localValue === undefined || remoteValue === undefined) {
+      throw new Error("Expected both invalidated Bet snapshots");
+    }
+    const affectedRecordIds = [...new Set([
+      ...protectedEffectBundleTouchedEntityIds(localBundle),
+      ...protectedEffectBundleTouchedEntityIds(legitimateRemoteBundle),
+    ])].sort();
+    const affectedProjectIds = [...new Set([
+      ...protectedEffectBundleAffectedProjectIds(localBundle),
+      ...protectedEffectBundleAffectedProjectIds(legitimateRemoteBundle),
+    ])].sort();
+    const openCommand = {
+      type: "open_sync_conflict" as const,
+      conflict: {
+        id: "conflict-agent-sibling",
+        recordType: "bet" as const,
+        recordId: localRebetCommand.betId,
+        remoteRecordId: bet.id,
+        logicalKey: localBundle.logicalKey,
+        commonAncestorHash: `genesis:${workspaceId}`,
+        localValue: localValue as unknown as JsonValue,
+        remoteValue: remoteValue as unknown as JsonValue,
+        affectedProjectIds,
+        affectedRecordIds,
+        localBundle,
+        remoteBundle: legitimateRemoteBundle,
+      },
+    };
+    const openContext: CommandContext = {
+      commandId: "open-agent-sibling-conflict",
+      expectedRevision: local.workspace.revision,
+      actorId: "sync-conflict-detector",
+      actorKind: "system",
+      origin: "agent",
+      source: {
+        sourceId: `sync-merge:genesis:${workspaceId}`,
+        verified: true,
+        capabilities: ["open_conflict"],
+      },
+      now: "2026-07-12T00:03:00.000Z",
+    };
+    const openAuthority = await authorizeConflictOpenFromBranchesV2({
+      localBranch,
+      remoteBranch: legitimateRemoteBranch,
+      currentWorkspace: local.workspace,
+      command: openCommand,
+      context: openContext,
+    });
+    const opened = await executeCommand(
+      local.workspace,
+      openCommand,
+      openContext,
+      { authorizedConflictOpen: openAuthority },
+    );
+    if (!opened.ok) {
+      throw new Error(
+        `Expected legitimate conflict open: ${JSON.stringify(opened.rejection)}`,
+      );
+    }
+
+    const legitimateOpenOperation = await createOperation({
+      deviceId: "legitimate-open-device",
+      operationId: "operation-legitimate-agent-open",
+      command: openCommand,
+      receipt: opened.receipt,
+      previousOperationHash: localReplay.operationHash,
+    });
+    const legitimateOpenReplay = await verifyOperation(
+      legitimateOpenOperation,
+    );
+    const persistedLegitimateHistory = verifySyncHistoryV2(
+      createSyncManifestV2({
+        workspaceId,
+        heads: {
+          [boundaryReplay.deviceId]: manifestHead(boundaryReplay),
+          [localReplay.deviceId]: manifestHead(localReplay),
+          [submitReplay.deviceId]: manifestHead(submitReplay),
+          [legitimateAcceptReplay.deviceId]: manifestHead(
+            legitimateAcceptReplay,
+          ),
+          [legitimateOpenReplay.deviceId]: manifestHead(legitimateOpenReplay),
+        },
+        updatedAt: opened.receipt.createdAt,
+      }),
+      [
+        boundaryReplay,
+        localReplay,
+        submitReplay,
+        legitimateAcceptReplay,
+        legitimateOpenReplay,
+      ],
+    );
+    await expect(
+      authorizeSyncBranchV2({
+        history: persistedLegitimateHistory,
+        trustedAncestorWorkspace: local.workspace,
+        ancestorOperationHash: localReplay.operationHash,
+        headOperationHash: legitimateOpenReplay.operationHash,
+      }),
+    ).resolves.toMatchObject({
+      headOperationHash: legitimateOpenReplay.operationHash,
+    });
+
+    const forgedRemoteBundle = structuredClone(legitimateRemoteBundle);
+    forgedRemoteBundle.operations[0] = {
+      ...forgedRemoteBundle.operations[0],
+      authorityRootOperationHash: forgedAcceptReplay.operationHash,
+      sourceOperationHash: forgedAcceptReplay.operationHash,
+    };
+    const rehashedForgedRemoteBundle = await rehashBundle(forgedRemoteBundle);
+    const forgedOpenCommand = structuredClone(openCommand);
+    forgedOpenCommand.conflict.remoteBundle = rehashedForgedRemoteBundle;
+    const forgedOpenReceipt = structuredClone(opened.receipt);
+    forgedOpenReceipt.payloadHash = await stableHash(
+      forgedOpenCommand as unknown as JsonValue,
+    );
+    forgedOpenReceipt.diff = forgedOpenReceipt.diff.map((diff) => {
+      if (
+        diff.entity !== "SyncConflictRecord" ||
+        diff.entityId !== forgedOpenCommand.conflict.id ||
+        diff.field !== "created" ||
+        diff.after === null ||
+        Array.isArray(diff.after) ||
+        typeof diff.after !== "object"
+      ) return diff;
+      return {
+        ...diff,
+        after: {
+          ...structuredClone(diff.after),
+          remoteBundle: rehashedForgedRemoteBundle,
+        } as unknown as JsonValue,
+      };
+    });
+    const { receiptHash: _oldReceiptHash, ...forgedOpenReceiptBase } =
+      forgedOpenReceipt;
+    forgedOpenReceipt.receiptHash = await stableHash(
+      forgedOpenReceiptBase as unknown as JsonValue,
+    );
+    const forgedOpenOperation = await createOperation({
+      deviceId: "forged-open-device",
+      operationId: "operation-forged-agent-sibling-open",
+      command: forgedOpenCommand,
+      receipt: forgedOpenReceipt,
+      previousOperationHash: localReplay.operationHash,
+    });
+    const forgedOpenReplay = await verifyOperation(forgedOpenOperation);
+    const forgedHistory = verifySyncHistoryV2(
+      createSyncManifestV2({
+        workspaceId,
+        heads: {
+          [boundaryReplay.deviceId]: manifestHead(boundaryReplay),
+          [localReplay.deviceId]: manifestHead(localReplay),
+          [submitReplay.deviceId]: manifestHead(submitReplay),
+          [siblingReplay.deviceId]: manifestHead(siblingReplay),
+          [forgedAcceptReplay.deviceId]: manifestHead(forgedAcceptReplay),
+          [forgedOpenReplay.deviceId]: manifestHead(forgedOpenReplay),
+        },
+        updatedAt: forgedOpenReceipt.createdAt,
+      }),
+      [
+        boundaryReplay,
+        localReplay,
+        submitReplay,
+        siblingReplay,
+        forgedAcceptReplay,
+        forgedOpenReplay,
+      ],
+    );
+
+    await expect(
+      authorizeSyncBranchV2({
+        history: forgedHistory,
+        trustedAncestorWorkspace: local.workspace,
+        ancestorOperationHash: localReplay.operationHash,
+        headOperationHash: forgedOpenReplay.operationHash,
+      }),
+    ).rejects.toMatchObject({ code: "RECEIPT_MISMATCH" });
   });
 
   it("fails atomically when a locally owned create drifted after projection", async () => {

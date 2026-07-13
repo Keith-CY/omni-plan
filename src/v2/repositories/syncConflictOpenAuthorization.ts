@@ -7,7 +7,7 @@ import type { JsonValue, WorkspaceV2 } from "../domain/types";
 import {
   applyRemoteProtectedEffectBundle,
   combineProtectedEffectBundles,
-  isKnownUnprotectedLifecycleWriter,
+  isKnownUnprotectedLifecycleWriterForView,
   projectProtectedEffectBundle,
   type ProtectedEffectBundle,
 } from "./syncConflictBundles";
@@ -198,17 +198,26 @@ const protectedProjectFields = new Set([
   "holds",
 ]);
 
-function replayTouchesProtectedLifecycle(replay: AuthorizedSyncReplay): boolean {
+async function replayTouchesProtectedLifecycle(
+  replay: AuthorizedSyncReplay,
+  workspace: WorkspaceV2,
+): Promise<boolean> {
   const touches = replay.receipt.diff.some(
     ({ entity, field }) =>
       protectedRecordEntities.has(entity) ||
       (entity === "ProjectV2" && protectedProjectFields.has(field)),
   );
-  return touches && !isKnownUnprotectedLifecycleWriter({
+  return touches && !(await isKnownUnprotectedLifecycleWriterForView({
+    workspace,
     command: replay.command,
+    commandId: replay.receipt.commandId,
+    authorityRootOperationHash: replay.authorityRoot.operationHash,
+    sourceOperationHash: replay.operationHash,
+    receiptHash: replay.receipt.receiptHash,
+    payloadHash: replay.receipt.payloadHash,
     createdAt: replay.receipt.createdAt,
     diff: replay.receipt.diff,
-  });
+  }));
 }
 
 interface ProjectedBranch {
@@ -289,7 +298,10 @@ async function projectAuthorizedBranch(input: {
         createdAt: replay.receipt.createdAt,
         diff: replay.receipt.diff,
       });
-      if (projected === undefined && replayTouchesProtectedLifecycle(replay)) {
+      if (
+        projected === undefined &&
+        (await replayTouchesProtectedLifecycle(replay, workspace))
+      ) {
         throw new ConflictOpenAuthorizationError(
           "UNKNOWN_PROTECTED_WRITER",
           `Replay ${replay.operationHash} writes protected lifecycle state without a known projection.`,

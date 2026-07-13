@@ -3,10 +3,15 @@ import type { ISODate } from "@/domain/types";
 import { canonicalJson, sha256Hex } from "../../domain/canonical";
 import {
   isKnownV2CommandType,
+  isProposableV2Command,
   type CommandContext,
   type CommandResult,
   type V2Command,
 } from "../domain/commands";
+import {
+  verifyAcceptedCommandProposalReceipt,
+  type VerifiedAcceptedCommandProposal,
+} from "../domain/agentAuthority";
 import { stableHash } from "../domain/stableHash";
 import { validateWorkspaceInvariants } from "../domain/invariants";
 import type {
@@ -1341,11 +1346,349 @@ function requireUniqueHumanProofOrConflictTarget(input: {
   );
 }
 
-function assertBetProvenance(
+function acceptedDirectionProvenanceError(betId: string): never {
+  throw new WorkspaceTransferError(
+    "BACKUP_INVALID",
+    `BetVersion ${betId} has invalid accepted Direction proposal provenance.`,
+  );
+}
+
+function assertProjectFieldHistoryEndsAt(input: {
+  workspace: Readonly<WorkspaceV2>;
+  proof: Readonly<CommandReceipt>;
+  projectId: string;
+  field: "activeDirectionBriefId" | "holds" | "updatedAt";
+  after: JsonValue;
+  current: unknown;
+  betId: string;
+}): void {
+  let expected = input.after;
+  for (const receipt of input.workspace.commandReceipts) {
+    if (receipt.revision <= input.proof.revision) continue;
+    const changes = receipt.diff.filter(
+      ({ entity, entityId, field }) =>
+        entity === "ProjectV2" &&
+        entityId === input.projectId &&
+        field === input.field,
+    );
+    if (
+      changes.length > 1 ||
+      (changes[0] !== undefined &&
+        !sameCanonical(changes[0].before, expected))
+    ) {
+      acceptedDirectionProvenanceError(input.betId);
+    }
+    if (changes[0] !== undefined) expected = changes[0].after;
+  }
+  if (!sameCanonical(expected, input.current)) {
+    acceptedDirectionProvenanceError(input.betId);
+  }
+}
+
+function assertCommandProposalStatusHistoryEndsAt(input: {
+  workspace: Readonly<WorkspaceV2>;
+  proof: Readonly<CommandReceipt>;
+  proposalId: string;
+  after: JsonValue;
+  betId: string;
+}): void {
+  const proposals = input.workspace.commandProposals.filter(
+    ({ id }) => id === input.proposalId,
+  );
+  let expected = input.after;
+  for (const receipt of input.workspace.commandReceipts) {
+    if (receipt.revision <= input.proof.revision) continue;
+    const changes = receipt.diff.filter(
+      ({ entity, entityId, field }) =>
+        entity === "CommandProposal" &&
+        entityId === input.proposalId &&
+        field === "status",
+    );
+    const change = changes[0];
+    if (
+      changes.length > 1 ||
+      (change !== undefined &&
+        (!sameCanonical(change.before, expected) ||
+          change.before !== "open" ||
+          (change.after !== "accepted" &&
+            change.after !== "dismissed" &&
+            change.after !== "stale")))
+    ) {
+      acceptedDirectionProvenanceError(input.betId);
+    }
+    if (change !== undefined) expected = change.after;
+  }
+  if (
+    proposals.length !== 1 ||
+    proposals[0] === undefined ||
+    !sameCanonical(expected, proposals[0].status)
+  ) {
+    acceptedDirectionProvenanceError(input.betId);
+  }
+}
+
+function assertAcceptedProposalStatusEffects(input: {
+  workspace: Readonly<WorkspaceV2>;
+  proof: Readonly<CommandReceipt>;
+  accepted: Readonly<VerifiedAcceptedCommandProposal>;
+  betId: string;
+}): void {
+  const statusDiffs = input.proof.diff.filter(
+    ({ entity, field }) =>
+      entity === "CommandProposal" && field === "status",
+  );
+  const targetDiffs = statusDiffs.filter(
+    ({ entityId }) => entityId === input.accepted.proposal.id,
+  );
+  if (
+    targetDiffs.length !== 1 ||
+    targetDiffs[0]?.before !== "open" ||
+    targetDiffs[0]?.after !== "accepted"
+  ) {
+    acceptedDirectionProvenanceError(input.betId);
+  }
+
+  const seenProposalIds = new Set<string>();
+  for (const diff of statusDiffs) {
+    if (diff.entityId === input.accepted.proposal.id) continue;
+    if (
+      seenProposalIds.has(diff.entityId) ||
+      diff.before !== "open" ||
+      diff.after !== "stale"
+    ) {
+      acceptedDirectionProvenanceError(input.betId);
+    }
+    seenProposalIds.add(diff.entityId);
+    assertCommandProposalStatusHistoryEndsAt({
+      workspace: input.workspace,
+      proof: input.proof,
+      proposalId: diff.entityId,
+      after: diff.after,
+      betId: input.betId,
+    });
+  }
+}
+
+/**
+ * An accepted proposal receipt only hashes the outer acceptance command. Bind
+ * the nested update_direction payload to the same material effect shape as the
+ * direct handler before trusting that receipt as a Bet invalidation proof.
+ */
+function assertAcceptedMaterialDirectionEffects(input: {
+  workspace: Readonly<WorkspaceV2>;
+  bet: Readonly<WorkspaceV2["bets"][number]>;
+  proof: Readonly<CommandReceipt>;
+  accepted: Readonly<VerifiedAcceptedCommandProposal>;
+}): void {
+  const { workspace, bet, proof, accepted } = input;
+  const command = accepted.command;
+  if (
+    !isProposableV2Command(command) ||
+    command.type !== "update_direction" ||
+    command.projectId !== bet.projectId ||
+    command.brief.projectId !== bet.projectId
+  ) {
+    acceptedDirectionProvenanceError(bet.id);
+  }
+
+  const project = workspace.projects.find(({ id }) => id === bet.projectId);
+  const oldBrief = workspace.directionBriefs.find(
+    ({ id }) => id === command.brief.id,
+  );
+  const createdBriefDiffs = proof.diff.filter(
+    ({ entity, field }) =>
+      entity === "DirectionBrief" && field === "created",
+  );
+  const createdBriefDiff = createdBriefDiffs[0];
+  const activeBriefDiffs = proof.diff.filter(
+    ({ entity, entityId, field }) =>
+      entity === "ProjectV2" &&
+      entityId === bet.projectId &&
+      field === "activeDirectionBriefId",
+  );
+  const holdsDiffs = proof.diff.filter(
+    ({ entity, entityId, field }) =>
+      entity === "ProjectV2" &&
+      entityId === bet.projectId &&
+      field === "holds",
+  );
+  const updatedAtDiffs = proof.diff.filter(
+    ({ entity, entityId, field }) =>
+      entity === "ProjectV2" &&
+      entityId === bet.projectId &&
+      field === "updatedAt",
+  );
+  const activeBriefDiff = activeBriefDiffs[0];
+  const holdsDiff = holdsDiffs[0];
+  const updatedAtDiff = updatedAtDiffs[0];
+  if (
+    project === undefined ||
+    oldBrief === undefined ||
+    oldBrief.projectId !== bet.projectId ||
+    createdBriefDiffs.length !== 1 ||
+    createdBriefDiff === undefined ||
+    activeBriefDiffs.length !== 1 ||
+    activeBriefDiff === undefined ||
+    holdsDiffs.length !== 1 ||
+    holdsDiff === undefined ||
+    updatedAtDiffs.length !== 1 ||
+    updatedAtDiff === undefined ||
+    activeBriefDiff.before !== command.brief.id ||
+    !Array.isArray(holdsDiff.before)
+  ) {
+    acceptedDirectionProvenanceError(bet.id);
+  }
+
+  const laterCreatedBriefIds = new Set(
+    workspace.commandReceipts
+      .filter(({ revision }) => revision > proof.revision)
+      .flatMap(({ diff }) =>
+        diff
+          .filter(
+            ({ entity, field }) =>
+              entity === "DirectionBrief" && field === "created",
+          )
+          .map(({ entityId }) => entityId),
+      ),
+  );
+  const previousDirectionVersion = Math.max(
+    0,
+    ...workspace.directionBriefs
+      .filter(
+        ({ id, projectId }) =>
+          projectId === bet.projectId &&
+          id !== createdBriefDiff.entityId &&
+          !laterCreatedBriefIds.has(id),
+      )
+      .map(({ version }) => version),
+  );
+  const nextVersion = previousDirectionVersion + 1;
+  const nextBriefId = `${bet.projectId}:direction-brief:${nextVersion}`;
+  const expectedBrief = {
+    ...structuredClone(command.brief),
+    id: nextBriefId,
+    version: nextVersion,
+    createdAt: proof.createdAt,
+    updatedAt: proof.createdAt,
+  };
+  const expectedHold = {
+    type: "rebet_required" as const,
+    sourceId: bet.id,
+    affectedRecordIds: [
+      bet.projectId,
+      command.brief.id,
+      nextBriefId,
+      bet.id,
+    ],
+    createdAt: proof.createdAt,
+  };
+  const expectedHolds = [
+    ...holdsDiff.before.filter(
+      (value) => !record(value) || value.type !== "rebet_required",
+    ),
+    expectedHold,
+  ];
+  const persistedBriefs = workspace.directionBriefs.filter(
+    ({ id }) => id === nextBriefId,
+  );
+  if (
+    createdBriefDiff.entityId !== nextBriefId ||
+    !sameCanonical(createdBriefDiff.before, null) ||
+    !sameCanonical(createdBriefDiff.after, expectedBrief) ||
+    persistedBriefs.length !== 1 ||
+    !sameCanonical(persistedBriefs[0], expectedBrief) ||
+    !hasOnlyEntityDiffFields({
+      receipt: proof,
+      entity: "DirectionBrief",
+      entityId: nextBriefId,
+      fields: ["created"],
+    }) ||
+    activeBriefDiff.after !== nextBriefId ||
+    !sameCanonical(holdsDiff.after, expectedHolds) ||
+    updatedAtDiff.after !== proof.createdAt ||
+    !hasOnlyEntityDiffFields({
+      receipt: proof,
+      entity: "ProjectV2",
+      entityId: bet.projectId,
+      fields: ["activeDirectionBriefId", "holds", "updatedAt"],
+    }) ||
+    !hasOnlyEntityDiffFields({
+      receipt: proof,
+      entity: "BetVersion",
+      entityId: bet.id,
+      fields: ["invalidatedAt", "invalidationReason"],
+    }) ||
+    !exactDiff({
+      receipt: proof,
+      entity: "BetVersion",
+      entityId: bet.id,
+      field: "invalidatedAt",
+      before: null,
+      after: proof.createdAt,
+    }) ||
+    !exactDiff({
+      receipt: proof,
+      entity: "BetVersion",
+      entityId: bet.id,
+      field: "invalidationReason",
+      before: null,
+      after: "Material Direction change requires Re-bet.",
+    }) ||
+    proof.diff.some(
+      ({ entity, entityId, field }) =>
+        (entity === "CommandProposal" && field !== "status") ||
+        (entity !== "CommandProposal" &&
+          !(
+            (entity === "DirectionBrief" && entityId === nextBriefId) ||
+            (entity === "ProjectV2" && entityId === bet.projectId) ||
+            (entity === "BetVersion" && entityId === bet.id)
+          )),
+    )
+  ) {
+    acceptedDirectionProvenanceError(bet.id);
+  }
+
+  assertAcceptedProposalStatusEffects({
+    workspace,
+    proof,
+    accepted,
+    betId: bet.id,
+  });
+
+  assertProjectFieldHistoryEndsAt({
+    workspace,
+    proof,
+    projectId: bet.projectId,
+    field: "activeDirectionBriefId",
+    after: activeBriefDiff.after,
+    current: project.activeDirectionBriefId,
+    betId: bet.id,
+  });
+  assertProjectFieldHistoryEndsAt({
+    workspace,
+    proof,
+    projectId: bet.projectId,
+    field: "holds",
+    after: holdsDiff.after,
+    current: project.holds,
+    betId: bet.id,
+  });
+  assertProjectFieldHistoryEndsAt({
+    workspace,
+    proof,
+    projectId: bet.projectId,
+    field: "updatedAt",
+    after: updatedAtDiff.after,
+    current: project.updatedAt,
+    betId: bet.id,
+  });
+}
+
+async function assertBetProvenance(
   workspace: Readonly<WorkspaceV2>,
   bet: Readonly<WorkspaceV2["bets"][number]>,
   reauthorizations: readonly ConflictTargetReauthorization[] = [],
-): void {
+): Promise<void> {
   const {
     invalidatedAt: _invalidatedAt,
     invalidationReason: _invalidationReason,
@@ -1406,7 +1749,11 @@ function assertBetProvenance(
       workspace,
       entity: "BetVersion",
       entityId: bet.id,
-      commandTypes: ["place_bet", "update_direction"],
+      commandTypes: [
+        "place_bet",
+        "update_direction",
+        "accept_command_proposal",
+      ],
       proves: (receipt) =>
         receipt.createdAt === bet.invalidatedAt &&
         hasOnlyEntityDiffFields({
@@ -1432,7 +1779,35 @@ function assertBetProvenance(
           after: bet.invalidationReason,
         }),
     });
-    if (invalidationProof.commandType === "update_direction") {
+    const acceptedDirectionProof =
+      invalidationProof.commandType === "accept_command_proposal"
+        ? await verifyAcceptedCommandProposalReceipt(
+            workspace,
+            invalidationProof,
+            "update_direction",
+          )
+        : undefined;
+    if (
+      invalidationProof.commandType === "accept_command_proposal" &&
+      acceptedDirectionProof === undefined
+    ) {
+      throw new WorkspaceTransferError(
+        "BACKUP_INVALID",
+        `BetVersion ${bet.id} has invalid accepted Direction proposal provenance.`,
+      );
+    }
+    if (acceptedDirectionProof !== undefined) {
+      assertAcceptedMaterialDirectionEffects({
+        workspace,
+        bet,
+        proof: invalidationProof,
+        accepted: acceptedDirectionProof,
+      });
+    }
+    if (
+      invalidationProof.commandType === "update_direction" ||
+      acceptedDirectionProof !== undefined
+    ) {
       const project = workspace.projects.find(({ id }) => id === bet.projectId);
       const createdBriefDiff = invalidationProof.diff.find(
         ({ entity, field }) =>
@@ -1980,8 +2355,10 @@ async function assertHumanCommitmentProvenance(
       );
       return reauthorization === undefined ? [] : [reauthorization];
     });
-  workspace.bets.forEach((bet) =>
-    assertBetProvenance(workspace, bet, reauthorizations),
+  await Promise.all(
+    workspace.bets.map((bet) =>
+      assertBetProvenance(workspace, bet, reauthorizations),
+    ),
   );
   workspace.dailyCommitments.forEach((commitment) =>
     assertDailyCommitmentProvenance(workspace, commitment, reauthorizations),
@@ -2040,6 +2417,17 @@ async function parseVerifiedBackup(
   }
   const candidate = candidateValue as unknown as WorkspaceBackupV2;
   assertStrictWorkspaceSchema(candidate.workspace);
+  const malformedProposal = candidate.workspace.commandProposals.find(
+    (proposal) =>
+      !isProposableV2Command(proposal.payload) ||
+      proposal.payload.type !== proposal.commandType,
+  );
+  if (malformedProposal !== undefined) {
+    throw new WorkspaceTransferError(
+      "BACKUP_INVALID",
+      `CommandProposal ${malformedProposal.id} does not contain one exact allowlisted V2 command.`,
+    );
+  }
   const rebuilt = await buildWorkspaceBackupV2({
     snapshot: {
       workspace: candidate.workspace,

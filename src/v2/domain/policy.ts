@@ -1,5 +1,10 @@
 import type { Id } from "@/domain/types";
 
+import {
+  agentCommandDisposition,
+  type AgentAuthorityDisposition,
+} from "./agentAuthority";
+import type { V2Command } from "./commands";
 import { createCommandRejection, type CommandRejection } from "./errors";
 import type {
   ActorKind,
@@ -22,49 +27,6 @@ export interface AuthorizationContext {
   deterministicTriggerKey?: string;
   closureValidationRebetSourceIds?: Id[];
 }
-
-const humanOnly = new Set([
-  "confirm_action_triage",
-  "confirm_project_triage",
-  "promote_action_to_project",
-  "place_bet",
-  "commit_today",
-  "accept_replan",
-  "approve_evidence_exception",
-  "complete_review",
-  "resolve_sync_conflict",
-  "accept_command_proposal",
-  "dismiss_command_proposal",
-  "close_project",
-  "abandon_project",
-]);
-
-const agentAutomatic = new Set([
-  "capture_inbox",
-  "record_actual",
-  "attach_evidence",
-]);
-
-const agentProposal = new Set(["submit_command_proposal"]);
-
-const systemOnly = new Set([
-  "record_bet_boundary",
-  "mark_review_overdue",
-  "create_review",
-  "open_sync_conflict",
-]);
-
-const projectDrafts = new Set([
-  "update_direction",
-  "create_work_item",
-  "update_work_item",
-  "propose_replan",
-  "upsert_dependency",
-  "remove_dependency",
-  "remove_work_item",
-  "capture_baseline",
-  "complete_work_item",
-]);
 
 const automaticCapabilities = {
   capture_inbox: "capture_inbox",
@@ -211,6 +173,10 @@ function authorizeSource(
   commandType: string,
   context: AuthorizationContext,
 ): CommandRejection | undefined {
+  const disposition = agentCommandDisposition(
+    commandType as V2Command["type"],
+  ) as AgentAuthorityDisposition | undefined;
+
   if (!context.source.verified) {
     return createCommandRejection(
       "SOURCE_NOT_AUTHORIZED",
@@ -268,7 +234,7 @@ function authorizeSource(
     );
   }
 
-  if (systemOnly.has(commandType)) {
+  if (disposition === "system_only") {
     const required = systemCapabilities[
       commandType as keyof typeof systemCapabilities
     ];
@@ -307,8 +273,8 @@ function authorizeSource(
     }
 
     if (
-      !agentAutomatic.has(commandType) &&
-      !systemOnly.has(commandType) &&
+      disposition !== "automatic" &&
+      disposition !== "system_only" &&
       lacksCapability(context.source, "submit_proposal")
     ) {
       return missingCapabilityRejection("submit_proposal", context);
@@ -339,7 +305,11 @@ function authorizeActor(
   commandType: string,
   context: AuthorizationContext,
 ): CommandRejection | undefined {
-  if (systemOnly.has(commandType)) {
+  const disposition = agentCommandDisposition(
+    commandType as V2Command["type"],
+  ) as AgentAuthorityDisposition | undefined;
+
+  if (disposition === "system_only") {
     if (context.actorKind === "system") {
       return undefined;
     }
@@ -378,7 +348,7 @@ function authorizeActor(
     );
   }
 
-  if (humanOnly.has(commandType)) {
+  if (disposition === "human_confirmation") {
     if (context.actorKind === "human" && context.origin !== "import") {
       return undefined;
     }
@@ -394,11 +364,11 @@ function authorizeActor(
     );
   }
 
-  if (agentAutomatic.has(commandType)) {
+  if (disposition === "automatic") {
     return undefined;
   }
 
-  if (projectDrafts.has(commandType)) {
+  if (disposition === "proposal_only") {
     if (context.actorKind === "human") {
       return undefined;
     }
@@ -414,7 +384,7 @@ function authorizeActor(
     );
   }
 
-  if (agentProposal.has(commandType)) {
+  if (disposition === "proposal_submission") {
     if (context.actorKind === "agent") {
       return undefined;
     }
@@ -429,7 +399,7 @@ function authorizeActor(
     );
   }
 
-  if (context.actorKind === "human") {
+  if (disposition === "human_mutation" && context.actorKind === "human") {
     return undefined;
   }
 
@@ -437,10 +407,9 @@ function authorizeActor(
     "ACTOR_NOT_AUTHORIZED",
     rejectionContext(context),
     {
-      reason:
-        "Agents must submit a command proposal instead of mutating workspace state directly.",
-      gate: "agent_proposal_required",
-      permittedNextCommand: "submit_command_proposal",
+      reason: "This command requires an authorized human mutation surface.",
+      gate: "human_actor",
+      permittedNextCommand: commandType,
     },
   );
 }
@@ -571,7 +540,7 @@ export function authorizeCommand(
   }
 
   if (
-    systemOnly.has(commandType) &&
+    agentCommandDisposition(commandType as V2Command["type"]) === "system_only" &&
     (context.deterministicTriggerKey === undefined ||
       context.deterministicTriggerKey.trim().length === 0)
   ) {

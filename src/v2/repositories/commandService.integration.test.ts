@@ -327,7 +327,7 @@ describe("CommandService", () => {
     expect(await repo.listReceipts()).toEqual([]);
   });
 
-  it("rejects the single context snapshot when an accessor hides malformed source keys on later reads", async () => {
+  it("rejects a context accessor without invoking it", async () => {
     const repo = repository("accessor-context-snapshot");
     const initial = buildWorkspaceV2("workspace-accessor-context-snapshot");
     await repo.initialize(initial);
@@ -366,11 +366,93 @@ describe("CommandService", () => {
         code: "INVALID_COMMAND_CONTEXT",
       }),
     );
-    expect(sourceReads).toBe(1);
+    expect(sourceReads).toBe(0);
     expect(load).not.toHaveBeenCalled();
     expect(commit).not.toHaveBeenCalled();
     expect(appendRejectedReceipt).not.toHaveBeenCalled();
     expect(findReceipt).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      name: "top-level command accessor",
+      build(onRead: () => void): V2Command {
+        const command = capture("accessor-command-input");
+        Object.defineProperty(command, "text", {
+          configurable: true,
+          enumerable: true,
+          get() {
+            onRead();
+            return "Accessor text";
+          },
+        });
+        return command;
+      },
+    },
+    {
+      name: "nested proposal accessor",
+      build(onRead: () => void): V2Command {
+        const command: V2Command = {
+          type: "submit_command_proposal",
+          proposalId: "proposal-accessor-input",
+          rationale: "Exercise an untrusted nested command graph.",
+          command: {
+            type: "remove_dependency",
+            dependencyId: "dependency-accessor-input",
+          },
+        };
+        if (command.type !== "submit_command_proposal") {
+          throw new Error("Expected command proposal");
+        }
+        Object.defineProperty(command.command, "dependencyId", {
+          configurable: true,
+          enumerable: true,
+          get() {
+            onRead();
+            return "dependency-accessor-input";
+          },
+        });
+        return command;
+      },
+    },
+  ])("rejects $name before cloning or repository I/O", async ({ name, build }) => {
+    const repo = repository(`invalid-command-input-${name}`);
+    const initial = buildWorkspaceV2(`workspace-invalid-command-input-${name}`);
+    await repo.initialize(initial);
+    const load = vi.fn(() => repo.load());
+    const commit = vi.fn(async () => "committed" as const);
+    const appendRejectedReceipt = vi.fn(async () => undefined);
+    const findReceipt = vi.fn(async () => undefined);
+    const service = new CommandService(
+      repositoryProxy(repo, {
+        load,
+        commit,
+        appendRejectedReceipt,
+        findReceipt,
+      }),
+      initial.workspaceId,
+    );
+    let accessorReads = 0;
+    const command = build(() => {
+      accessorReads += 1;
+    });
+
+    await expect(
+      service.dispatch(command, humanContext(`invalid-command-input-${name}`, 0)),
+    ).rejects.toEqual(
+      expect.objectContaining<Partial<CommandServiceBoundaryError>>({
+        name: "CommandServiceBoundaryError",
+        code: "INVALID_COMMAND_INPUT",
+      }),
+    );
+    expect(accessorReads).toBe(0);
+    expect(load).not.toHaveBeenCalled();
+    expect(commit).not.toHaveBeenCalled();
+    expect(appendRejectedReceipt).not.toHaveBeenCalled();
+    expect(findReceipt).not.toHaveBeenCalled();
+    expect(await repo.load()).toEqual(initial);
+    expect(await repo.listPendingOutbox()).toEqual([]);
+    expect(await repo.listReceipts()).toEqual([]);
   });
 
   it("maps an uncloneable context to the exact boundary error before repository I/O", async () => {

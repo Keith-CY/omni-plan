@@ -16,7 +16,7 @@ import type { AtomicWorkspaceRepository } from "./browserWorkspaceRepository";
 import { CommandService } from "./commandService";
 import {
   combineProtectedEffectBundles,
-  isKnownUnprotectedLifecycleWriter,
+  isKnownUnprotectedLifecycleWriterForView,
   projectProtectedEffectBundle,
   protectedEffectBundlePairAffectedProjectIds,
   protectedEffectBundleTouchedEntityIds,
@@ -424,17 +424,26 @@ const protectedProjectFields = new Set([
   "holds",
 ]);
 
-function writesProtectedLifecycle(replay: AuthorizedSyncReplay): boolean {
+async function writesProtectedLifecycle(
+  replay: AuthorizedSyncReplay,
+  workspace: WorkspaceV2,
+): Promise<boolean> {
   const touches = replay.receipt.diff.some(
     ({ entity, field }) =>
       protectedLifecycleEntities.has(entity) ||
       (entity === "ProjectV2" && protectedProjectFields.has(field)),
   );
-  return touches && !isKnownUnprotectedLifecycleWriter({
+  return touches && !(await isKnownUnprotectedLifecycleWriterForView({
+    workspace,
     command: replay.command,
+    commandId: replay.receipt.commandId,
+    authorityRootOperationHash: replay.authorityRoot.operationHash,
+    sourceOperationHash: replay.operationHash,
+    receiptHash: replay.receipt.receiptHash,
+    payloadHash: replay.receipt.payloadHash,
     createdAt: replay.receipt.createdAt,
     diff: replay.receipt.diff,
-  });
+  }));
 }
 
 async function branchProtectedBundles(
@@ -474,7 +483,7 @@ async function branchProtectedBundles(
       diff: replay.receipt.diff,
     });
     if (projected === undefined) {
-      if (writesProtectedLifecycle(replay)) {
+      if (await writesProtectedLifecycle(replay, replayWorkspace)) {
         throw new SyncMergeError(
           "PROTECTED_RECORD_INVALID",
           `Verified operation ${replay.operationHash} is an unknown protected lifecycle writer.`,

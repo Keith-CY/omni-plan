@@ -1,6 +1,7 @@
 import {
   duplicateCommandResult,
   executeCommand,
+  isCanonicalCommandRuntimeGraph,
   isStructurallyValidCommandContext,
   revisionConflictResult,
   type CommandContext,
@@ -22,6 +23,7 @@ import {
   type AuthorizedConflictOpen,
 } from "./syncConflictOpenAuthorization";
 import {
+  isAuthorizedProposalAcceptanceFor,
   isAuthorizedSemanticSyncReplay,
   isAuthorizedSyncReplay,
   type AuthorizedSemanticSyncReplay,
@@ -69,9 +71,11 @@ async function canRetrySystemCasConflict(
 }
 
 export type CommandServiceBoundaryErrorCode =
+  | "INVALID_COMMAND_INPUT"
   | "INVALID_COMMAND_CONTEXT"
   | "VERIFIED_SYNC_REPLAY_REQUIRED"
   | "SYNC_WORKSPACE_MISMATCH"
+  | "SYNC_PROPOSAL_MISMATCH"
   | "AUTHORIZED_CONFLICT_OPEN_REQUIRED"
   | "AUTHORIZED_EQUIVALENT_RESOLUTION_REQUIRED";
 
@@ -97,6 +101,7 @@ function assertValidCommandContext(
 }
 
 function snapshotCommandContext(value: unknown): CommandContext {
+  assertValidCommandContext(value);
   let snapshot: unknown;
   try {
     snapshot = structuredClone(value);
@@ -110,6 +115,23 @@ function snapshotCommandContext(value: unknown): CommandContext {
   return snapshot;
 }
 
+function snapshotCommandInput(value: unknown): V2Command {
+  if (!isCanonicalCommandRuntimeGraph(value)) {
+    throw new CommandServiceBoundaryError(
+      "INVALID_COMMAND_INPUT",
+      "Command input must be a cloneable canonical data-property graph.",
+    );
+  }
+  try {
+    return structuredClone(value) as V2Command;
+  } catch {
+    throw new CommandServiceBoundaryError(
+      "INVALID_COMMAND_INPUT",
+      "Command input must be a cloneable canonical data-property graph.",
+    );
+  }
+}
+
 export class CommandService {
   constructor(
     private readonly repository: AtomicWorkspaceRepository,
@@ -121,11 +143,10 @@ export class CommandService {
     contextInput: CommandContext,
     options: { evaluationNow?: ISODate } = {},
   ): Promise<CommandResult> {
-    // Snapshot synchronously before the first await and validate only that
-    // single snapshot. Accessors on an untrusted input must not show validation
-    // one value and persistence another.
+    // Reject accessors and unsafe topology without reading them, then snapshot
+    // synchronously before the first await. Every downstream use sees one clone.
     const context = snapshotCommandContext(contextInput);
-    const command = structuredClone(commandInput);
+    const command = snapshotCommandInput(commandInput);
     if (command.type === "open_sync_conflict") {
       throw new CommandServiceBoundaryError(
         "AUTHORIZED_CONFLICT_OPEN_REQUIRED",
@@ -180,6 +201,15 @@ export class CommandService {
     if (!workspace || workspace.workspaceId !== this.workspaceId) {
       throw new Error(
         "V2 Workspace must be initialized by BootstrapService before dispatch.",
+      );
+    }
+    if (
+      replay.command.type === "accept_command_proposal" &&
+      !isAuthorizedProposalAcceptanceFor(replay, workspace)
+    ) {
+      throw new CommandServiceBoundaryError(
+        "SYNC_PROPOSAL_MISMATCH",
+        "A replayed proposal acceptance must target the exact locally open Agent submission the human authorized.",
       );
     }
     const sourceCapabilities = Array.from(

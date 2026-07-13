@@ -1718,8 +1718,8 @@ describe("completion-only result writes", () => {
     if (result.ok) throw new Error("Expected undefined requirement rejection");
     expect(result.rejection).toMatchObject({
       code: "INVALID_COMMAND",
-      gate: "work_item:work-item-1:evidence_requirement",
-      permittedNextCommand: "attach_evidence",
+      gate: "command_payload:update_work_item",
+      permittedNextCommand: "update_work_item",
     });
     expect(result.workspace.workItems[0]).toMatchObject({
       kind: "milestone",

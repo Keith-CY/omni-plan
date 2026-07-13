@@ -9,6 +9,7 @@ import {
 import {
   executeCommand,
   type CommandContext,
+  type ProposableV2Command,
   type V2Command,
 } from "../domain/commands";
 import {
@@ -19,6 +20,7 @@ import { stableHash } from "../domain/stableHash";
 import type {
   AuditDiff,
   CommandReceipt,
+  CommandSource,
   JsonValue,
   WorkspaceV2,
 } from "../domain/types";
@@ -933,12 +935,31 @@ export interface SyncAuthorityRootV2 {
 
 const authorizedReplays = new WeakSet<object>();
 
+interface AuthorizedProposalAcceptanceBindingV2 {
+  readonly proposalId: Id;
+  readonly immutableProposalCanonical: string;
+  readonly submissionAuthorityRootOperationHash: string;
+  readonly submissionAuthorityReceiptCanonical: string;
+  readonly submissionOperationHash: string;
+  readonly submissionSource: Readonly<CommandSource>;
+  readonly submissionCommandId: Id;
+  readonly submissionPayloadHash: string;
+  readonly submissionActorId: Id;
+  readonly submissionCreatedAt: ISODate;
+}
+
+const authorizedProposalAcceptanceBindings = new WeakMap<
+  object,
+  Readonly<AuthorizedProposalAcceptanceBindingV2>
+>();
+
 class AuthorizedSyncReplayValue implements AuthorizedSyncReplay {
   readonly [authorizedReplayBrand] = true as const;
 
   constructor(
     private readonly replay: VerifiedSyncReplay,
     authorityRoot: VerifiedSyncReplay,
+    proposalAcceptanceBinding?: AuthorizedProposalAcceptanceBindingV2,
   ) {
     this.authorityRoot = deepFreeze({
       operationHash: authorityRoot.operationHash,
@@ -953,6 +974,12 @@ class AuthorizedSyncReplayValue implements AuthorizedSyncReplay {
     });
     Object.freeze(this);
     authorizedReplays.add(this);
+    if (proposalAcceptanceBinding !== undefined) {
+      authorizedProposalAcceptanceBindings.set(
+        this,
+        deepFreeze(clone(proposalAcceptanceBinding)),
+      );
+    }
   }
 
   readonly authorityRoot: Readonly<SyncAuthorityRootV2>;
@@ -1001,6 +1028,95 @@ export function isAuthorizedSyncReplay(
     typeof value === "object" &&
     value !== null &&
     authorizedReplays.has(value)
+  );
+}
+
+function immutableProposalCanonical(
+  proposal: WorkspaceV2["commandProposals"][number],
+): string {
+  return canonicalJson({
+    id: proposal.id,
+    commandType: proposal.commandType,
+    payload: proposal.payload,
+    rationale: proposal.rationale,
+    agentActorId: proposal.agentActorId,
+    createdAt: proposal.createdAt,
+  });
+}
+
+/**
+ * Confirms that an opaque acceptance replay is still pointed at the exact
+ * locally open proposal submission whose immutable identity the human
+ * authorized. Rebased revision/status fields are deliberately excluded; the
+ * direct submission receipt supplies the stable authority identity instead.
+ */
+export function isAuthorizedProposalAcceptanceFor(
+  replay: AuthorizedSyncReplay,
+  workspace: WorkspaceV2,
+): boolean {
+  if (
+    !isAuthorizedSyncReplay(replay) ||
+    replay.command.type !== "accept_command_proposal" ||
+    replay.workspaceId !== workspace.workspaceId
+  ) {
+    return false;
+  }
+  const binding = authorizedProposalAcceptanceBindings.get(replay);
+  if (
+    binding === undefined ||
+    binding.proposalId !== replay.command.proposalId
+  ) {
+    return false;
+  }
+  const proposals = workspace.commandProposals.filter(
+    ({ id }) => id === binding.proposalId,
+  );
+  if (proposals.length !== 1) return false;
+  const proposal = proposals[0];
+  if (
+    proposal.status !== "open" ||
+    workspace.revision !== proposal.baseRevision + 1 ||
+    immutableProposalCanonical(proposal) !== binding.immutableProposalCanonical
+  ) {
+    return false;
+  }
+  const directSubmissionReceipts = workspace.commandReceipts.filter(
+    ({ status, baseRevision, revision }) =>
+      status === "applied" &&
+      baseRevision === proposal.baseRevision &&
+      revision === proposal.baseRevision + 1,
+  );
+  if (directSubmissionReceipts.length !== 1) return false;
+  const receipt = directSubmissionReceipts[0];
+  const exactAuthorityReceipt =
+    canonicalJson(receipt) === binding.submissionAuthorityReceiptCanonical;
+  const expectedReplaySource = {
+    sourceId: `sync-replay:${binding.submissionOperationHash}:${binding.submissionSource.sourceId}`,
+    verified: binding.submissionSource.verified,
+    capabilities: Array.from(
+      new Set([
+        ...binding.submissionSource.capabilities,
+        "replay_receipt" as const,
+      ]),
+    ),
+  };
+  const exactDirectSubmissionReplay =
+    receipt.origin === "sync" &&
+    canonicalJson(receipt.source) === canonicalJson(expectedReplaySource);
+  return (
+    isHash(binding.submissionAuthorityRootOperationHash) &&
+    isHash(binding.submissionOperationHash) &&
+    receipt.commandType === "submit_command_proposal" &&
+    receipt.commandId === binding.submissionCommandId &&
+    receipt.payloadHash === binding.submissionPayloadHash &&
+    receipt.actorId === binding.submissionActorId &&
+    receipt.actorId === proposal.agentActorId &&
+    receipt.actorKind === "agent" &&
+    receipt.createdAt === binding.submissionCreatedAt &&
+    receipt.createdAt === proposal.createdAt &&
+    receipt.source.verified &&
+    receipt.source.capabilities.includes("submit_proposal") &&
+    (exactAuthorityReceipt || exactDirectSubmissionReplay)
   );
 }
 
@@ -1840,6 +1956,252 @@ export async function authorizeSyncBranchV2(
   });
 }
 
+interface VerifiedProposalSubmissionAncestry {
+  readonly command: ProposableV2Command;
+  readonly authorityRoot: VerifiedSyncReplay;
+  readonly submissionCommand: Extract<
+    V2Command,
+    { type: "submit_command_proposal" }
+  >;
+}
+
+interface VerifiedAcceptedProposalOperationAncestry {
+  readonly command: ProposableV2Command;
+  readonly binding: AuthorizedProposalAcceptanceBindingV2;
+}
+
+function verifyProposalSubmissionOperation(
+  history: VerifiedSyncHistory,
+  submission: VerifiedSyncReplay,
+  proposalId: Id,
+  acceptanceBaseRevision: number,
+): VerifiedProposalSubmissionAncestry {
+  const submittedCommand = submission.command;
+  if (submittedCommand.type !== "submit_command_proposal") {
+    throw new SyncProtocolError(
+      "RECEIPT_MISMATCH",
+      "Accepted proposal authority does not point to an Agent submission.",
+    );
+  }
+  const authorityRoot = verifiedAuthorityRootOperation(history, submission);
+  const authorityCommand = authorityRoot.command;
+  if (
+    submittedCommand.proposalId !== proposalId ||
+    submission.receipt.status !== "applied" ||
+    submission.receipt.commandType !== "submit_command_proposal" ||
+    submission.receipt.actorKind !== "agent" ||
+    !submission.receipt.source.verified ||
+    !submission.receipt.source.capabilities.includes("submit_proposal") ||
+    submission.receipt.revision !== submission.receipt.baseRevision + 1 ||
+    submission.receipt.revision !== acceptanceBaseRevision ||
+    authorityCommand.type !== "submit_command_proposal" ||
+    authorityCommand.proposalId !== proposalId ||
+    canonicalJson(authorityCommand) !== canonicalJson(submittedCommand) ||
+    authorityRoot.receipt.status !== "applied" ||
+    authorityRoot.receipt.commandType !== "submit_command_proposal" ||
+    authorityRoot.receipt.actorKind !== "agent" ||
+    !authorityRoot.receipt.source.verified ||
+    !authorityRoot.receipt.source.capabilities.includes("submit_proposal") ||
+    authorityRoot.receipt.revision !== authorityRoot.receipt.baseRevision + 1
+  ) {
+    throw new SyncProtocolError(
+      "RECEIPT_MISMATCH",
+      "Accepted proposal authority has an invalid Agent submission chain.",
+    );
+  }
+
+  const exactOpenSnapshot = (
+    operation: VerifiedSyncReplay,
+    command: Extract<V2Command, { type: "submit_command_proposal" }>,
+  ) => ({
+    id: proposalId,
+    commandType: command.command.type,
+    payload: command.command,
+    baseRevision: operation.receipt.baseRevision,
+    rationale: command.rationale,
+    agentActorId: operation.receipt.actorId,
+    createdAt: operation.receipt.createdAt,
+    status: "open",
+  });
+  const hasExactSingleCreation = (
+    operation: VerifiedSyncReplay,
+    command: Extract<V2Command, { type: "submit_command_proposal" }>,
+  ): boolean => {
+    const proposalDiffs = operation.receipt.diff.filter(
+      ({ entity }) => entity === "CommandProposal",
+    );
+    const creations = proposalDiffs.filter(
+      (diff) =>
+        diff.entityId === proposalId &&
+        diff.field === "created" &&
+        diff.before === null,
+    );
+    const seenStaleProposalIds = new Set<Id>();
+    const hasOnlyExactStaleness = proposalDiffs.every((diff) => {
+      if (diff === creations[0]) return true;
+      if (
+        diff.entityId === proposalId ||
+        diff.field !== "status" ||
+        diff.before !== "open" ||
+        diff.after !== "stale" ||
+        seenStaleProposalIds.has(diff.entityId)
+      ) return false;
+      seenStaleProposalIds.add(diff.entityId);
+      return true;
+    });
+    return (
+      creations.length === 1 &&
+      hasOnlyExactStaleness &&
+      canonicalJson(creations[0].after) ===
+        canonicalJson(exactOpenSnapshot(operation, command))
+    );
+  };
+  if (
+    !hasExactSingleCreation(submission, submittedCommand) ||
+    !hasExactSingleCreation(authorityRoot, authorityCommand)
+  ) {
+    throw new SyncProtocolError(
+      "RECEIPT_MISMATCH",
+      "Accepted proposal authority lacks the exact stored Agent proposal snapshot.",
+    );
+  }
+  return {
+    command: clone(submittedCommand.command),
+    authorityRoot,
+    submissionCommand: clone(authorityCommand),
+  };
+}
+
+function verifyAcceptedProposalOperationAncestry(
+  history: VerifiedSyncHistory,
+  acceptance: VerifiedSyncReplay,
+): VerifiedAcceptedProposalOperationAncestry {
+  const acceptanceCommand = acceptance.command;
+  if (acceptanceCommand.type !== "accept_command_proposal") {
+    throw new SyncProtocolError(
+      "RECEIPT_MISMATCH",
+      "Proposal acceptance ancestry requires an acceptance operation.",
+    );
+  }
+  const proposalId = acceptanceCommand.proposalId;
+  const authorityRoot = verifiedAuthorityRootOperation(history, acceptance);
+  const authorityCommand = authorityRoot.command;
+  const hasExactAcceptedStatus = (operation: VerifiedSyncReplay): boolean => {
+    const statusDiffs = operation.receipt.diff.filter(
+      ({ entity, field }) =>
+        entity === "CommandProposal" && field === "status",
+    );
+    const targetDiffs = statusDiffs.filter(
+      ({ entityId }) => entityId === proposalId,
+    );
+    if (
+      operation.receipt.diff.some(
+        ({ entity, field }) =>
+          entity === "CommandProposal" && field !== "status",
+      ) ||
+      targetDiffs.length !== 1 ||
+      targetDiffs[0]?.before !== "open" ||
+      targetDiffs[0]?.after !== "accepted"
+    ) return false;
+    const seenStaleProposalIds = new Set<Id>();
+    for (const diff of statusDiffs) {
+      if (diff.entityId === proposalId) continue;
+      if (
+        diff.before !== "open" ||
+        diff.after !== "stale" ||
+        seenStaleProposalIds.has(diff.entityId)
+      ) return false;
+      seenStaleProposalIds.add(diff.entityId);
+    }
+    return true;
+  };
+  const hasHumanAcceptanceAuthority = (
+    operation: VerifiedSyncReplay,
+  ): boolean =>
+    operation.receipt.status === "applied" &&
+    operation.receipt.commandType === "accept_command_proposal" &&
+    operation.receipt.actorKind === "human" &&
+    operation.receipt.source.verified &&
+    operation.receipt.source.capabilities.includes("human_decision") &&
+    operation.receipt.revision === operation.receipt.baseRevision + 1 &&
+    hasExactAcceptedStatus(operation);
+  if (
+    !hasHumanAcceptanceAuthority(acceptance) ||
+    authorityCommand.type !== "accept_command_proposal" ||
+    authorityCommand.proposalId !== proposalId ||
+    !hasHumanAcceptanceAuthority(authorityRoot)
+  ) {
+    throw new SyncProtocolError(
+      "RECEIPT_MISMATCH",
+      "Accepted proposal projection lacks exact human acceptance authority.",
+    );
+  }
+
+  const submission =
+    acceptance.previousOperationHash === undefined
+      ? undefined
+      : historyOperation(history, acceptance.previousOperationHash);
+  const authoritySubmission =
+    authorityRoot.previousOperationHash === undefined
+      ? undefined
+      : historyOperation(history, authorityRoot.previousOperationHash);
+  if (submission === undefined || authoritySubmission === undefined) {
+    throw new SyncProtocolError(
+      "RECEIPT_MISMATCH",
+      "Accepted proposal is not the direct child of both its replay and human-authority submissions.",
+    );
+  }
+  const verifiedSubmission = verifyProposalSubmissionOperation(
+    history,
+    submission,
+    proposalId,
+    acceptance.receipt.baseRevision,
+  );
+  const verifiedAuthoritySubmission = verifyProposalSubmissionOperation(
+    history,
+    authoritySubmission,
+    proposalId,
+    authorityRoot.receipt.baseRevision,
+  );
+  if (
+    verifiedSubmission.authorityRoot.operationHash !==
+    verifiedAuthoritySubmission.authorityRoot.operationHash
+  ) {
+    throw new SyncProtocolError(
+      "RECEIPT_MISMATCH",
+      "Replayed proposal acceptance is not bound to the exact Agent submission the human accepted.",
+    );
+  }
+  const submissionAuthority = verifiedSubmission.authorityRoot;
+  const submissionCommand = verifiedSubmission.submissionCommand;
+  return {
+    command: clone(verifiedSubmission.command),
+    binding: {
+      proposalId,
+      immutableProposalCanonical: immutableProposalCanonical({
+        id: proposalId,
+        commandType: submissionCommand.command.type,
+        payload: clone(submissionCommand.command) as unknown as JsonValue,
+        baseRevision: submissionAuthority.receipt.baseRevision,
+        rationale: submissionCommand.rationale,
+        agentActorId: submissionAuthority.receipt.actorId,
+        createdAt: submissionAuthority.receipt.createdAt,
+        status: "open",
+      }),
+      submissionAuthorityRootOperationHash: submissionAuthority.operationHash,
+      submissionAuthorityReceiptCanonical: canonicalJson(
+        submissionAuthority.receipt,
+      ),
+      submissionOperationHash: submission.operationHash,
+      submissionSource: clone(submission.receipt.source),
+      submissionCommandId: submissionAuthority.receipt.commandId,
+      submissionPayloadHash: submissionAuthority.receipt.payloadHash,
+      submissionActorId: submissionAuthority.receipt.actorId,
+      submissionCreatedAt: submissionAuthority.receipt.createdAt,
+    },
+  };
+}
+
 async function assertPersistedConflictOpenHistoryProof(
   history: VerifiedSyncHistory,
   openOperation: VerifiedSyncReplay,
@@ -1887,18 +2249,54 @@ async function assertPersistedConflictOpenHistoryProof(
         );
       }
       const authorityRoot = verifiedAuthorityRootOperation(history, source);
+      let effectiveCommand = source.command;
+      let effectiveDiff = source.receipt.diff;
+      const acceptanceCommand = source.command;
+      if (acceptanceCommand.type === "accept_command_proposal") {
+        effectiveCommand = verifyAcceptedProposalOperationAncestry(
+          history,
+          source,
+        ).command;
+        effectiveDiff = source.receipt.diff.filter(
+          ({ entity }) => entity !== "CommandProposal",
+        );
+        const proposedCommand = effectiveCommand;
+        if (proposedCommand.type === "propose_replan") {
+          const created = effectiveDiff.filter(
+            (diff) =>
+              diff.entity === "ReplanProposal" &&
+              diff.field === "created" &&
+              diff.before === null &&
+              isRecord(diff.after) &&
+              diff.after.id === proposedCommand.proposal.id,
+          );
+          if (created.length !== 1 || !isRecord(created[0].after)) {
+            throw new SyncProtocolError(
+              "RECEIPT_MISMATCH",
+              "Accepted Replan projection lacks its exact rebased creation.",
+            );
+          }
+          effectiveCommand = {
+            type: "propose_replan",
+            proposal: clone(created[0].after) as unknown as Extract<
+              V2Command,
+              { type: "propose_replan" }
+            >["proposal"],
+          };
+        }
+      }
       if (
         !verifyProtectedOperationProjectionFromReceiptDiff({
           logicalKey: bundle.logicalKey,
           projection,
-          command: source.command,
+          command: effectiveCommand,
           commandId: source.receipt.commandId,
           authorityRootOperationHash: authorityRoot.operationHash,
           sourceOperationHash: source.operationHash,
           receiptHash: source.receipt.receiptHash,
           payloadHash: source.receipt.payloadHash,
           createdAt: source.receipt.createdAt,
-          diff: source.receipt.diff,
+          diff: effectiveDiff,
         })
       ) {
         throw new SyncProtocolError(
@@ -2056,6 +2454,11 @@ async function authorizeSyncBranchUncached(
       }
       replayCommand = clone(semanticReplay.command) as V2Command;
     }
+    const proposalAcceptanceBinding =
+      replayCommand.type === "accept_command_proposal"
+        ? verifyAcceptedProposalOperationAncestry(input.history, operation)
+            .binding
+        : undefined;
     let authorizedConflictOpen;
     if (replayCommand.type === "open_sync_conflict") {
       try {
@@ -2201,6 +2604,7 @@ async function authorizeSyncBranchUncached(
       new AuthorizedSyncReplayValue(
         operation,
         verifiedAuthorityRootOperation(input.history, operation),
+        proposalAcceptanceBinding,
       ),
     );
   }

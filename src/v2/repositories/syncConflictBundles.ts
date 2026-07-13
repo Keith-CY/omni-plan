@@ -2,7 +2,9 @@ import type { Id, ISODate } from "@/domain/types";
 
 import { canonicalJson, sha256Hex } from "../../domain/canonical";
 import type { V2Command } from "../domain/commands";
+import { isProposableCommandType } from "../domain/agentAuthority";
 import { isMaterialDirectionChange } from "../domain/direction";
+import { stableHash } from "../domain/stableHash";
 import {
   followUpDirectionBriefId,
   returnedInboxItemId,
@@ -190,6 +192,15 @@ export interface ProtectedOperationView {
   diff: readonly AuditDiff[];
 }
 
+export interface EffectiveAcceptedProposalView {
+  outerCommand: Extract<V2Command, { type: "accept_command_proposal" }>;
+  command: Extract<
+    V2Command,
+    { type: "update_direction" | "propose_replan" }
+  >;
+  diff: AuditDiff[];
+}
+
 export class SyncConflictBundleError extends Error {
   constructor(
     readonly code:
@@ -286,6 +297,170 @@ function record(value: unknown): value is Record<string, unknown> {
 
 function sameValue(left: unknown, right: unknown): boolean {
   return canonicalJson(left) === canonicalJson(right);
+}
+
+/**
+ * Proves that one outer human proposal acceptance is backed by the exact
+ * direct Agent submission and returns only its effective protected mutation.
+ */
+export async function resolveEffectiveAcceptedProposalView(
+  view: ProtectedOperationView,
+): Promise<EffectiveAcceptedProposalView | undefined> {
+  const outerCommand = view.command;
+  if (outerCommand.type !== "accept_command_proposal") return undefined;
+  const proposalMatches = view.workspace.commandProposals.filter(
+    ({ id }) => id === outerCommand.proposalId,
+  );
+  const proposal = proposalMatches[0];
+  const invalid = (message: string): never => {
+    throw new SyncConflictBundleError(
+      "INVALID_PROJECTION",
+      `Accepted command proposal provenance is invalid: ${message}`,
+    );
+  };
+  if (proposalMatches.length !== 1 || proposal === undefined) {
+    return invalid("the proposal identity is missing or ambiguous");
+  }
+  if (
+    proposal.status !== "open" ||
+    view.workspace.revision !== proposal.baseRevision + 1
+  ) {
+    return invalid("the proposal is not the fresh open submission");
+  }
+  if (
+    !record(proposal.payload) ||
+    !isProposableCommandType(proposal.payload.type) ||
+    proposal.payload.type !== proposal.commandType
+  ) {
+    return invalid("the stored commandType and payload disagree");
+  }
+  if (
+    proposal.commandType !== "update_direction" &&
+    proposal.commandType !== "propose_replan"
+  ) {
+    return undefined;
+  }
+  const directReceipts = view.workspace.commandReceipts.filter(
+    (receipt) =>
+      receipt.status === "applied" &&
+      receipt.baseRevision === proposal.baseRevision &&
+      receipt.revision === proposal.baseRevision + 1,
+  );
+  const receipt = directReceipts[0];
+  if (directReceipts.length !== 1 || receipt === undefined) {
+    return invalid("the exact direct submit receipt is missing");
+  }
+  const creationDiffs = receipt.diff.filter(
+    (diff) =>
+      diff.entity === "CommandProposal" &&
+      diff.entityId === proposal.id &&
+      diff.field === "created" &&
+      diff.before === null,
+  );
+  const expectedSubmitCommand = {
+    type: "submit_command_proposal",
+    proposalId: proposal.id,
+    command: proposal.payload,
+    rationale: proposal.rationale,
+  };
+  const { receiptHash, ...receiptBase } = receipt;
+  if (
+    receipt.commandType !== "submit_command_proposal" ||
+    receipt.actorKind !== "agent" ||
+    receipt.actorId !== proposal.agentActorId ||
+    receipt.createdAt !== proposal.createdAt ||
+    !receipt.source.verified ||
+    !receipt.source.capabilities.includes("submit_proposal") ||
+    creationDiffs.length !== 1 ||
+    !sameValue(creationDiffs[0].after, proposal) ||
+    receipt.payloadHash !==
+      (await stableHash(expectedSubmitCommand as unknown as JsonValue)) ||
+    receiptHash !== (await stableHash(receiptBase as unknown as JsonValue))
+  ) {
+    return invalid("the submit receipt, payload, or creation snapshot is forged");
+  }
+  const proposalDiffs = view.diff.filter(
+    ({ entity }) => entity === "CommandProposal",
+  );
+  const acceptedDiffs = proposalDiffs.filter(
+    (diff) =>
+      diff.entityId === proposal.id &&
+      diff.field === "status" &&
+      diff.before === "open" &&
+      diff.after === "accepted",
+  );
+  if (
+    acceptedDiffs.length !== 1 ||
+    proposalDiffs.some(
+      (diff) =>
+        diff !== acceptedDiffs[0] &&
+        !(
+          diff.field === "status" &&
+          diff.before === "open" &&
+          diff.after === "stale"
+        ),
+    )
+  ) {
+    return invalid("the acceptance status diff is not exact");
+  }
+  const effectiveDiff = view.diff
+    .filter(({ entity }) => entity !== "CommandProposal")
+    .map((diff) => structuredClone(diff));
+  if (proposal.commandType === "update_direction") {
+    return {
+      outerCommand: structuredClone(outerCommand),
+      command: structuredClone(proposal.payload) as unknown as Extract<
+        V2Command,
+        { type: "update_direction" }
+      >,
+      diff: effectiveDiff,
+    };
+  }
+  const storedReplan = record(proposal.payload.proposal)
+    ? proposal.payload.proposal
+    : undefined;
+  if (storedReplan === undefined || typeof storedReplan.id !== "string") {
+    return invalid("the stored Replan payload is malformed");
+  }
+  const creations = effectiveDiff.filter(
+    (diff) =>
+      diff.entity === "ReplanProposal" &&
+      diff.field === "created" &&
+      diff.before === null &&
+      record(diff.after) &&
+      diff.after.id === storedReplan.id,
+  );
+  if (creations.length !== 1 || !record(creations[0].after)) {
+    return invalid("the accepted Replan creation diff is not exact");
+  }
+  const acceptedReplan = creations[0].after;
+  for (const field of [
+    "id",
+    "localDate",
+    "baseCommitmentId",
+    "reasonCodes",
+    "proposedSlots",
+    "status",
+  ] as const) {
+    if (!sameValue(storedReplan[field], acceptedReplan[field])) {
+      return invalid(`the accepted Replan changed proposed field ${field}`);
+    }
+  }
+  if (
+    acceptedReplan.baseRevision !== view.workspace.revision ||
+    acceptedReplan.createdAt !== view.createdAt
+  ) {
+    return invalid("the accepted Replan was not rebased at human acceptance");
+  }
+  const effectiveCommand = {
+    type: "propose_replan",
+    proposal: structuredClone(acceptedReplan) as unknown as ReplanProposal,
+  } as const;
+  return {
+    outerCommand: structuredClone(outerCommand),
+    command: effectiveCommand,
+    diff: effectiveDiff,
+  };
 }
 
 function holdIdentity(hold: ProjectHoldState): string {
@@ -944,6 +1119,21 @@ export function isKnownUnprotectedLifecycleWriter(
   }
 }
 
+export async function isKnownUnprotectedLifecycleWriterForView(
+  view: ProtectedOperationView,
+): Promise<boolean> {
+  const accepted = await resolveEffectiveAcceptedProposalView(view);
+  return isKnownUnprotectedLifecycleWriter(
+    accepted === undefined
+      ? view
+      : {
+          command: accepted.command,
+          createdAt: view.createdAt,
+          diff: accepted.diff,
+        },
+  );
+}
+
 async function withBundleHash(
   value: Omit<ProtectedEffectBundle, "hash">,
 ): Promise<ProtectedEffectBundle> {
@@ -996,16 +1186,28 @@ export async function projectProtectedEffectBundleAtLogicalKey(
 export async function projectProtectedEffectBundle(
   view: ProtectedOperationView,
 ): Promise<ProtectedEffectBundle | undefined> {
-  const commandType = view.command.type;
+  const accepted = await resolveEffectiveAcceptedProposalView(view);
+  const effectiveView: ProtectedOperationView =
+    accepted === undefined
+      ? view
+      : {
+          ...view,
+          command: accepted.command,
+          diff: accepted.diff,
+        };
+  const commandType = effectiveView.command.type;
   if (!isProtectedCommandType(commandType)) return undefined;
-  const logicalKey = protectedCommandLogicalKey(view.workspace, view.command);
+  const logicalKey = protectedCommandLogicalKey(
+    effectiveView.workspace,
+    effectiveView.command,
+  );
   if (logicalKey === undefined) {
     throw new SyncConflictBundleError(
       "INVALID_PROJECTION",
-      `Command ${view.command.type} has no unique logical target.`,
+      `Command ${effectiveView.command.type} has no unique logical target.`,
     );
   }
-  return projectProtectedEffectBundleAtLogicalKey(view, logicalKey);
+  return projectProtectedEffectBundleAtLogicalKey(effectiveView, logicalKey);
 }
 
 export interface VerifyProtectedOperationProjectionInput {

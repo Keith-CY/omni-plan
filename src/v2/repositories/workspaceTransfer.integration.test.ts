@@ -4,7 +4,11 @@ import { afterEach, describe, expect, it } from "vitest";
 import { canonicalJson, sha256Hex } from "../../domain/canonical";
 import { normalizeWorkspaceSnapshot } from "../../domain/projectLifecycle";
 import type { WorkspaceSnapshot } from "../../domain/types";
-import type { CommandReceipt, MigrationRecord } from "../domain/types";
+import type {
+  CommandReceipt,
+  JsonValue,
+  MigrationRecord,
+} from "../domain/types";
 import { migrateV1Workspace } from "../migration/migrateV1";
 import {
   buildCommandContext,
@@ -2075,6 +2079,216 @@ describe("V2 Workspace transfer boundaries", () => {
       updatedAt: _updatedAt,
       ...directionDraft
     } = activeBrief;
+    const proposalSource = await rawInitializedRepository(
+      "protected-accepted-direction-source",
+      placed.workspace,
+    );
+    const submittedDirection = await new CommandService(
+      proposalSource,
+      WORKSPACE_ID,
+    ).dispatch(
+      {
+        type: "submit_command_proposal",
+        proposalId: "protected-direction-proposal",
+        command: {
+          type: "update_direction",
+          projectId: "transfer-project",
+          brief: {
+            ...directionDraft,
+            audienceAndProblem:
+              "Operators now need a materially different accepted flow.",
+          },
+        },
+        rationale: "Observed behavior requires a materially different flow.",
+      },
+      buildCommandContext({
+        commandId: "protected-submit-direction-proposal",
+        expectedRevision: placed.workspace.revision,
+        actorId: "protected-agent",
+        actorKind: "agent",
+        origin: "agent",
+        source: {
+          sourceId: "verified-protected-agent",
+          verified: true,
+          capabilities: ["submit_proposal"],
+        },
+        now: "2026-07-12T08:05:00.000Z",
+      }),
+    );
+    if (!submittedDirection.ok) {
+      throw new Error("Expected material Direction proposal submission");
+    }
+    const proposalWorkspaceWithSibling = structuredClone(
+      submittedDirection.workspace,
+    );
+    const submittedProposal =
+      proposalWorkspaceWithSibling.commandProposals.find(
+        ({ id }) => id === "protected-direction-proposal",
+      );
+    if (submittedProposal === undefined) {
+      throw new Error("Expected submitted Direction proposal");
+    }
+    proposalWorkspaceWithSibling.commandProposals.push({
+      ...structuredClone(submittedProposal),
+      id: "protected-unrelated-proposal",
+      rationale: "A separate open proposal must become stale on acceptance.",
+    });
+    await overwriteRawWorkspace(
+      proposalSource,
+      proposalWorkspaceWithSibling,
+    );
+    const acceptedDirection = await new CommandService(
+      proposalSource,
+      WORKSPACE_ID,
+    ).dispatch(
+      {
+        type: "accept_command_proposal",
+        proposalId: "protected-direction-proposal",
+      },
+      buildCommandContext({
+        commandId: "protected-accept-direction-proposal",
+        expectedRevision: submittedDirection.workspace.revision,
+        actorId: "protected-human",
+        actorKind: "human",
+        origin: "ui",
+        source: {
+          sourceId: "verified-protected-human",
+          verified: true,
+          capabilities: ["human_decision"],
+        },
+        now: "2026-07-12T08:10:00.000Z",
+      }),
+    );
+    if (!acceptedDirection.ok) {
+      throw new Error("Expected material Direction proposal acceptance");
+    }
+    const laterProposalHistory = await dispatchCapture({
+      repository: proposalSource,
+      commandId: "protected-post-acceptance-capture",
+      inboxId: "protected-post-acceptance-inbox",
+      now: "2026-07-12T08:10:00.000Z",
+    });
+    if (!laterProposalHistory.ok) {
+      throw new Error("Expected valid post-acceptance history");
+    }
+    const acceptedDirectionBackup = await exportWorkspaceBackup({
+      repository: proposalSource,
+      exportedAt: "2026-07-12T08:10:00.000Z",
+    });
+    const acceptedDirectionTarget = await initializedRepository(
+      "protected-accepted-direction-valid",
+    );
+    await expect(
+      restoreVerifiedBackup({
+        repository: acceptedDirectionTarget,
+        backup: acceptedDirectionBackup,
+        validationNow: "2026-07-12T08:10:00.000Z",
+      }),
+    ).resolves.toMatchObject({ status: "restored" });
+
+    let impossibleUnrelatedProposalTransition = structuredClone(
+      acceptedDirectionBackup,
+    );
+    const unrelatedProposal =
+      impossibleUnrelatedProposalTransition.workspace.commandProposals.find(
+        ({ id }) => id === "protected-unrelated-proposal",
+      );
+    const acceptedDirectionReceipt =
+      impossibleUnrelatedProposalTransition.workspace.commandReceipts.find(
+        ({ commandId }) =>
+          commandId === "protected-accept-direction-proposal",
+      );
+    const unrelatedStatusDiff = acceptedDirectionReceipt?.diff.find(
+      ({ entity, entityId, field }) =>
+        entity === "CommandProposal" &&
+        entityId === "protected-unrelated-proposal" &&
+        field === "status",
+    );
+    if (
+      unrelatedProposal === undefined ||
+      acceptedDirectionReceipt === undefined ||
+      unrelatedStatusDiff === undefined
+    ) {
+      throw new Error("Expected unrelated proposal staleness lineage");
+    }
+    unrelatedProposal.status = "open";
+    unrelatedStatusDiff.before = "dismissed";
+    unrelatedStatusDiff.after = "open";
+    await rehashReceipt(acceptedDirectionReceipt);
+    impossibleUnrelatedProposalTransition = await resignBackup(
+      impossibleUnrelatedProposalTransition,
+      () => undefined,
+    );
+    const impossibleUnrelatedProposalTarget = await initializedRepository(
+      "protected-accepted-direction-impossible-unrelated-transition",
+    );
+    await expect(
+      restoreVerifiedBackup({
+        repository: impossibleUnrelatedProposalTarget,
+        backup: impossibleUnrelatedProposalTransition,
+        validationNow: "2026-07-12T08:10:00.000Z",
+      }),
+    ).rejects.toMatchObject({ code: "BACKUP_INVALID" });
+
+    let mismatchedAcceptedDirection = structuredClone(
+      acceptedDirectionBackup,
+    );
+    const storedProposal =
+      mismatchedAcceptedDirection.workspace.commandProposals.find(
+        ({ id }) => id === "protected-direction-proposal",
+      );
+    const storedSubmitReceipt =
+      mismatchedAcceptedDirection.workspace.commandReceipts.find(
+        ({ commandId }) =>
+          commandId === "protected-submit-direction-proposal",
+      );
+    const storedProposalCreation = storedSubmitReceipt?.diff.find(
+      ({ entity, entityId, field }) =>
+        entity === "CommandProposal" &&
+        entityId === "protected-direction-proposal" &&
+        field === "created",
+    );
+    if (
+      storedProposal === undefined ||
+      storedSubmitReceipt === undefined ||
+      storedProposalCreation === undefined
+    ) {
+      throw new Error("Expected accepted Direction proposal lineage");
+    }
+    const benignDirectionCommand = {
+      type: "update_direction" as const,
+      projectId: "transfer-project",
+      brief: structuredClone(directionDraft),
+    };
+    storedProposal.payload = benignDirectionCommand as unknown as JsonValue;
+    storedProposalCreation.after = {
+      ...structuredClone(storedProposal),
+      status: "open",
+    };
+    storedSubmitReceipt.payloadHash = await sha256Hex(
+      canonicalJson({
+        type: "submit_command_proposal",
+        proposalId: storedProposal.id,
+        command: benignDirectionCommand,
+        rationale: storedProposal.rationale,
+      }),
+    );
+    await rehashReceipt(storedSubmitReceipt);
+    mismatchedAcceptedDirection = await resignBackup(
+      mismatchedAcceptedDirection,
+      () => undefined,
+    );
+    const mismatchedAcceptedDirectionTarget = await initializedRepository(
+      "protected-accepted-direction-mismatched-effect",
+    );
+    await expect(
+      restoreVerifiedBackup({
+        repository: mismatchedAcceptedDirectionTarget,
+        backup: mismatchedAcceptedDirection,
+        validationNow: "2026-07-12T08:10:00.000Z",
+      }),
+    ).rejects.toMatchObject({ code: "BACKUP_INVALID" });
+
     const materialDirection = await new CommandService(
       source,
       WORKSPACE_ID,

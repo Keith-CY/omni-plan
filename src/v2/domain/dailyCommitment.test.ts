@@ -1119,6 +1119,153 @@ describe("versioned Replan acceptance", () => {
     expect(accepted.workspace.replanProposals[0].status).toBe("accepted");
   });
 
+  it("accepts an Agent-drafted Replan proposal and preserves human commitment authority", async () => {
+    const committed = (await commitProjectToday()).workspace;
+    const [{ changed, proposal }] = await deriveChangedProposals(committed);
+    const agentProposal = { ...proposal, createdBy: "agent-1" };
+    const submitted = applied(
+      await executeCommand(
+        changed,
+        {
+          type: "submit_command_proposal",
+          proposalId: "command-proposal-replan-1",
+          command: { type: "propose_replan", proposal: agentProposal },
+          rationale: "Actual effort changed the remaining schedule.",
+        },
+        context(changed.revision, {
+          commandId: "submit-command-proposal-replan-1",
+          actorId: "agent-1",
+          actorKind: "agent",
+          origin: "agent",
+          source: {
+            sourceId: "verified-agent-replan",
+            verified: true,
+            capabilities: ["submit_proposal"],
+          },
+        }),
+      ),
+    );
+    expect(submitted.workspace.replanProposals).toEqual([]);
+
+    const acceptedProposal = applied(
+      await executeCommand(
+        submitted.workspace,
+        {
+          type: "accept_command_proposal",
+          proposalId: "command-proposal-replan-1",
+        },
+        context(submitted.workspace.revision, {
+          commandId: "accept-command-proposal-replan-1",
+        }),
+      ),
+    );
+    expect(acceptedProposal.workspace.replanProposals[0]).toMatchObject({
+      id: proposal.id,
+      baseRevision: submitted.workspace.revision,
+      createdBy: "human-1",
+      status: "open",
+      proposedSlots: proposal.proposedSlots,
+    });
+    expect(acceptedProposal.receipt.commandType).toBe(
+      "accept_command_proposal",
+    );
+
+    const committedReplan = applied(
+      await executeCommand(
+        acceptedProposal.workspace,
+        {
+          type: "accept_replan",
+          proposalId: proposal.id,
+          commitmentId: "commitment-agent-replan-2",
+        },
+        context(acceptedProposal.workspace.revision, {
+          commandId: "accept-agent-replan-1",
+        }),
+      ),
+    );
+    expect(
+      committedReplan.workspace.dailyCommitments[
+        committedReplan.workspace.dailyCommitments.length - 1
+      ],
+    ).toMatchObject({
+      id: "commitment-agent-replan-2",
+      actorId: "human-1",
+      supersedesId: "commitment-1",
+    });
+    expect(committedReplan.workspace.commandProposals[0].status).toBe(
+      "accepted",
+    );
+  });
+
+  it("bounded-sync rebases an unchanged Agent Replan read set after an unrelated revision", async () => {
+    const committed = (await commitProjectToday()).workspace;
+    const [{ changed, proposal }] = await deriveChangedProposals(committed);
+    const advanced = applied(
+      await executeCommand(
+        changed,
+        {
+          type: "capture_inbox",
+          id: "unrelated-before-replayed-proposal",
+          text: "Unrelated capture",
+        },
+        context(changed.revision, {
+          commandId: "unrelated-before-replayed-proposal",
+        }),
+      ),
+    );
+    const submitted = applied(
+      await executeCommand(
+        advanced.workspace,
+        {
+          type: "submit_command_proposal",
+          proposalId: "replayed-command-proposal-replan",
+          command: {
+            type: "propose_replan",
+            proposal: { ...proposal, createdBy: "agent-remote" },
+          },
+          rationale: "Replay the still-current scheduling read set.",
+        },
+        context(advanced.workspace.revision, {
+          commandId: "replayed-submit-command-proposal-replan",
+          actorId: "agent-remote",
+          actorKind: "agent",
+          origin: "sync",
+          source: {
+            sourceId: "sync-replay:replan-submit",
+            verified: true,
+            capabilities: ["submit_proposal", "replay_receipt"],
+          },
+        }),
+      ),
+    );
+    const accepted = applied(
+      await executeCommand(
+        submitted.workspace,
+        {
+          type: "accept_command_proposal",
+          proposalId: "replayed-command-proposal-replan",
+        },
+        context(submitted.workspace.revision, {
+          commandId: "replayed-accept-command-proposal-replan",
+          origin: "sync",
+          source: {
+            sourceId: "sync-replay:replan-accept",
+            verified: true,
+            capabilities: ["human_decision", "replay_receipt"],
+          },
+        }),
+      ),
+    );
+
+    expect(accepted.workspace.replanProposals[0]).toMatchObject({
+      id: proposal.id,
+      baseRevision: submitted.workspace.revision,
+      proposedSlots: proposal.proposedSlots,
+      createdBy: "human-1",
+    });
+    expect(accepted.receipt.commandType).toBe("accept_command_proposal");
+  });
+
   it("starts a first Plan for project work added by Replan and versions a project removed from its slots", async () => {
     const committed = (await commitProjectToday()).workspace;
     const expanded = addSecondPlanningProject(structuredClone(committed));

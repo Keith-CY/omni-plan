@@ -1062,7 +1062,7 @@ describe("Bet appetite boundary", () => {
 
       expect(result.rejection).toMatchObject({
         code: "ACTOR_NOT_AUTHORIZED",
-        permittedNextCommand: "submit_command_proposal",
+        permittedNextCommand: type,
       });
     },
   );

@@ -78,6 +78,33 @@ describe("BootstrapService", () => {
     expect(canDispatchBootstrapCommand(state, "capture_inbox")).toBe(false);
   });
 
+  it("inspects setup state without initializing a Workspace or clearing recovery", async () => {
+    const repository = {
+      loadMigrationRecovery: vi.fn(async () => undefined),
+      clearMigrationRecoveryIfMatching: vi.fn(
+        async () => "not_found" as const,
+      ),
+      load: vi.fn(async () => undefined),
+      initialize: vi.fn(async () => "initialized" as const),
+    } satisfies BootstrapWorkspaceRepository;
+    const storage = { getItem: vi.fn(() => null) };
+    const service = new BootstrapService({
+      repository,
+      workspaceId: "workspace-inspect-only",
+      v1Storage: storage,
+    });
+
+    const state = await service.inspect();
+
+    expect(state).toMatchObject({
+      status: "setup_required",
+      workspace: { workspaceId: "workspace-inspect-only", revision: 0 },
+    });
+    expect(repository.initialize).not.toHaveBeenCalled();
+    expect(repository.clearMigrationRecoveryIfMatching).not.toHaveBeenCalled();
+    expect(await repository.load()).toBeUndefined();
+  });
+
   it("clears a stale recovery marker when the matching migration is already committed", async () => {
     const calls: string[] = [];
     const recovery = recoveryState();

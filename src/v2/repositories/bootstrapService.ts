@@ -103,6 +103,28 @@ export class BootstrapService {
     this.v1Storage = options.v1Storage;
   }
 
+  /**
+   * Read-only bootstrap inspection for machine endpoints. Unlike `resolve`,
+   * this never initializes a Workspace or clears recovery state.
+   */
+  async inspect(): Promise<BootstrapState> {
+    const recovery = await this.repository.loadMigrationRecovery();
+    const existing = await this.repository.load();
+    assertWorkspaceIdentity(existing, this.workspaceId);
+    if (recovery !== undefined) return { status: "recovery_error", recovery };
+    if (existing !== undefined) return operationalState(existing);
+    const rawV1Payload = (this.v1Storage ?? browserV1Storage()).getItem(
+      V1_WORKSPACE_STORAGE_KEY,
+    );
+    if (rawV1Payload !== null) {
+      return { status: "migration_required", rawV1Payload };
+    }
+    return {
+      status: "setup_required",
+      workspace: createEmptyWorkspaceV2(this.workspaceId),
+    };
+  }
+
   async resolve(): Promise<BootstrapState> {
     const recovery = await this.repository.loadMigrationRecovery();
     const existing = await this.repository.load();
