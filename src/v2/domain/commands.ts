@@ -57,6 +57,7 @@ import type {
   ReplanProposal,
   ReviewConclusion,
   ReviewRecord,
+  SourceCapability,
   WorkspaceV2,
 } from "./types";
 
@@ -258,19 +259,124 @@ const knownCommandTypes = new Set(
   } satisfies Record<V2Command["type"], true>),
 );
 
-function isKnownCommandType(value: unknown): value is V2Command["type"] {
+export function isKnownV2CommandType(
+  value: unknown,
+): value is V2Command["type"] {
   return (
     typeof value === "string" &&
     knownCommandTypes.has(value)
   );
 }
 
+const commandKeyShapes = {
+  configure_capacity: { required: ["type", "profile"] },
+  capture_inbox: { required: ["type", "id", "text"], optional: ["desiredDate"] },
+  confirm_action_triage: { required: ["type", "inboxItemId", "action"] },
+  confirm_project_triage: {
+    required: ["type", "inboxItemId", "eligibility", "project"],
+  },
+  update_project_metadata: {
+    required: ["type", "projectId"],
+    optional: ["name", "priority", "notes"],
+  },
+  update_action: { required: ["type", "actionId", "patch"] },
+  complete_action: {
+    required: ["type", "actionId", "actualSeconds", "resultStatus", "outcomeNote"],
+  },
+  promote_action_to_project: {
+    required: ["type", "actionId", "eligibility", "project"],
+  },
+  update_direction: { required: ["type", "projectId", "brief"] },
+  place_bet: { required: ["type", "projectId", "betId", "start"] },
+  create_work_item: { required: ["type", "projectId", "workItem"] },
+  update_work_item: {
+    required: ["type", "projectId", "workItemId", "patch"],
+  },
+  upsert_dependency: { required: ["type", "dependency"] },
+  remove_dependency: { required: ["type", "dependencyId"] },
+  remove_work_item: { required: ["type", "projectId", "workItemId"] },
+  capture_baseline: { required: ["type", "baseline"] },
+  complete_work_item: {
+    required: ["type", "projectId", "workItemId", "resultStatus", "outcomeNote"],
+  },
+  propose_replan: { required: ["type", "proposal"] },
+  commit_today: { required: ["type", "commitment"] },
+  accept_replan: { required: ["type", "proposalId", "commitmentId"] },
+  record_actual: { required: ["type", "actual"] },
+  attach_evidence: { required: ["type", "evidence"] },
+  approve_evidence_exception: { required: ["type", "exception"] },
+  resolve_evidence_exception: {
+    required: ["type", "exceptionId", "resolution"],
+  },
+  request_validation: { required: ["type", "projectId"] },
+  satisfy_validation: { required: ["type", "projectId"] },
+  record_bet_boundary: {
+    required: ["type", "projectId", "boundary", "triggerKey"],
+  },
+  mark_review_overdue: { required: ["type", "reviewId", "triggerKey"] },
+  create_review: { required: ["type", "review"] },
+  complete_review: { required: ["type", "reviewId", "conclusion"] },
+  open_sync_conflict: { required: ["type", "conflict"] },
+  resolve_sync_conflict: { required: ["type", "reviewId", "resolution"] },
+  close_project: { required: ["type", "projectId", "decision"] },
+  abandon_project: { required: ["type", "projectId", "decision"] },
+  archive_project: { required: ["type", "projectId", "archived"] },
+} as const satisfies Record<
+  V2Command["type"],
+  { required: readonly string[]; optional?: readonly string[] }
+>;
+
 function isRecordValue(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
 }
 
 function hasOwnField(value: Record<string, unknown>, field: string): boolean {
   return Object.prototype.hasOwnProperty.call(value, field);
+}
+
+function hasExactKeys(
+  value: Record<string, unknown>,
+  required: readonly string[],
+  optional: readonly string[] = [],
+): boolean {
+  const allowed = new Set([...required, ...optional]);
+  return (
+    required.every((field) => hasOwnField(value, field)) &&
+    Reflect.ownKeys(value).every(
+      (field) => typeof field === "string" && allowed.has(field),
+    )
+  );
+}
+
+function isDenseArrayValue(value: unknown): value is unknown[] {
+  if (
+    !Array.isArray(value) ||
+    Object.getPrototypeOf(value) !== Array.prototype
+  ) {
+    return false;
+  }
+  const ownKeys = Reflect.ownKeys(value);
+  if (ownKeys.length !== value.length + 1 || !ownKeys.includes("length")) {
+    return false;
+  }
+  for (let index = 0; index < value.length; index += 1) {
+    if (!Object.prototype.hasOwnProperty.call(value, String(index))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function hasOnlyEnumerableStringKeys(value: object): boolean {
+  return Reflect.ownKeys(value).every(
+    (key) =>
+      typeof key === "string" &&
+      Object.prototype.propertyIsEnumerable.call(value, key),
+  );
 }
 
 function isStringValue(value: unknown): value is string {
@@ -279,6 +385,37 @@ function isStringValue(value: unknown): value is string {
 
 function isFiniteNumberValue(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
+}
+
+function isJsonValue(value: unknown, seen = new Set<object>()): value is JsonValue {
+  if (
+    value === null ||
+    typeof value === "string" ||
+    typeof value === "boolean"
+  ) return true;
+  if (typeof value === "number") return Number.isFinite(value);
+  if (typeof value !== "object" || seen.has(value)) return false;
+  seen.add(value);
+  if (Array.isArray(value)) {
+    if (!isDenseArrayValue(value)) {
+      seen.delete(value);
+      return false;
+    }
+    const valid = value.every((entry) => isJsonValue(entry, seen));
+    seen.delete(value);
+    return valid;
+  }
+  const prototype = Object.getPrototypeOf(value);
+  if (
+    (prototype !== Object.prototype && prototype !== null) ||
+    !hasOnlyEnumerableStringKeys(value)
+  ) {
+    seen.delete(value);
+    return false;
+  }
+  const valid = Object.values(value).every((entry) => isJsonValue(entry, seen));
+  seen.delete(value);
+  return valid;
 }
 
 function isOptionalStringValue(value: unknown): boolean {
@@ -298,7 +435,7 @@ function isOneOf(value: unknown, options: readonly string[]): boolean {
 }
 
 function isStringArrayValue(value: unknown): value is string[] {
-  return Array.isArray(value) && value.every(isStringValue);
+  return isDenseArrayValue(value) && value.every(isStringValue);
 }
 
 function isWeekdayValue(value: unknown): boolean {
@@ -308,12 +445,20 @@ function isWeekdayValue(value: unknown): boolean {
 function isCapacityProfileValue(value: unknown): value is CapacityProfile {
   if (
     !isRecordValue(value) ||
+    !hasExactKeys(value, [
+      "timeZone",
+      "weeklyWindows",
+      "dailyBudgets",
+      "unavailableBlocks",
+      "updatedAt",
+      "updatedBy",
+    ]) ||
     !isStringValue(value.timeZone) ||
     !isStringValue(value.updatedAt) ||
     !isStringValue(value.updatedBy) ||
-    !Array.isArray(value.weeklyWindows) ||
-    !Array.isArray(value.dailyBudgets) ||
-    !Array.isArray(value.unavailableBlocks)
+    !isDenseArrayValue(value.weeklyWindows) ||
+    !isDenseArrayValue(value.dailyBudgets) ||
+    !isDenseArrayValue(value.unavailableBlocks)
   ) {
     return false;
   }
@@ -322,6 +467,7 @@ function isCapacityProfileValue(value: unknown): value is CapacityProfile {
     value.weeklyWindows.every(
       (window) =>
         isRecordValue(window) &&
+        hasExactKeys(window, ["weekday", "startMinute", "finishMinute"]) &&
         isWeekdayValue(window.weekday) &&
         isFiniteNumberValue(window.startMinute) &&
         isFiniteNumberValue(window.finishMinute),
@@ -329,6 +475,12 @@ function isCapacityProfileValue(value: unknown): value is CapacityProfile {
     value.dailyBudgets.every(
       (budget) =>
         isRecordValue(budget) &&
+        hasExactKeys(budget, [
+          "weekday",
+          "deepSeconds",
+          "mediumSeconds",
+          "shallowSeconds",
+        ]) &&
         isWeekdayValue(budget.weekday) &&
         isFiniteNumberValue(budget.deepSeconds) &&
         isFiniteNumberValue(budget.mediumSeconds) &&
@@ -337,6 +489,7 @@ function isCapacityProfileValue(value: unknown): value is CapacityProfile {
     value.unavailableBlocks.every(
       (block) =>
         isRecordValue(block) &&
+        hasExactKeys(block, ["id", "start", "finish"]) &&
         isStringValue(block.id) &&
         isStringValue(block.start) &&
         isStringValue(block.finish),
@@ -350,14 +503,23 @@ function isTargetValue(
 ): boolean {
   if (!isRecordValue(value)) return false;
   if (value.kind === "action") {
-    return isStringValue(value.actionId);
+    return (
+      hasExactKeys(value, ["kind", "actionId"]) &&
+      isStringValue(value.actionId)
+    );
   }
   if (value.kind === "work_item") {
     return (
+      hasExactKeys(
+        value,
+        projectIdRequired
+          ? ["kind", "workItemId", "projectId"]
+          : ["kind", "workItemId"],
+      ) &&
       isStringValue(value.workItemId) &&
       (projectIdRequired
         ? isStringValue(value.projectId)
-        : isOptionalStringValue(value.projectId))
+        : value.projectId === undefined)
     );
   }
   return false;
@@ -366,6 +528,14 @@ function isTargetValue(
 function isCommitmentSlotValue(value: unknown): boolean {
   return (
     isRecordValue(value) &&
+    hasExactKeys(value, [
+      "id",
+      "target",
+      "targetRevision",
+      "start",
+      "finish",
+      "attention",
+    ]) &&
     isStringValue(value.id) &&
     isTargetValue(value.target, true) &&
     isFiniteNumberValue(value.targetRevision) &&
@@ -376,12 +546,13 @@ function isCommitmentSlotValue(value: unknown): boolean {
 }
 
 function areCommitmentSlotsValue(value: unknown): boolean {
-  return Array.isArray(value) && value.every(isCommitmentSlotValue);
+  return isDenseArrayValue(value) && value.every(isCommitmentSlotValue);
 }
 
 function isProjectDraftValue(value: unknown): boolean {
   return (
     isRecordValue(value) &&
+    hasExactKeys(value, ["id", "name", "priority", "notes"]) &&
     isStringValue(value.id) &&
     isStringValue(value.name) &&
     isFiniteNumberValue(value.priority) &&
@@ -392,6 +563,14 @@ function isProjectDraftValue(value: unknown): boolean {
 function isActionEligibilityValue(value: unknown): boolean {
   return (
     isRecordValue(value) &&
+    hasExactKeys(value, [
+      "singleSession",
+      "estimateSeconds",
+      "dependencyIds",
+      "requiresMilestoneEvidence",
+      "outcomeCount",
+      "solutionKnown",
+    ]) &&
     typeof value.singleSession === "boolean" &&
     isFiniteNumberValue(value.estimateSeconds) &&
     isStringArrayValue(value.dependencyIds) &&
@@ -404,6 +583,11 @@ function isActionEligibilityValue(value: unknown): boolean {
 function isActionDraftValue(value: unknown): boolean {
   return (
     isRecordValue(value) &&
+    hasExactKeys(
+      value,
+      ["id", "title", "eligibility", "attention"],
+      ["desiredDate", "fixedStart"],
+    ) &&
     isStringValue(value.id) &&
     isStringValue(value.title) &&
     isActionEligibilityValue(value.eligibility) &&
@@ -416,6 +600,13 @@ function isActionDraftValue(value: unknown): boolean {
 function isActionPatchValue(value: unknown): boolean {
   return (
     isRecordValue(value) &&
+    hasExactKeys(value, [], [
+      "title",
+      "eligibility",
+      "attention",
+      "desiredDate",
+      "fixedStart",
+    ]) &&
     isOptionalStringValue(value.title) &&
     (value.eligibility === undefined ||
       isActionEligibilityValue(value.eligibility)) &&
@@ -429,6 +620,7 @@ function isActionPatchValue(value: unknown): boolean {
 function isBetScopeValue(value: unknown): boolean {
   return (
     isRecordValue(value) &&
+    hasExactKeys(value, ["id", "title", "description"]) &&
     isStringValue(value.id) &&
     isStringValue(value.title) &&
     isStringValue(value.description)
@@ -438,13 +630,24 @@ function isBetScopeValue(value: unknown): boolean {
 function isDirectionBriefDraftValue(value: unknown): boolean {
   return (
     isRecordValue(value) &&
+    hasExactKeys(value, [
+      "id",
+      "projectId",
+      "audienceAndProblem",
+      "successEvidence",
+      "appetiteSeconds",
+      "validationMethod",
+      "firstScope",
+      "noGoOrKill",
+      "advancedNotes",
+    ]) &&
     isStringValue(value.id) &&
     isStringValue(value.projectId) &&
     isStringValue(value.audienceAndProblem) &&
     isStringValue(value.successEvidence) &&
     isFiniteNumberValue(value.appetiteSeconds) &&
     isStringValue(value.validationMethod) &&
-    Array.isArray(value.firstScope) &&
+    isDenseArrayValue(value.firstScope) &&
     value.firstScope.every(isBetScopeValue) &&
     isStringValue(value.noGoOrKill) &&
     isStringValue(value.advancedNotes)
@@ -454,6 +657,11 @@ function isDirectionBriefDraftValue(value: unknown): boolean {
 function isEstimateValue(value: unknown): boolean {
   return (
     isRecordValue(value) &&
+    hasExactKeys(
+      value,
+      ["mostLikelySeconds"],
+      ["optimisticSeconds", "pessimisticSeconds"],
+    ) &&
     isOptionalFiniteNumberValue(value.optimisticSeconds) &&
     isFiniteNumberValue(value.mostLikelySeconds) &&
     isOptionalFiniteNumberValue(value.pessimisticSeconds)
@@ -463,6 +671,12 @@ function isEstimateValue(value: unknown): boolean {
 function isConstraintValue(value: unknown): boolean {
   return (
     isRecordValue(value) &&
+    hasExactKeys(value, [], [
+      "noEarlierThan",
+      "noLaterThan",
+      "fixedStart",
+      "fixedFinish",
+    ]) &&
     isOptionalStringValue(value.noEarlierThan) &&
     isOptionalStringValue(value.noLaterThan) &&
     isOptionalStringValue(value.fixedStart) &&
@@ -473,6 +687,7 @@ function isConstraintValue(value: unknown): boolean {
 function isAssignmentValue(value: unknown): boolean {
   return (
     isRecordValue(value) &&
+    hasExactKeys(value, ["resourceId", "attention", "effortSeconds"]) &&
     isStringValue(value.resourceId) &&
     isOneOf(value.attention, ["deep", "medium", "shallow"]) &&
     isFiniteNumberValue(value.effortSeconds)
@@ -482,6 +697,7 @@ function isAssignmentValue(value: unknown): boolean {
 function isSplitSegmentValue(value: unknown): boolean {
   return (
     isRecordValue(value) &&
+    hasExactKeys(value, ["offsetSeconds", "durationSeconds"]) &&
     isFiniteNumberValue(value.offsetSeconds) &&
     isFiniteNumberValue(value.durationSeconds)
   );
@@ -490,6 +706,11 @@ function isSplitSegmentValue(value: unknown): boolean {
 function isRepeatRuleValue(value: unknown): boolean {
   return (
     isRecordValue(value) &&
+    hasExactKeys(
+      value,
+      ["count"],
+      ["cadence", "everyDays", "startMode", "startAt"],
+    ) &&
     (value.cadence === undefined ||
       isOneOf(value.cadence, ["every-n-days", "weekly", "monthly"])) &&
     isOptionalFiniteNumberValue(value.everyDays) &&
@@ -512,14 +733,14 @@ function isProjectWorkItemBaseValue(
     isFiniteNumberValue(value.durationSeconds) &&
     isEstimateValue(value.estimate) &&
     (value.constraint === undefined || isConstraintValue(value.constraint)) &&
-    Array.isArray(value.assignmentIds) &&
+    isDenseArrayValue(value.assignmentIds) &&
     value.assignmentIds.every(isAssignmentValue) &&
     isFiniteNumberValue(value.percentComplete) &&
     isOptionalBooleanValue(value.isKeyTask) &&
     isOptionalBooleanValue(value.isScopeExpansion) &&
     isOptionalBooleanValue(value.isFastDelivery) &&
     (value.splitSegments === undefined ||
-      (Array.isArray(value.splitSegments) &&
+      (isDenseArrayValue(value.splitSegments) &&
         value.splitSegments.every(isSplitSegmentValue))) &&
     (value.repeatRule === undefined || isRepeatRuleValue(value.repeatRule)) &&
     isOptionalStringValue(value.hammockStartId) &&
@@ -533,6 +754,37 @@ function isProjectWorkItemBaseValue(
 
 function isProjectWorkItemValue(value: unknown): boolean {
   return (
+    isRecordValue(value) &&
+    hasExactKeys(
+      value,
+      [
+        "id",
+        "projectId",
+        "kind",
+        "title",
+        "outline",
+        "durationSeconds",
+        "estimate",
+        "assignmentIds",
+        "percentComplete",
+        "revision",
+        "betScopeId",
+      ],
+      [
+        "parentId",
+        "constraint",
+        "isKeyTask",
+        "isScopeExpansion",
+        "isFastDelivery",
+        "splitSegments",
+        "repeatRule",
+        "hammockStartId",
+        "hammockFinishId",
+        "evidenceRequired",
+        "resultStatus",
+        "outcomeNote",
+      ],
+    ) &&
     isProjectWorkItemBaseValue(value) &&
     isStringValue(value.id) &&
     isStringValue(value.projectId) &&
@@ -544,6 +796,28 @@ function isProjectWorkItemValue(value: unknown): boolean {
 function isWorkItemPatchValue(value: unknown): boolean {
   if (!isRecordValue(value)) return false;
   return (
+    hasExactKeys(value, [], [
+      "parentId",
+      "kind",
+      "title",
+      "outline",
+      "durationSeconds",
+      "estimate",
+      "constraint",
+      "assignmentIds",
+      "percentComplete",
+      "isKeyTask",
+      "isScopeExpansion",
+      "isFastDelivery",
+      "splitSegments",
+      "repeatRule",
+      "hammockStartId",
+      "hammockFinishId",
+      "evidenceRequired",
+      "resultStatus",
+      "outcomeNote",
+      "betScopeId",
+    ]) &&
     isOptionalStringValue(value.parentId) &&
     (!hasOwnField(value, "kind") ||
       isOneOf(value.kind, ["phase", "task", "milestone", "hammock"])) &&
@@ -554,7 +828,7 @@ function isWorkItemPatchValue(value: unknown): boolean {
     (!hasOwnField(value, "estimate") || isEstimateValue(value.estimate)) &&
     (value.constraint === undefined || isConstraintValue(value.constraint)) &&
     (!hasOwnField(value, "assignmentIds") ||
-      (Array.isArray(value.assignmentIds) &&
+      (isDenseArrayValue(value.assignmentIds) &&
         value.assignmentIds.every(isAssignmentValue))) &&
     (!hasOwnField(value, "percentComplete") ||
       isFiniteNumberValue(value.percentComplete)) &&
@@ -562,7 +836,7 @@ function isWorkItemPatchValue(value: unknown): boolean {
     isOptionalBooleanValue(value.isScopeExpansion) &&
     isOptionalBooleanValue(value.isFastDelivery) &&
     (value.splitSegments === undefined ||
-      (Array.isArray(value.splitSegments) &&
+      (isDenseArrayValue(value.splitSegments) &&
         value.splitSegments.every(isSplitSegmentValue))) &&
     (value.repeatRule === undefined || isRepeatRuleValue(value.repeatRule)) &&
     isOptionalStringValue(value.hammockStartId) &&
@@ -578,6 +852,15 @@ function isWorkItemPatchValue(value: unknown): boolean {
 function isProjectDependencyValue(value: unknown): value is ProjectDependency {
   return (
     isRecordValue(value) &&
+    hasExactKeys(value, [
+      "id",
+      "projectId",
+      "fromId",
+      "toId",
+      "type",
+      "lagSeconds",
+      "revision",
+    ]) &&
     isStringValue(value.id) &&
     isStringValue(value.projectId) &&
     isStringValue(value.fromId) &&
@@ -590,19 +873,36 @@ function isProjectDependencyValue(value: unknown): value is ProjectDependency {
 
 function isStringRecordValue(value: unknown): value is Record<string, string> {
   return (
-    isRecordValue(value) && Object.values(value).every(isStringValue)
+    isRecordValue(value) &&
+    hasOnlyEnumerableStringKeys(value) &&
+    Object.values(value).every(isStringValue)
   );
 }
 
 function isNumberRecordValue(value: unknown): value is Record<string, number> {
   return (
-    isRecordValue(value) && Object.values(value).every(isFiniteNumberValue)
+    isRecordValue(value) &&
+    hasOnlyEnumerableStringKeys(value) &&
+    Object.values(value).every(isFiniteNumberValue)
   );
 }
 
 function isBaselineValue(value: unknown): value is Baseline {
   return (
     isRecordValue(value) &&
+    hasExactKeys(
+      value,
+      [
+        "id",
+        "projectId",
+        "name",
+        "capturedAt",
+        "plannedStartByItem",
+        "plannedFinishByItem",
+        "plannedWorkSecondsByItem",
+      ],
+      ["approvedByDecisionId"],
+    ) &&
     isStringValue(value.id) &&
     isStringValue(value.projectId) &&
     isStringValue(value.name) &&
@@ -617,6 +917,18 @@ function isBaselineValue(value: unknown): value is Baseline {
 function isReplanProposalValue(value: unknown): boolean {
   return (
     isRecordValue(value) &&
+    hasExactKeys(value, [
+      "id",
+      "localDate",
+      "baseCommitmentId",
+      "baseRevision",
+      "reasonCodes",
+      "proposedSlots",
+      "proposalHash",
+      "createdAt",
+      "createdBy",
+      "status",
+    ]) &&
     isStringValue(value.id) &&
     isStringValue(value.localDate) &&
     isStringValue(value.baseCommitmentId) &&
@@ -630,9 +942,44 @@ function isReplanProposalValue(value: unknown): boolean {
   );
 }
 
+function isDailyCommitmentDraftValue(value: unknown): boolean {
+  return (
+    isRecordValue(value) &&
+    hasExactKeys(value, [
+      "id",
+      "localDate",
+      "workspaceRevision",
+      "generatedAt",
+      "proposalHash",
+      "slots",
+    ]) &&
+    isStringValue(value.id) &&
+    isStringValue(value.localDate) &&
+    isFiniteNumberValue(value.workspaceRevision) &&
+    Number.isInteger(value.workspaceRevision) &&
+    Number(value.workspaceRevision) >= 0 &&
+    isStringValue(value.generatedAt) &&
+    isStringValue(value.proposalHash) &&
+    areCommitmentSlotsValue(value.slots)
+  );
+}
+
 function isActualValue(value: unknown): boolean {
   return (
     isRecordValue(value) &&
+    hasExactKeys(
+      value,
+      [
+        "id",
+        "revision",
+        "target",
+        "actualWorkSeconds",
+        "remainingWorkSeconds",
+        "actualCost",
+        "recordedAt",
+      ],
+      ["actualStart", "actualFinish"],
+    ) &&
     isStringValue(value.id) &&
     isFiniteNumberValue(value.revision) &&
     isTargetValue(value.target, false) &&
@@ -648,6 +995,19 @@ function isActualValue(value: unknown): boolean {
 function isEvidenceValue(value: unknown): boolean {
   return (
     isRecordValue(value) &&
+    hasExactKeys(
+      value,
+      [
+        "id",
+        "kind",
+        "summary",
+        "projectId",
+        "createdAt",
+        "confidence",
+        "tags",
+      ],
+      ["url", "localFileRef", "workItemId"],
+    ) &&
     isStringValue(value.id) &&
     isOneOf(value.kind, [
       "note",
@@ -678,6 +1038,15 @@ function isEvidenceValue(value: unknown): boolean {
 function isExceptionDraftValue(value: unknown): boolean {
   return (
     isRecordValue(value) &&
+    hasExactKeys(value, [
+      "id",
+      "projectId",
+      "requirementId",
+      "rationale",
+      "knownConsequence",
+      "reviewAt",
+      "expiresAt",
+    ]) &&
     isStringValue(value.id) &&
     isStringValue(value.projectId) &&
     isStringValue(value.requirementId) &&
@@ -691,6 +1060,19 @@ function isExceptionDraftValue(value: unknown): boolean {
 function isReviewDraftValue(value: unknown): boolean {
   return (
     isRecordValue(value) &&
+    hasExactKeys(
+      value,
+      [
+        "id",
+        "kind",
+        "triggerKey",
+        "triggerType",
+        "affectedProjectIds",
+        "affectedRecordIds",
+        "dueAt",
+      ],
+      ["cadenceTimeZone"],
+    ) &&
     isStringValue(value.id) &&
     ((value.kind === "weekly" &&
       value.triggerType === "weekly" &&
@@ -718,6 +1100,7 @@ function isReviewDraftValue(value: unknown): boolean {
 function isReviewConclusionValue(value: unknown): boolean {
   return (
     isRecordValue(value) &&
+    hasExactKeys(value, ["summary", "decisionCodes", "followUpCommandIds"]) &&
     isStringValue(value.summary) &&
     isStringArrayValue(value.decisionCodes) &&
     isStringArrayValue(value.followUpCommandIds)
@@ -727,9 +1110,14 @@ function isReviewConclusionValue(value: unknown): boolean {
 function isConflictResolutionValue(value: unknown): boolean {
   return (
     isRecordValue(value) &&
+    hasExactKeys(
+      value,
+      ["conflictId", "retainedVersion", "retainedValue", "rationale"],
+      ["retainedBundleHash", "reappliedCommandId"],
+    ) &&
     isStringValue(value.conflictId) &&
     isOneOf(value.retainedVersion, ["local", "remote"]) &&
-    value.retainedValue !== undefined &&
+    isJsonValue(value.retainedValue) &&
     isStringValue(value.retainedBundleHash) &&
     isOptionalStringValue(value.reappliedCommandId) &&
     isStringValue(value.rationale)
@@ -739,6 +1127,25 @@ function isConflictResolutionValue(value: unknown): boolean {
 function isSyncConflictDraftValue(value: unknown): boolean {
   return (
     isRecordValue(value) &&
+    hasExactKeys(
+      value,
+      [
+        "id",
+        "recordType",
+        "recordId",
+        "commonAncestorHash",
+        "remoteValue",
+      ],
+      [
+        "remoteRecordId",
+        "logicalKey",
+        "affectedProjectIds",
+        "affectedRecordIds",
+        "localValue",
+        "localBundle",
+        "remoteBundle",
+      ],
+    ) &&
     isStringValue(value.id) &&
     isOneOf(value.recordType, [
       "bet",
@@ -753,8 +1160,8 @@ function isSyncConflictDraftValue(value: unknown): boolean {
     isStringArrayValue(value.affectedProjectIds) &&
     isStringArrayValue(value.affectedRecordIds) &&
     isStringValue(value.commonAncestorHash) &&
-    value.localValue !== undefined &&
-    value.remoteValue !== undefined &&
+    isJsonValue(value.localValue) &&
+    isJsonValue(value.remoteValue) &&
     isRecordValue(value.localBundle) &&
     isRecordValue(value.remoteBundle)
   );
@@ -769,6 +1176,18 @@ function isDecisionValue(
 } {
   return (
     isRecordValue(value) &&
+    hasExactKeys(
+      value,
+      [
+        "id",
+        "projectId",
+        "successComparison",
+        "outcome",
+        "keyLearning",
+        "unfinishedDisposition",
+      ],
+      ["followUpProjectId"],
+    ) &&
     isStringValue(value.id) &&
     isStringValue(value.projectId) &&
     isStringValue(value.successComparison) &&
@@ -784,10 +1203,15 @@ function isDecisionValue(
   );
 }
 
-function isStructurallyValidCommand(value: unknown): value is V2Command {
-  if (!isRecordValue(value) || !isKnownCommandType(value.type)) {
+export function isStructurallyValidCommand(
+  value: unknown,
+): value is V2Command {
+  if (!isRecordValue(value) || !isKnownV2CommandType(value.type)) {
     return false;
   }
+  const keyShape = commandKeyShapes[value.type];
+  const optionalKeys = "optional" in keyShape ? keyShape.optional : [];
+  if (!hasExactKeys(value, keyShape.required, optionalKeys)) return false;
 
   switch (value.type) {
     case "configure_capacity":
@@ -873,17 +1297,7 @@ function isStructurallyValidCommand(value: unknown): value is V2Command {
     case "propose_replan":
       return isReplanProposalValue(value.proposal);
     case "commit_today":
-      return (
-        isRecordValue(value.commitment) &&
-        isStringValue(value.commitment.id) &&
-        isStringValue(value.commitment.localDate) &&
-        isFiniteNumberValue(value.commitment.workspaceRevision) &&
-        Number.isInteger(value.commitment.workspaceRevision) &&
-        value.commitment.workspaceRevision >= 0 &&
-        isStringValue(value.commitment.generatedAt) &&
-        isStringValue(value.commitment.proposalHash) &&
-        areCommitmentSlotsValue(value.commitment.slots)
-      );
+      return isDailyCommitmentDraftValue(value.commitment);
     case "accept_replan":
       return (
         isStringValue(value.proposalId) &&
@@ -955,6 +1369,75 @@ export interface CommandContext {
   origin: CommandOrigin;
   source: CommandSource;
   now: ISODate;
+}
+
+const knownSourceCapabilities = new Set(
+  Object.keys({
+    human_decision: true,
+    capture_inbox: true,
+    record_actual: true,
+    attach_evidence: true,
+    submit_proposal: true,
+    import_portable: true,
+    replay_receipt: true,
+    system_time: true,
+    open_conflict: true,
+  } satisfies Record<SourceCapability, true>),
+);
+
+function isCanonicalIdentifier(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.trim() === value
+  );
+}
+
+function isCanonicalTimestamp(value: unknown): value is ISODate {
+  if (typeof value !== "string") return false;
+  const milliseconds = Date.parse(value);
+  return (
+    Number.isFinite(milliseconds) &&
+    new Date(milliseconds).toISOString() === value
+  );
+}
+
+export function isStructurallyValidCommandContext(
+  value: unknown,
+): value is CommandContext {
+  if (
+    !isRecordValue(value) ||
+    !hasExactKeys(value, [
+      "commandId",
+      "expectedRevision",
+      "actorId",
+      "actorKind",
+      "origin",
+      "source",
+      "now",
+    ]) ||
+    !isCanonicalIdentifier(value.commandId) ||
+    !Number.isSafeInteger(value.expectedRevision) ||
+    Number(value.expectedRevision) < 0 ||
+    !isCanonicalIdentifier(value.actorId) ||
+    !isOneOf(value.actorKind, ["human", "agent", "system"]) ||
+    !isOneOf(value.origin, ["ui", "agent", "import", "sync", "migration"]) ||
+    !isCanonicalTimestamp(value.now) ||
+    !isRecordValue(value.source) ||
+    !hasExactKeys(value.source, ["sourceId", "verified", "capabilities"]) ||
+    !isCanonicalIdentifier(value.source.sourceId) ||
+    typeof value.source.verified !== "boolean" ||
+    !isDenseArrayValue(value.source.capabilities)
+  ) return false;
+  const capabilities = value.source.capabilities;
+  return (
+    capabilities.every(
+      (capability): capability is SourceCapability =>
+        typeof capability === "string" &&
+        knownSourceCapabilities.has(capability),
+    ) &&
+    new Set(capabilities).size === capabilities.length
+  );
 }
 
 export type CommandResult =
@@ -2324,7 +2807,7 @@ export async function executeCommand(
     );
   }
 
-  if (!isKnownCommandType(commandType)) {
+  if (!isKnownV2CommandType(commandType)) {
     return rejectedResult(
       workspace,
       commandSnapshot,

@@ -1,6 +1,7 @@
 import {
   duplicateCommandResult,
   executeCommand,
+  isStructurallyValidCommandContext,
   revisionConflictResult,
   type CommandContext,
   type CommandResult,
@@ -68,6 +69,7 @@ async function canRetrySystemCasConflict(
 }
 
 export type CommandServiceBoundaryErrorCode =
+  | "INVALID_COMMAND_CONTEXT"
   | "VERIFIED_SYNC_REPLAY_REQUIRED"
   | "SYNC_WORKSPACE_MISMATCH"
   | "AUTHORIZED_CONFLICT_OPEN_REQUIRED"
@@ -83,6 +85,31 @@ export class CommandServiceBoundaryError extends Error {
   }
 }
 
+function assertValidCommandContext(
+  value: unknown,
+): asserts value is CommandContext {
+  if (!isStructurallyValidCommandContext(value)) {
+    throw new CommandServiceBoundaryError(
+      "INVALID_COMMAND_CONTEXT",
+      "Command context must match the exact V2 schema.",
+    );
+  }
+}
+
+function snapshotCommandContext(value: unknown): CommandContext {
+  let snapshot: unknown;
+  try {
+    snapshot = structuredClone(value);
+  } catch {
+    throw new CommandServiceBoundaryError(
+      "INVALID_COMMAND_CONTEXT",
+      "Command context must be cloneable canonical V2 data.",
+    );
+  }
+  assertValidCommandContext(snapshot);
+  return snapshot;
+}
+
 export class CommandService {
   constructor(
     private readonly repository: AtomicWorkspaceRepository,
@@ -94,11 +121,11 @@ export class CommandService {
     contextInput: CommandContext,
     options: { evaluationNow?: ISODate } = {},
   ): Promise<CommandResult> {
-    // Snapshot synchronously before the first await. Callers may reuse mutable
-    // form objects while IndexedDB is opening; those later writes must not alter
-    // the command, receipt, or outbox tuple being persisted.
+    // Snapshot synchronously before the first await and validate only that
+    // single snapshot. Accessors on an untrusted input must not show validation
+    // one value and persistence another.
+    const context = snapshotCommandContext(contextInput);
     const command = structuredClone(commandInput);
-    const context = structuredClone(contextInput);
     if (command.type === "open_sync_conflict") {
       throw new CommandServiceBoundaryError(
         "AUTHORIZED_CONFLICT_OPEN_REQUIRED",
@@ -171,6 +198,7 @@ export class CommandService {
       },
       now: replay.receipt.createdAt,
     };
+    assertValidCommandContext(context);
     return this.dispatchAgainstWorkspace(
       structuredClone(replay.command) as V2Command,
       context,
@@ -183,6 +211,10 @@ export class CommandService {
     authorization: AuthorizedConflictOpen,
     options: { evaluationNow?: ISODate } = {},
   ): Promise<CommandResult> {
+    const context = snapshotCommandContext(
+      (authorization as { context?: unknown }).context,
+    );
+    const command = structuredClone(authorization.command);
     const workspace = await this.repository.load();
     if (!workspace || workspace.workspaceId !== this.workspaceId) {
       throw new Error(
@@ -193,8 +225,8 @@ export class CommandService {
       !isAuthorizedConflictOpenFor(
         authorization,
         workspace,
-        authorization.command,
-        authorization.context,
+        command,
+        context,
       )
     ) {
       throw new CommandServiceBoundaryError(
@@ -203,8 +235,8 @@ export class CommandService {
       );
     }
     return this.dispatchAgainstWorkspace(
-      structuredClone(authorization.command) as V2Command,
-      structuredClone(authorization.context),
+      command as V2Command,
+      context,
       workspace,
       options.evaluationNow,
       authorization,
@@ -215,6 +247,10 @@ export class CommandService {
     authorization: AuthorizedEquivalentConflictResolution,
     options: { evaluationNow?: ISODate } = {},
   ): Promise<CommandResult> {
+    const context = snapshotCommandContext(
+      (authorization as { context?: unknown }).context,
+    );
+    const command = structuredClone(authorization.command);
     const workspace = await this.repository.load();
     if (!workspace || workspace.workspaceId !== this.workspaceId) {
       throw new Error(
@@ -225,8 +261,8 @@ export class CommandService {
       !isAuthorizedEquivalentConflictResolutionFor(
         authorization,
         workspace,
-        authorization.command,
-        authorization.context,
+        command,
+        context,
       )
     ) {
       throw new CommandServiceBoundaryError(
@@ -235,8 +271,8 @@ export class CommandService {
       );
     }
     return this.dispatchAgainstWorkspace(
-      structuredClone(authorization.command) as V2Command,
-      structuredClone(authorization.context),
+      command as V2Command,
+      context,
       workspace,
       options.evaluationNow,
       undefined,
@@ -291,6 +327,7 @@ export class CommandService {
       },
       now: replayInput.receipt.createdAt,
     };
+    assertValidCommandContext(context);
     return this.dispatchAgainstWorkspace(
       structuredClone(replayInput.command) as V2Command,
       context,
@@ -307,6 +344,8 @@ export class CommandService {
     authorizedConflictOpen?: AuthorizedConflictOpen,
     authorizedEquivalentConflictResolution?: AuthorizedEquivalentConflictResolution,
   ): Promise<CommandResult> {
+
+    assertValidCommandContext(context);
 
     // The pure domain contract deliberately checks revision before duplicate
     // identity. Preserve that order at the persistence boundary.
@@ -398,6 +437,21 @@ export class CommandService {
     });
     if (committed === "committed") return result;
 
+    const latest = await this.repository.load();
+    const appliedWinner = latest?.commandReceipts.find(
+      (receipt) =>
+        receipt.commandId === context.commandId && receipt.status === "applied",
+    );
+    if (latest !== undefined && appliedWinner !== undefined) {
+      return (await sameStableValue(appliedWinner, result.receipt))
+        ? {
+            ok: true,
+            workspace: latest,
+            receipt: structuredClone(appliedWinner),
+          }
+        : duplicateCommandResult(latest, command, context, appliedWinner);
+    }
+
     const conflict = await revisionConflictResult(workspace, command, context);
     const collision = await this.persistRejectedOnce(conflict.receipt);
     return collision === undefined
@@ -416,7 +470,13 @@ export class CommandService {
     }
     try {
       await this.repository.appendRejectedReceipt(receipt);
-      return undefined;
+      const winner = await this.repository.findReceipt(receipt.commandId);
+      if (winner === undefined) {
+        throw new Error(
+          `Receipt ${receipt.commandId} lost atomic ownership after append.`,
+        );
+      }
+      return (await sameStableValue(winner, receipt)) ? undefined : winner;
     } catch (error) {
       // Two tabs may race to record the same deterministic rejection. Treat an
       // observed append-only winner as success, but propagate real storage

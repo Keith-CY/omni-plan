@@ -73,9 +73,7 @@ import type {
 } from "./types";
 import {
   applyRemoteProtectedEffectBundle,
-  protectedEffectBundleAffectedProjectIds,
-  protectedEffectBundleTouchedEntityIds,
-  validateProtectedEffectBundle,
+  validateProtectedEffectBundlePair,
 } from "../repositories/syncConflictBundles";
 
 export type CommandHandlerResult =
@@ -4366,50 +4364,33 @@ export async function applyCommandHandler(
           permittedNextCommand: "read_existing_sync_conflict",
         });
       }
+      const target = lookupConflictTarget(workspace, draft);
       if (
-        !(await validateProtectedEffectBundle(draft.localBundle)) ||
-        !(await validateProtectedEffectBundle(draft.remoteBundle)) ||
-        draft.localBundle.logicalKey !== draft.logicalKey ||
-        draft.remoteBundle.logicalKey !== draft.logicalKey ||
-        draft.localBundle.hash === draft.remoteBundle.hash
+        !(await validateProtectedEffectBundlePair({
+          workspace,
+          conflictId: draft.id,
+          recordType: draft.recordType,
+          projectId: target.ok ? target.target.projectId : undefined,
+          logicalKey: draft.logicalKey,
+          recordId: draft.recordId,
+          remoteRecordId: draft.remoteRecordId,
+          localValue: draft.localValue,
+          remoteValue: draft.remoteValue,
+          affectedRecordIds: draft.affectedRecordIds,
+          affectedProjectIds: draft.affectedProjectIds,
+          localBundle: draft.localBundle,
+          remoteBundle: draft.remoteBundle,
+        }))
       ) {
         return rejection(workspace, context, "INVALID_COMMAND", {
-          reason: `Sync conflict ${draft.id} requires two distinct, validated bundles for one logical record.`,
+          reason: `Sync conflict ${draft.id} requires two distinct, validated bundles and exact affected identities for one logical record.`,
           gate: `sync_conflict:${draft.id}:bundle`,
           permittedNextCommand: command.type,
         });
       }
-      const expectedAffectedRecordIds = sortedUniqueIds([
-        draft.recordId,
-        draft.remoteRecordId,
-        ...protectedEffectBundleTouchedEntityIds(draft.localBundle),
-        ...protectedEffectBundleTouchedEntityIds(draft.remoteBundle),
-      ]);
-      const currentProjectIds = new Set(
-        workspace.projects.map(({ id }) => id),
+      const expectedAffectedRecordIds = sortedUniqueIds(
+        draft.affectedRecordIds,
       );
-      const expectedAffectedProjectIds = sortedUniqueIds([
-        ...protectedEffectBundleAffectedProjectIds(draft.localBundle),
-        ...protectedEffectBundleAffectedProjectIds(draft.remoteBundle),
-      ]).filter((id) => currentProjectIds.has(id));
-      if (
-        !sameSnapshot(
-          sortedUniqueIds(draft.affectedRecordIds),
-          expectedAffectedRecordIds,
-        ) ||
-        !sameSnapshot(
-          sortedUniqueIds(draft.affectedProjectIds),
-          expectedAffectedProjectIds,
-        ) ||
-        draft.affectedRecordIds.length !== expectedAffectedRecordIds.length ||
-        draft.affectedProjectIds.length !== expectedAffectedProjectIds.length
-      ) {
-        return rejection(workspace, context, "INVALID_COMMAND", {
-          reason: `Sync conflict ${draft.id} affected identities do not cover its complete bundle.`,
-          gate: `sync_conflict:${draft.id}:affected_records`,
-          permittedNextCommand: command.type,
-        });
-      }
       const reviewId = `review:sync_conflict:${draft.id}`;
       for (const id of [draft.id, reviewId]) {
         const collision = entityIdCollision(workspace, id, [
@@ -4425,7 +4406,6 @@ export async function applyCommandHandler(
           );
         }
       }
-      const target = lookupConflictTarget(workspace, draft);
       if (!target.ok) {
         if (target.reason === "missing") {
           return entityNotFound(
@@ -4754,8 +4734,23 @@ export async function applyCommandHandler(
         });
       }
       if (
-        !(await validateProtectedEffectBundle(conflict.localBundle)) ||
-        !(await validateProtectedEffectBundle(conflict.remoteBundle))
+        !(await validateProtectedEffectBundlePair({
+          workspace,
+          conflictId: conflict.id,
+          recordType: conflict.recordType,
+          projectId: conflict.projectId,
+          logicalKey: conflict.logicalKey,
+          recordId: conflict.recordId,
+          remoteRecordId: conflict.remoteRecordId,
+          localValue: conflict.localValue,
+          remoteValue: conflict.remoteValue,
+          retainedVersion: conflict.retainedVersion,
+          retainedBundleHash: conflict.retainedBundleHash,
+          affectedRecordIds: conflict.affectedRecordIds,
+          affectedProjectIds: conflict.affectedProjectIds,
+          localBundle: conflict.localBundle,
+          remoteBundle: conflict.remoteBundle,
+        }))
       ) {
         return rejection(workspace, context, "SYNC_CONFLICT", {
           reason: `Sync conflict ${conflict.id} bundle provenance was tampered after opening.`,

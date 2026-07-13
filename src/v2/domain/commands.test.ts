@@ -12,6 +12,7 @@ import {
 } from "../tests/builders";
 import {
   executeCommand,
+  isStructurallyValidCommand,
   type CommandContext,
   type CommandResult,
   type V2Command,
@@ -512,6 +513,271 @@ const EXPECTED_COMMAND_TYPES = [
   "archive_project",
 ] as const;
 
+function commandSample(type: V2Command["type"]): V2Command {
+  const sample = ALL_COMMANDS.find((command) => command.type === type);
+  if (sample === undefined) throw new Error(`Missing command sample ${type}`);
+  const command = structuredClone(sample) as V2Command;
+  if (command.type === "open_sync_conflict") {
+    command.conflict = {
+      ...command.conflict,
+      remoteRecordId: "bet-remote",
+      logicalKey: '["bet","project-1"]',
+      affectedProjectIds: ["project-1"],
+      affectedRecordIds: ["bet-1", "bet-remote"],
+      localValue: { id: "bet-1", vendor: { arbitrary: true } },
+      remoteValue: { id: "bet-remote", vendor: { arbitrary: true } },
+      localBundle: {} as never,
+      remoteBundle: {} as never,
+    };
+  }
+  return command;
+}
+
+type ExactKeyPath = readonly (string | number)[];
+
+function poisonObjectAtPath(command: V2Command, path: ExactKeyPath): void {
+  let current: unknown = command;
+  for (const segment of path) {
+    if (
+      current === null ||
+      typeof current !== "object" ||
+      !(segment in current)
+    ) {
+      throw new Error(`Missing exact-key path ${path.join(".")}`);
+    }
+    current = (current as Record<string | number, unknown>)[segment];
+  }
+  if (current === null || typeof current !== "object" || Array.isArray(current)) {
+    throw new Error(`Exact-key path ${path.join(".")} is not an object`);
+  }
+  (current as Record<string, unknown>).__unexpected = "must-reject";
+}
+
+interface NestedExactKeyCase {
+  name: string;
+  type: V2Command["type"];
+  path: ExactKeyPath;
+  prepare?: (command: V2Command) => void;
+}
+
+const NESTED_EXACT_KEY_CASES: readonly NestedExactKeyCase[] = [
+  { name: "capacity profile", type: "configure_capacity", path: ["profile"] },
+  {
+    name: "weekly window",
+    type: "configure_capacity",
+    path: ["profile", "weeklyWindows", 0],
+  },
+  {
+    name: "daily budget",
+    type: "configure_capacity",
+    path: ["profile", "dailyBudgets", 0],
+  },
+  {
+    name: "unavailable block",
+    type: "configure_capacity",
+    path: ["profile", "unavailableBlocks", 0],
+  },
+  { name: "Action draft", type: "confirm_action_triage", path: ["action"] },
+  {
+    name: "Action eligibility",
+    type: "confirm_action_triage",
+    path: ["action", "eligibility"],
+  },
+  {
+    name: "Project triage eligibility",
+    type: "confirm_project_triage",
+    path: ["eligibility"],
+  },
+  {
+    name: "Project triage draft",
+    type: "confirm_project_triage",
+    path: ["project"],
+  },
+  { name: "Action patch", type: "update_action", path: ["patch"] },
+  {
+    name: "Action patch eligibility",
+    type: "update_action",
+    path: ["patch", "eligibility"],
+    prepare(command) {
+      if (command.type !== "update_action") throw new Error("Expected update Action");
+      const sample = commandSample("confirm_action_triage");
+      if (sample.type !== "confirm_action_triage") throw new Error("Expected Action");
+      command.patch.eligibility = structuredClone(sample.action.eligibility);
+    },
+  },
+  {
+    name: "promotion eligibility",
+    type: "promote_action_to_project",
+    path: ["eligibility"],
+  },
+  {
+    name: "promotion Project draft",
+    type: "promote_action_to_project",
+    path: ["project"],
+  },
+  { name: "Direction draft", type: "update_direction", path: ["brief"] },
+  {
+    name: "Bet scope",
+    type: "update_direction",
+    path: ["brief", "firstScope", 0],
+  },
+  { name: "Work Item", type: "create_work_item", path: ["workItem"] },
+  {
+    name: "Work Item estimate",
+    type: "create_work_item",
+    path: ["workItem", "estimate"],
+  },
+  {
+    name: "Work Item constraint",
+    type: "create_work_item",
+    path: ["workItem", "constraint"],
+    prepare(command) {
+      if (command.type !== "create_work_item") throw new Error("Expected Work Item");
+      command.workItem.constraint = {};
+    },
+  },
+  {
+    name: "Work Item assignment",
+    type: "create_work_item",
+    path: ["workItem", "assignmentIds", 0],
+    prepare(command) {
+      if (command.type !== "create_work_item") throw new Error("Expected Work Item");
+      command.workItem.assignmentIds = [{
+        resourceId: "resource-1",
+        attention: "deep",
+        effortSeconds: 1_800,
+      }];
+    },
+  },
+  {
+    name: "Work Item split segment",
+    type: "create_work_item",
+    path: ["workItem", "splitSegments", 0],
+    prepare(command) {
+      if (command.type !== "create_work_item") throw new Error("Expected Work Item");
+      command.workItem.splitSegments = [{ offsetSeconds: 0, durationSeconds: 900 }];
+    },
+  },
+  {
+    name: "Work Item repeat rule",
+    type: "create_work_item",
+    path: ["workItem", "repeatRule"],
+    prepare(command) {
+      if (command.type !== "create_work_item") throw new Error("Expected Work Item");
+      command.workItem.repeatRule = { count: 2 };
+    },
+  },
+  { name: "Work Item patch", type: "update_work_item", path: ["patch"] },
+  {
+    name: "Work Item patch estimate",
+    type: "update_work_item",
+    path: ["patch", "estimate"],
+    prepare(command) {
+      if (command.type !== "update_work_item") throw new Error("Expected patch");
+      command.patch.estimate = { mostLikelySeconds: 900 };
+    },
+  },
+  {
+    name: "Work Item patch constraint",
+    type: "update_work_item",
+    path: ["patch", "constraint"],
+    prepare(command) {
+      if (command.type !== "update_work_item") throw new Error("Expected patch");
+      command.patch.constraint = {};
+    },
+  },
+  {
+    name: "Work Item patch assignment",
+    type: "update_work_item",
+    path: ["patch", "assignmentIds", 0],
+    prepare(command) {
+      if (command.type !== "update_work_item") throw new Error("Expected patch");
+      command.patch.assignmentIds = [{
+        resourceId: "resource-1",
+        attention: "medium",
+        effortSeconds: 900,
+      }];
+    },
+  },
+  {
+    name: "Work Item patch split segment",
+    type: "update_work_item",
+    path: ["patch", "splitSegments", 0],
+    prepare(command) {
+      if (command.type !== "update_work_item") throw new Error("Expected patch");
+      command.patch.splitSegments = [{ offsetSeconds: 0, durationSeconds: 900 }];
+    },
+  },
+  {
+    name: "Work Item patch repeat rule",
+    type: "update_work_item",
+    path: ["patch", "repeatRule"],
+    prepare(command) {
+      if (command.type !== "update_work_item") throw new Error("Expected patch");
+      command.patch.repeatRule = { count: 2 };
+    },
+  },
+  { name: "Dependency", type: "upsert_dependency", path: ["dependency"] },
+  { name: "Baseline", type: "capture_baseline", path: ["baseline"] },
+  { name: "Replan proposal", type: "propose_replan", path: ["proposal"] },
+  {
+    name: "Replan slot",
+    type: "propose_replan",
+    path: ["proposal", "proposedSlots", 0],
+  },
+  {
+    name: "Replan target",
+    type: "propose_replan",
+    path: ["proposal", "proposedSlots", 0, "target"],
+  },
+  { name: "Daily commitment", type: "commit_today", path: ["commitment"] },
+  {
+    name: "Daily commitment slot",
+    type: "commit_today",
+    path: ["commitment", "slots", 0],
+  },
+  {
+    name: "Daily commitment target",
+    type: "commit_today",
+    path: ["commitment", "slots", 0, "target"],
+  },
+  { name: "Actual", type: "record_actual", path: ["actual"] },
+  {
+    name: "Actual Work Item target",
+    type: "record_actual",
+    path: ["actual", "target"],
+  },
+  {
+    name: "Actual Action target",
+    type: "record_actual",
+    path: ["actual", "target"],
+    prepare(command) {
+      if (command.type !== "record_actual") throw new Error("Expected Actual");
+      command.actual.target = { kind: "action", actionId: "action-1" };
+    },
+  },
+  { name: "Evidence", type: "attach_evidence", path: ["evidence"] },
+  {
+    name: "Exception draft",
+    type: "approve_evidence_exception",
+    path: ["exception"],
+  },
+  { name: "Review draft", type: "create_review", path: ["review"] },
+  {
+    name: "Review conclusion",
+    type: "complete_review",
+    path: ["conclusion"],
+  },
+  { name: "Sync conflict draft", type: "open_sync_conflict", path: ["conflict"] },
+  {
+    name: "Conflict resolution",
+    type: "resolve_sync_conflict",
+    path: ["resolution"],
+  },
+  { name: "Close decision", type: "close_project", path: ["decision"] },
+  { name: "Abandon decision", type: "abandon_project", path: ["decision"] },
+];
+
 describe("V2Command public contract", () => {
   it("exercises every command variant exhaustively", () => {
     const exhaustive: Exclude<
@@ -525,6 +791,207 @@ describe("V2Command public contract", () => {
     expect(ALL_COMMANDS.map(({ type }) => type)).toEqual(
       EXPECTED_COMMAND_TYPES,
     );
+  });
+
+  it.each(EXPECTED_COMMAND_TYPES)(
+    "rejects an unknown top-level key for %s",
+    (type) => {
+      const command = commandSample(type);
+      expect(isStructurallyValidCommand(command)).toBe(true);
+      (command as unknown as Record<string, unknown>).__unexpected =
+        "must-reject";
+      expect(isStructurallyValidCommand(command)).toBe(false);
+    },
+  );
+
+  it.each(NESTED_EXACT_KEY_CASES)(
+    "rejects an unknown key in $name",
+    ({ type, path, prepare }) => {
+      const command = commandSample(type);
+      prepare?.(command);
+      expect(isStructurallyValidCommand(command)).toBe(true);
+      poisonObjectAtPath(command, path);
+      expect(isStructurallyValidCommand(command)).toBe(false);
+    },
+  );
+
+  it("keeps only explicitly open JsonValue and Baseline map keys extensible", () => {
+    const resolution = commandSample("resolve_sync_conflict");
+    if (resolution.type !== "resolve_sync_conflict") {
+      throw new Error("Expected conflict resolution");
+    }
+    resolution.resolution.retainedValue = {
+      vendorExtension: { arbitrary: true, nested: [1, 2, 3] },
+    };
+    expect(isStructurallyValidCommand(resolution)).toBe(true);
+
+    const conflict = commandSample("open_sync_conflict");
+    if (conflict.type !== "open_sync_conflict") {
+      throw new Error("Expected conflict open");
+    }
+    conflict.conflict.localValue = {
+      id: "bet-1",
+      vendorExtension: { arbitrary: true },
+    };
+    conflict.conflict.remoteValue = {
+      id: "bet-remote",
+      anotherExtension: { arbitrary: true },
+    };
+    expect(isStructurallyValidCommand(conflict)).toBe(true);
+
+    const baseline = commandSample("capture_baseline");
+    if (baseline.type !== "capture_baseline") {
+      throw new Error("Expected Baseline");
+    }
+    baseline.baseline.plannedStartByItem["vendor-work-item"] = NOW;
+    baseline.baseline.plannedFinishByItem["vendor-work-item"] = LATER;
+    baseline.baseline.plannedWorkSecondsByItem["vendor-work-item"] = 30;
+    expect(isStructurallyValidCommand(baseline)).toBe(true);
+  });
+
+  it.each([
+    { name: "Map", value: new Map() },
+    { name: "Date", value: new Date(NOW) },
+    {
+      name: "class instance",
+      value: new (class RuntimePatch {})(),
+    },
+  ])("rejects a non-plain $name at a closed object boundary", ({ value }) => {
+    const command = commandSample("update_action");
+    if (command.type !== "update_action") throw new Error("Expected Action patch");
+    command.patch = value as never;
+
+    expect(isStructurallyValidCommand(command)).toBe(false);
+  });
+
+  it.each([
+    {
+      name: "sparse capacity windows",
+      command(): V2Command {
+        const command = commandSample("configure_capacity");
+        if (command.type !== "configure_capacity") {
+          throw new Error("Expected capacity command");
+        }
+        command.profile.weeklyWindows = new Array(1);
+        return command;
+      },
+    },
+    {
+      name: "custom Direction scope array key",
+      command(): V2Command {
+        const command = commandSample("update_direction");
+        if (command.type !== "update_direction") {
+          throw new Error("Expected Direction command");
+        }
+        (command.brief.firstScope as unknown as Record<string, unknown>).
+          unexpected = true;
+        return command;
+      },
+    },
+    {
+      name: "sparse Work Item assignments",
+      command(): V2Command {
+        const command = commandSample("create_work_item");
+        if (command.type !== "create_work_item") {
+          throw new Error("Expected Work Item command");
+        }
+        command.workItem.assignmentIds = new Array(1);
+        return command;
+      },
+    },
+    {
+      name: "custom commitment slots array key",
+      command(): V2Command {
+        const command = commandSample("commit_today");
+        if (command.type !== "commit_today") {
+          throw new Error("Expected commitment command");
+        }
+        (command.commitment.slots as unknown as Record<string, unknown>).
+          unexpected = true;
+        return command;
+      },
+    },
+    {
+      name: "sparse string array",
+      command(): V2Command {
+        const command = commandSample("attach_evidence");
+        if (command.type !== "attach_evidence") {
+          throw new Error("Expected Evidence command");
+        }
+        command.evidence.tags = new Array(1);
+        return command;
+      },
+    },
+  ])("rejects a non-canonical closed array: $name", ({ command }) => {
+    expect(isStructurallyValidCommand(command())).toBe(false);
+  });
+
+  it.each(["sparse", "custom-key"] as const)(
+    "rejects a %s JsonValue array even though JsonValue object keys are open",
+    (kind) => {
+      const command = commandSample("resolve_sync_conflict");
+      if (command.type !== "resolve_sync_conflict") {
+        throw new Error("Expected conflict resolution");
+      }
+      const retainedValue: JsonValue[] =
+        kind === "sparse" ? new Array(1) : [{ id: "bet-1" }];
+      if (kind === "custom-key") {
+        (retainedValue as unknown as Record<string, unknown>).unexpected = true;
+      }
+      command.resolution.retainedValue = retainedValue;
+
+      expect(isStructurallyValidCommand(command)).toBe(false);
+    },
+  );
+
+  it("returns one strict atomic rejection receipt for an unknown payload key", async () => {
+    const workspace = buildWorkspaceV2("workspace-exact-command");
+    const command = {
+      type: "capture_inbox",
+      id: "inbox-exact-command",
+      text: "Reject the extension",
+      __unexpected: "must-reject",
+    } as unknown as V2Command;
+    const result = rejected(
+      await executeCommand(workspace, command, buildContext()),
+    );
+
+    expect(result.rejection).toMatchObject({
+      code: "INVALID_COMMAND",
+      gate: "command_payload:capture_inbox",
+    });
+    expect(result.workspace).toBe(workspace);
+    expect(workspace.revision).toBe(0);
+    expect(workspace.commandReceipts).toEqual([]);
+    expect(Object.keys(result.receipt).sort()).toEqual([
+      "actorId",
+      "actorKind",
+      "baseRevision",
+      "commandId",
+      "commandType",
+      "createdAt",
+      "diff",
+      "id",
+      "origin",
+      "payloadHash",
+      "receiptHash",
+      "rejectionCode",
+      "revision",
+      "source",
+      "status",
+    ]);
+    expect(Object.keys(result.receipt.source).sort()).toEqual([
+      "capabilities",
+      "sourceId",
+      "verified",
+    ]);
+    expect(result.receipt).toMatchObject({
+      status: "rejected",
+      baseRevision: 0,
+      revision: 0,
+      diff: [],
+      rejectionCode: "INVALID_COMMAND",
+    });
   });
 
   it.each(ALL_COMMANDS)(

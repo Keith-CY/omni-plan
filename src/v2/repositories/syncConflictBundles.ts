@@ -22,8 +22,10 @@ import type {
   ProjectV2,
   ReplanProposal,
   ReviewRecord,
+  SyncConflictRecord,
   WorkspaceV2,
 } from "../domain/types";
+import { assertProtectedEffectBundleSchema } from "./workspaceBackupSchema";
 
 export type ProtectedCommandType = Extract<
   V2Command,
@@ -1875,6 +1877,11 @@ function bundleOwnerSemanticsAreValid(
 export async function validateProtectedEffectBundle(
   bundle: unknown,
 ): Promise<boolean> {
+  try {
+    assertProtectedEffectBundleSchema(bundle);
+  } catch {
+    return false;
+  }
   if (
     !record(bundle) ||
     bundle.schemaVersion !== 1 ||
@@ -1970,6 +1977,565 @@ export function protectedEffectBundleAffectedProjectIds(
     }
   }
   return [...new Set(ids)].sort();
+}
+
+interface ProtectedRecordProjectionAtLogicalKey {
+  recordType: SyncConflictRecord["recordType"];
+  recordId: Id;
+  value: JsonValue;
+}
+
+function protectedRecordProjectionAtLogicalKey(
+  workspace: Readonly<WorkspaceV2>,
+  logicalKey: string,
+): ProtectedRecordProjectionAtLogicalKey | undefined {
+  const logical = parseLogicalKey(logicalKey);
+  if (logical === undefined) return undefined;
+  const [recordType, owner] = logical;
+  const matches = (() => {
+    switch (recordType) {
+      case "bet": {
+        const projects = workspace.projects.filter(({ id }) => id === owner);
+        if (projects.length !== 1 || projects[0].activeBetId === undefined) {
+          return [];
+        }
+        return workspace.bets.filter(
+          ({ id, projectId }) =>
+            id === projects[0].activeBetId && projectId === owner,
+        );
+      }
+      case "daily_commitment":
+        return workspace.dailyCommitments.filter(
+          (commitment) =>
+            commitment.localDate === owner &&
+            !workspace.dailyCommitments.some(
+              ({ supersedesId }) => supersedesId === commitment.id,
+            ),
+        );
+      case "review":
+        return workspace.reviews.filter(({ triggerKey }) => triggerKey === owner);
+      case "exception":
+        return workspace.exceptions.filter(({ id }) => id === owner);
+      case "close":
+        return workspace.closeDecisions.filter(
+          ({ projectId }) => projectId === owner,
+        );
+    }
+  })();
+  if (matches.length !== 1) return undefined;
+  return {
+    recordType,
+    recordId: matches[0].id,
+    value: structuredClone(matches[0]) as unknown as JsonValue,
+  };
+}
+
+function protectedValueProjectIds(
+  recordType: SyncConflictRecord["recordType"],
+  value: JsonValue,
+): Id[] {
+  if (!record(value)) return [];
+  const ids: Id[] = [];
+  if (
+    recordType === "bet" ||
+    recordType === "exception" ||
+    recordType === "close"
+  ) {
+    if (typeof value.projectId === "string") ids.push(value.projectId);
+  } else if (recordType === "review") {
+    if (Array.isArray(value.affectedProjectIds)) {
+      ids.push(
+        ...value.affectedProjectIds.filter(
+          (id): id is string => typeof id === "string",
+        ),
+      );
+    }
+  } else if (Array.isArray(value.slots)) {
+    for (const slot of value.slots) {
+      if (!record(slot) || !record(slot.target)) continue;
+      if (
+        slot.target.kind === "work_item" &&
+        typeof slot.target.projectId === "string"
+      ) {
+        ids.push(slot.target.projectId);
+      }
+    }
+  }
+  return [...new Set(ids)].sort();
+}
+
+/**
+ * The effect cells are not always sufficient to discover Project ownership:
+ * scalar-only Review and Exception branches keep that information in their
+ * immutable primary snapshots. Keep merge planning and persisted metadata on
+ * one canonical union so those conflicts cannot silently lose their holds.
+ */
+export function protectedEffectBundlePairAffectedProjectIds(input: {
+  recordType: SyncConflictRecord["recordType"];
+  localValue: JsonValue;
+  remoteValue: JsonValue;
+  localBundle: Readonly<ProtectedEffectBundle>;
+  remoteBundle: Readonly<ProtectedEffectBundle>;
+}): Id[] {
+  return [...new Set([
+    ...protectedEffectBundleAffectedProjectIds(input.localBundle),
+    ...protectedEffectBundleAffectedProjectIds(input.remoteBundle),
+    ...protectedValueProjectIds(input.recordType, input.localValue),
+    ...protectedValueProjectIds(input.recordType, input.remoteValue),
+  ])].sort();
+}
+
+interface ProtectedEffectBundlePairInput {
+  workspace: Readonly<WorkspaceV2>;
+  conflictId: Id;
+  recordType: SyncConflictRecord["recordType"];
+  projectId: Id | undefined;
+  logicalKey: string | undefined;
+  recordId: Id;
+  remoteRecordId: Id | undefined;
+  localValue: JsonValue;
+  remoteValue: JsonValue;
+  retainedVersion?: "local" | "remote";
+  retainedBundleHash?: string;
+  affectedRecordIds: readonly Id[] | undefined;
+  affectedProjectIds: readonly Id[] | undefined;
+  localBundle: Readonly<ProtectedEffectBundle> | undefined;
+  remoteBundle: Readonly<ProtectedEffectBundle> | undefined;
+}
+
+function protectedValueIdentityMatchesLogicalKey(input: {
+  recordType: SyncConflictRecord["recordType"];
+  recordId: Id;
+  owner: string;
+  value: JsonValue;
+}): boolean {
+  if (!record(input.value) || input.value.id !== input.recordId) return false;
+  switch (input.recordType) {
+    case "bet":
+    case "close":
+      return input.value.projectId === input.owner;
+    case "daily_commitment":
+      return input.value.localDate === input.owner;
+    case "review":
+      return input.value.triggerKey === input.owner;
+    case "exception":
+      return input.value.id === input.owner;
+  }
+}
+
+const primaryProtectedEntityByRecordType = {
+  bet: "BetVersion",
+  daily_commitment: "DailyCommitment",
+  review: "ReviewRecord",
+  exception: "ExceptionRecord",
+  close: "CloseDecision",
+} as const satisfies Record<
+  SyncConflictRecord["recordType"],
+  ProtectedCreatedEntity["entity"]
+>;
+
+interface HistoricalPrimaryProjection {
+  valid: boolean;
+  created: boolean;
+  ancestor?: JsonValue;
+  /** The first predecessor not created inside this bundle. */
+  externalPredecessor?: Id | null;
+}
+
+type PrimaryProtectedEntity =
+  (typeof primaryProtectedEntityByRecordType)[keyof typeof primaryProtectedEntityByRecordType];
+
+function primaryCellId(
+  cell: ProtectedEffectCell,
+  primaryEntity: PrimaryProtectedEntity,
+): Id | undefined {
+  if (
+    (cell.kind === "create" || cell.kind === "scalar") &&
+    cell.entity === primaryEntity
+  ) return cell.entityId;
+  if (
+    cell.kind === "exception_history_append" &&
+    primaryEntity === "ExceptionRecord"
+  ) return cell.exceptionId;
+  return undefined;
+}
+
+function invalidHistoricalPrimaryProjection(): HistoricalPrimaryProjection {
+  return { valid: false, created: false };
+}
+
+function reverseStoredPrimaryValue(
+  value: JsonValue,
+  cells: readonly ProtectedEffectCell[],
+): HistoricalPrimaryProjection {
+  let current: JsonValue | undefined = structuredClone(value);
+  let created = false;
+
+  for (const cell of [...cells].reverse()) {
+    if (cell.kind === "create") {
+      if (created || current === undefined || !sameValue(current, cell.value)) {
+        return invalidHistoricalPrimaryProjection();
+      }
+      created = true;
+      current = undefined;
+      continue;
+    }
+    if (current === undefined || !record(current)) {
+      return invalidHistoricalPrimaryProjection();
+    }
+    if (cell.kind === "scalar") {
+      const currentField = Object.prototype.hasOwnProperty.call(
+        current,
+        cell.field,
+      )
+        ? current[cell.field]
+        : null;
+      if (!sameValue(currentField, cell.after)) {
+        return invalidHistoricalPrimaryProjection();
+      }
+      if (cell.before === null) {
+        delete current[cell.field];
+      } else {
+        current[cell.field] = structuredClone(cell.before);
+      }
+      continue;
+    }
+
+    if (cell.kind !== "exception_history_append") {
+      return invalidHistoricalPrimaryProjection();
+    }
+    const history = current.history;
+    if (
+      !Array.isArray(history) ||
+      cell.index !== history.length - 1 ||
+      !sameValue(history[cell.index], cell.entry)
+    ) {
+      return invalidHistoricalPrimaryProjection();
+    }
+    history.pop();
+  }
+
+  return created
+    ? { valid: current === undefined, created: true }
+    : { valid: current !== undefined, created: false, ancestor: current };
+}
+
+function createdPrimaryPredecessor(
+  cell: ProtectedCreatedEntity,
+): Id | null {
+  if (cell.entity === "BetVersion" || cell.entity === "DailyCommitment") {
+    return cell.value.supersedesId ?? null;
+  }
+  return null;
+}
+
+/**
+ * Reverse the bundle's cells for one stored primary value. A create cell binds
+ * every byte of the snapshot to the hashed bundle. Scalar-only branches bind
+ * every changed field and recover the pre-branch value so two branches can
+ * prove that they descend from the same historical snapshot.
+ */
+function reverseHistoricalPrimaryProjection(input: {
+  recordType: SyncConflictRecord["recordType"];
+  recordId: Id;
+  value: JsonValue;
+  bundle: Readonly<ProtectedEffectBundle>;
+}): HistoricalPrimaryProjection {
+  const primaryEntity = primaryProtectedEntityByRecordType[input.recordType];
+  const primaryCells = input.bundle.operations.flatMap(({ cells }) => cells)
+    .filter(
+      (cell) => primaryCellId(cell, primaryEntity) !== undefined,
+    );
+  const primaryCreates = primaryCells.filter(
+    (cell): cell is ProtectedCreatedEntity => cell.kind === "create",
+  );
+
+  if (input.recordType === "bet" || input.recordType === "daily_commitment") {
+    if (primaryCreates.length === 0) {
+      if (
+        primaryCells.some(
+          (cell) => primaryCellId(cell, primaryEntity) !== input.recordId,
+        ) ||
+        (primaryCells.length === 0 &&
+          !input.bundle.operations.every(({ commandType }) =>
+            input.recordType === "bet"
+              ? commandType === "record_bet_boundary"
+              : commandType === "propose_replan"
+          ))
+      ) return invalidHistoricalPrimaryProjection();
+      return reverseStoredPrimaryValue(input.value, primaryCells);
+    }
+
+    const createsById = new Map<Id, ProtectedCreatedEntity>();
+    for (const create of primaryCreates) {
+      if (createsById.has(create.entityId)) {
+        return invalidHistoricalPrimaryProjection();
+      }
+      createsById.set(create.entityId, create);
+    }
+    const internallySupersededIds = new Set<Id>();
+    for (const create of primaryCreates) {
+      const predecessor = createdPrimaryPredecessor(create);
+      if (predecessor !== null && createsById.has(predecessor)) {
+        internallySupersededIds.add(predecessor);
+      }
+    }
+    const leaves = [...createsById.keys()].filter(
+      (id) => !internallySupersededIds.has(id),
+    );
+    if (leaves.length !== 1 || leaves[0] !== input.recordId) {
+      return invalidHistoricalPrimaryProjection();
+    }
+
+    const visited = new Set<Id>();
+    let cursor = leaves[0];
+    let externalPredecessor: Id | null = null;
+    while (true) {
+      if (visited.has(cursor)) return invalidHistoricalPrimaryProjection();
+      visited.add(cursor);
+      const create = createsById.get(cursor);
+      if (create === undefined) return invalidHistoricalPrimaryProjection();
+      const predecessor = createdPrimaryPredecessor(create);
+      if (predecessor === null) break;
+      if (!createsById.has(predecessor)) {
+        externalPredecessor = predecessor;
+        break;
+      }
+      cursor = predecessor;
+    }
+    if (visited.size !== createsById.size) {
+      return invalidHistoricalPrimaryProjection();
+    }
+
+    const allowedPrimaryIds = new Set<Id>(createsById.keys());
+    if (externalPredecessor !== null) {
+      allowedPrimaryIds.add(externalPredecessor);
+    }
+    if (
+      primaryCells.some((cell) => {
+        const id = primaryCellId(cell, primaryEntity);
+        return id === undefined || !allowedPrimaryIds.has(id);
+      })
+    ) return invalidHistoricalPrimaryProjection();
+
+    const selectedCells = primaryCells.filter(
+      (cell) => primaryCellId(cell, primaryEntity) === input.recordId,
+    );
+    const reversed = reverseStoredPrimaryValue(input.value, selectedCells);
+    return reversed.valid && reversed.created
+      ? { ...reversed, externalPredecessor }
+      : invalidHistoricalPrimaryProjection();
+  }
+
+  const primaryIds = new Set(
+    primaryCells.flatMap((cell) => {
+      const id = primaryCellId(cell, primaryEntity);
+      return id === undefined ? [] : [id];
+    }),
+  );
+  if (
+    primaryIds.size !== 1 ||
+    !primaryIds.has(input.recordId) ||
+    primaryCreates.length > 1 ||
+    (input.recordType === "close" && primaryCreates.length !== 1)
+  ) return invalidHistoricalPrimaryProjection();
+  return reverseStoredPrimaryValue(input.value, primaryCells);
+}
+
+/**
+ * Validates the immutable conflict snapshot independently from whichever
+ * protected record is live now. Resolved conflicts use this historical layer;
+ * open/resolve command boundaries additionally require the reversible live
+ * projection below.
+ */
+export async function validateProtectedEffectBundlePairMetadata(
+  input: ProtectedEffectBundlePairInput,
+): Promise<boolean> {
+  const logical = input.logicalKey === undefined
+    ? undefined
+    : parseLogicalKey(input.logicalKey);
+  if (
+    logical === undefined ||
+    logical[0] !== input.recordType ||
+    input.remoteRecordId === undefined ||
+    input.localBundle === undefined ||
+    input.remoteBundle === undefined ||
+    input.affectedRecordIds === undefined ||
+    input.affectedProjectIds === undefined ||
+    !(await validateProtectedEffectBundle(input.localBundle)) ||
+    !(await validateProtectedEffectBundle(input.remoteBundle)) ||
+    input.localBundle.logicalKey !== input.logicalKey ||
+    input.remoteBundle.logicalKey !== input.logicalKey ||
+    input.localBundle.hash === input.remoteBundle.hash ||
+    (input.retainedVersion === undefined
+      ? input.retainedBundleHash !== undefined
+      : input.retainedBundleHash !==
+        (input.retainedVersion === "local"
+          ? input.localBundle.hash
+          : input.remoteBundle.hash))
+  ) {
+    return false;
+  }
+  if (
+    !protectedValueIdentityMatchesLogicalKey({
+      recordType: input.recordType,
+      recordId: input.recordId,
+      owner: logical[1],
+      value: input.localValue,
+    }) ||
+    !protectedValueIdentityMatchesLogicalKey({
+      recordType: input.recordType,
+      recordId: input.remoteRecordId,
+      owner: logical[1],
+      value: input.remoteValue,
+    })
+  ) return false;
+  const localHistorical = reverseHistoricalPrimaryProjection({
+    recordType: input.recordType,
+    recordId: input.recordId,
+    value: input.localValue,
+    bundle: input.localBundle,
+  });
+  const remoteHistorical = reverseHistoricalPrimaryProjection({
+    recordType: input.recordType,
+    recordId: input.remoteRecordId,
+    value: input.remoteValue,
+    bundle: input.remoteBundle,
+  });
+  if (!localHistorical.valid || !remoteHistorical.valid) return false;
+  if (localHistorical.created && remoteHistorical.created) {
+    if (
+      (input.recordType === "bet" ||
+        input.recordType === "daily_commitment") &&
+      localHistorical.externalPredecessor !==
+        remoteHistorical.externalPredecessor
+    ) return false;
+  } else if (localHistorical.created !== remoteHistorical.created) {
+    if (
+      input.recordType !== "bet" &&
+      input.recordType !== "daily_commitment"
+    ) return false;
+    const created = localHistorical.created
+      ? localHistorical
+      : remoteHistorical;
+    const existingRecordId = localHistorical.created
+      ? input.remoteRecordId
+      : input.recordId;
+    if (created.externalPredecessor !== existingRecordId) return false;
+  } else if (
+    input.recordId !== input.remoteRecordId ||
+    !sameValue(localHistorical.ancestor, remoteHistorical.ancestor)
+  ) return false;
+  const sortedUnique = (values: readonly (Id | undefined)[]) =>
+    [...new Set(values.filter((value): value is Id => value !== undefined))]
+      .sort();
+  const expectedAffectedRecordIds = sortedUnique([
+    input.recordId,
+    input.remoteRecordId,
+    ...protectedEffectBundleTouchedEntityIds(input.localBundle),
+    ...protectedEffectBundleTouchedEntityIds(input.remoteBundle),
+  ]);
+  const currentProjectIds = new Set(
+    input.workspace.projects.map(({ id }) => id),
+  );
+  const expectedAffectedProjectIds = protectedEffectBundlePairAffectedProjectIds({
+    recordType: input.recordType,
+    localValue: input.localValue,
+    remoteValue: input.remoteValue,
+    localBundle: input.localBundle,
+    remoteBundle: input.remoteBundle,
+  }).filter((id) => currentProjectIds.has(id));
+  if (
+    input.affectedRecordIds.length !== expectedAffectedRecordIds.length ||
+    input.affectedProjectIds.length !== expectedAffectedProjectIds.length ||
+    canonicalJson(sortedUnique(input.affectedRecordIds)) !==
+      canonicalJson(expectedAffectedRecordIds) ||
+    canonicalJson(sortedUnique(input.affectedProjectIds)) !==
+      canonicalJson(expectedAffectedProjectIds)
+  ) return false;
+
+  const localProjectIds = protectedValueProjectIds(
+    input.recordType,
+    input.localValue,
+  );
+  const expectedProjectId = localProjectIds.length === 1
+    ? localProjectIds[0]
+    : undefined;
+  if (input.projectId !== expectedProjectId) return false;
+  if (
+    ["bet", "exception", "close"].includes(input.recordType) &&
+    canonicalJson(
+      protectedValueProjectIds(
+        input.recordType,
+        input.remoteValue,
+      ),
+    ) !== canonicalJson(localProjectIds)
+  ) return false;
+
+  return true;
+}
+
+export async function validateProtectedEffectBundlePair(
+  input: ProtectedEffectBundlePairInput,
+): Promise<boolean> {
+  if (!(await validateProtectedEffectBundlePairMetadata(input))) return false;
+  const logicalKey = input.logicalKey;
+  const localBundle = input.localBundle;
+  const remoteBundle = input.remoteBundle;
+  if (
+    logicalKey === undefined ||
+    localBundle === undefined ||
+    remoteBundle === undefined
+  ) return false;
+
+  const currentIsRemote = input.retainedVersion === "remote";
+  const currentProjection = protectedRecordProjectionAtLogicalKey(
+    input.workspace,
+    logicalKey,
+  );
+  const currentRecordId = currentIsRemote
+    ? input.remoteRecordId
+    : input.recordId;
+  const currentValue = currentIsRemote
+    ? input.remoteValue
+    : input.localValue;
+  if (
+    currentRecordId === undefined ||
+    currentProjection === undefined ||
+    currentProjection.recordType !== input.recordType ||
+    currentProjection.recordId !== currentRecordId ||
+    !sameValue(currentProjection.value, currentValue)
+  ) return false;
+
+  let otherWorkspace: WorkspaceV2;
+  try {
+    otherWorkspace = await applyRemoteProtectedEffectBundle({
+      workspace: input.workspace,
+      localBundle: currentIsRemote ? remoteBundle : localBundle,
+      remoteBundle: currentIsRemote ? localBundle : remoteBundle,
+      conflictId: input.conflictId,
+      now: "1970-01-01T00:00:00.000Z",
+    });
+  } catch {
+    return false;
+  }
+  const otherProjection = protectedRecordProjectionAtLogicalKey(
+    otherWorkspace,
+    logicalKey,
+  );
+  const otherRecordId = currentIsRemote
+    ? input.recordId
+    : input.remoteRecordId;
+  const otherValue = currentIsRemote
+    ? input.localValue
+    : input.remoteValue;
+  return (
+    otherRecordId !== undefined &&
+    otherProjection !== undefined &&
+    otherProjection.recordType === input.recordType &&
+    otherProjection.recordId === otherRecordId &&
+    sameValue(otherProjection.value, otherValue)
+  );
 }
 
 const collectionByEntity = {

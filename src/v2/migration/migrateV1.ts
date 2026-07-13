@@ -1,10 +1,13 @@
 import type {
   Actual,
+  AttentionCapacity,
   Baseline,
+  Dependency,
   Evidence,
   Id,
   ISODate,
   Project,
+  Resource,
   ShapeUpPitch,
   WorkItem,
   WorkspaceSnapshot,
@@ -588,43 +591,101 @@ function buildProject(
 }
 
 function cleanWorkItem(workItem: WorkItem): ProjectWorkItem {
-  const {
-    shapeUpScopeId,
-    isShapeUpCycleMarker: _legacyCycleMarker,
-    ...shared
-  } = structuredClone(workItem);
-  const candidate = shared as unknown as Record<string, unknown>;
-  const optionalStrings = [
+  const result: ProjectWorkItem = {
+    id: workItem.id,
+    projectId: workItem.projectId,
+    kind: workItem.kind,
+    title: workItem.title,
+    outline: workItem.outline,
+    durationSeconds: workItem.durationSeconds,
+    estimate: {
+      mostLikelySeconds: workItem.estimate.mostLikelySeconds,
+      ...(workItem.estimate.optimisticSeconds === undefined
+        ? {}
+        : { optimisticSeconds: workItem.estimate.optimisticSeconds }),
+      ...(workItem.estimate.pessimisticSeconds === undefined
+        ? {}
+        : { pessimisticSeconds: workItem.estimate.pessimisticSeconds }),
+    },
+    assignmentIds: workItem.assignmentIds.map(
+      ({ resourceId, attention, effortSeconds }) => ({
+        resourceId,
+        attention,
+        effortSeconds,
+      }),
+    ),
+    percentComplete: workItem.percentComplete,
+    revision: 1,
+    betScopeId:
+      typeof workItem.shapeUpScopeId === "string"
+        ? workItem.shapeUpScopeId
+        : unscopedWorkId(workItem.projectId),
+  };
+  for (const field of [
     "parentId",
     "hammockStartId",
     "hammockFinishId",
-  ] as const;
-  for (const field of optionalStrings) {
-    if (candidate[field] !== undefined && typeof candidate[field] !== "string") {
-      delete candidate[field];
+  ] as const) {
+    if (typeof workItem[field] === "string") result[field] = workItem[field];
+  }
+  for (const field of [
+    "isKeyTask",
+    "isScopeExpansion",
+    "isFastDelivery",
+    "evidenceRequired",
+  ] as const) {
+    if (typeof workItem[field] === "boolean") result[field] = workItem[field];
+  }
+  const rawConstraint = asRecord(workItem.constraint);
+  if (rawConstraint !== undefined) {
+    const constraint: NonNullable<ProjectWorkItem["constraint"]> = {};
+    for (const field of [
+      "noEarlierThan",
+      "noLaterThan",
+      "fixedStart",
+      "fixedFinish",
+    ] as const) {
+      if (typeof rawConstraint[field] === "string") {
+        constraint[field] = rawConstraint[field];
+      }
     }
+    result.constraint = constraint;
   }
-  const optionalObjects = ["constraint", "repeatRule"] as const;
-  for (const field of optionalObjects) {
-    if (candidate[field] !== undefined && asRecord(candidate[field]) === undefined) {
-      delete candidate[field];
+  if (Array.isArray(workItem.splitSegments)) {
+    result.splitSegments = workItem.splitSegments.map(
+      ({ offsetSeconds, durationSeconds }) => ({
+        offsetSeconds,
+        durationSeconds,
+      }),
+    );
+  }
+  const rawRepeatRule = asRecord(workItem.repeatRule);
+  if (rawRepeatRule !== undefined) {
+    const repeatRule: NonNullable<ProjectWorkItem["repeatRule"]> = {
+      count: rawRepeatRule.count as number,
+    };
+    if (
+      rawRepeatRule.cadence === "every-n-days" ||
+      rawRepeatRule.cadence === "weekly" ||
+      rawRepeatRule.cadence === "monthly"
+    ) {
+      repeatRule.cadence = rawRepeatRule.cadence;
     }
+    if (typeof rawRepeatRule.everyDays === "number") {
+      repeatRule.everyDays = rawRepeatRule.everyDays;
+    }
+    if (
+      rawRepeatRule.startMode === "fixed-time" ||
+      rawRepeatRule.startMode === "after-previous-finish"
+    ) {
+      repeatRule.startMode = rawRepeatRule.startMode;
+    }
+    if (typeof rawRepeatRule.startAt === "string") {
+      repeatRule.startAt = rawRepeatRule.startAt;
+    }
+    result.repeatRule = repeatRule;
   }
-  if (candidate.splitSegments !== undefined && !Array.isArray(candidate.splitSegments)) {
-    delete candidate.splitSegments;
-  }
-
-  return {
-    ...(candidate as unknown as Omit<
-      ProjectWorkItem,
-      "revision" | "betScopeId"
-    >),
-    revision: 1,
-    betScopeId:
-      typeof shapeUpScopeId === "string"
-        ? shapeUpScopeId
-        : unscopedWorkId(workItem.projectId),
-  };
+  return result;
 }
 
 function cleanActual(
@@ -652,32 +713,82 @@ function cleanActual(
 }
 
 function cleanEvidence(evidence: Evidence): Evidence {
-  const result = structuredClone(evidence);
-  if (result.url !== undefined && typeof result.url !== "string") {
-    delete result.url;
-  }
-  if (
-    result.localFileRef !== undefined &&
-    typeof result.localFileRef !== "string"
-  ) {
-    delete result.localFileRef;
-  }
-  if (result.workItemId !== undefined && typeof result.workItemId !== "string") {
-    delete result.workItemId;
-  }
-  return result;
+  return {
+    id: evidence.id,
+    kind: evidence.kind,
+    summary: evidence.summary,
+    projectId: evidence.projectId,
+    createdAt: evidence.createdAt,
+    confidence: evidence.confidence,
+    tags: structuredClone(evidence.tags),
+    ...(typeof evidence.url === "string" ? { url: evidence.url } : {}),
+    ...(typeof evidence.localFileRef === "string"
+      ? { localFileRef: evidence.localFileRef }
+      : {}),
+    ...(typeof evidence.workItemId === "string"
+      ? { workItemId: evidence.workItemId }
+      : {}),
+  };
+}
+
+function cleanResource(resource: Resource): Resource {
+  return {
+    id: resource.id,
+    name: resource.name,
+    role: resource.role,
+    capacityByAttention: {
+      deep: resource.capacityByAttention.deep,
+      medium: resource.capacityByAttention.medium,
+      shallow: resource.capacityByAttention.shallow,
+    },
+    hourlyRate: resource.hourlyRate,
+  };
+}
+
+function cleanAttentionCapacity(
+  capacity: AttentionCapacity,
+): AttentionCapacity {
+  return {
+    date: capacity.date,
+    deepSeconds: capacity.deepSeconds,
+    mediumSeconds: capacity.mediumSeconds,
+    shallowSeconds: capacity.shallowSeconds,
+    unavailableBlocks: capacity.unavailableBlocks.map(({ start, finish }) => ({
+      start,
+      finish,
+    })),
+  };
+}
+
+function cleanDependency(
+  dependency: Dependency,
+): WorkspaceV2["dependencies"][number] {
+  return {
+    id: dependency.id,
+    projectId: dependency.projectId,
+    fromId: dependency.fromId,
+    toId: dependency.toId,
+    type: dependency.type,
+    lagSeconds: dependency.lagSeconds,
+    revision: 1,
+  };
 }
 
 function cleanBaseline(baseline: Baseline): Baseline {
-  const result = structuredClone(baseline);
-  const candidate = result as unknown as Record<string, unknown>;
-  if (
-    candidate.approvedByDecisionId !== undefined &&
-    typeof candidate.approvedByDecisionId !== "string"
-  ) {
-    delete candidate.approvedByDecisionId;
-  }
-  return result;
+  return {
+    id: baseline.id,
+    projectId: baseline.projectId,
+    name: baseline.name,
+    capturedAt: baseline.capturedAt,
+    plannedStartByItem: structuredClone(baseline.plannedStartByItem),
+    plannedFinishByItem: structuredClone(baseline.plannedFinishByItem),
+    plannedWorkSecondsByItem: structuredClone(
+      baseline.plannedWorkSecondsByItem,
+    ),
+    ...(typeof baseline.approvedByDecisionId === "string"
+      ? { approvedByDecisionId: baseline.approvedByDecisionId }
+      : {}),
+  };
 }
 
 function legacyAuditRecord(
@@ -772,12 +883,9 @@ export function migrateV1Workspace(
       migrated.betScopeId;
     return migrated;
   });
-  workspace.dependencies = source.dependencies.map((dependency) => ({
-    ...structuredClone(dependency),
-    revision: 1,
-  }));
-  workspace.resources = structuredClone(source.resources);
-  workspace.capacities = structuredClone(source.capacities);
+  workspace.dependencies = source.dependencies.map(cleanDependency);
+  workspace.resources = source.resources.map(cleanResource);
+  workspace.capacities = source.capacities.map(cleanAttentionCapacity);
   workspace.baselines = source.baselines.map(cleanBaseline);
   workspace.evidence = source.evidence.map(cleanEvidence);
   workspace.actuals = source.actuals.map((actual, sourceIndex) => {

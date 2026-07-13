@@ -1,10 +1,15 @@
 import type { ISODate, Id, WorkspaceSnapshot } from "@/domain/types";
+import { canonicalJson } from "@/domain/canonical";
 import { validateWorkspaceInvariants } from "@/v2/domain/invariants";
 import type {
   LegacyAuditRecord,
   MigrationRecord,
   WorkspaceV2,
 } from "@/v2/domain/types";
+import {
+  assertWorkspaceV2Schema,
+  WorkspaceBackupSchemaError,
+} from "@/v2/repositories/workspaceBackupSchema";
 
 import {
   MigrationSourceError,
@@ -20,6 +25,7 @@ export type MigrationViolationCode =
   | "INVALID_MIGRATION_HOLD"
   | "INVALID_LEGACY_CLOSURE"
   | "UNAUTHORIZED_V2_AUTHORITY"
+  | "WORKSPACE_SCHEMA_INVALID"
   | "WORKSPACE_INVARIANT";
 
 export interface MigrationViolation {
@@ -432,6 +438,18 @@ export function validateMigratedWorkspace(
         }`,
       );
     }
+  }
+
+  try {
+    assertWorkspaceV2Schema(JSON.parse(canonicalJson(workspace)) as unknown);
+  } catch (error) {
+    add(
+      "WORKSPACE_SCHEMA_INVALID",
+      error instanceof WorkspaceBackupSchemaError ? error.path : "workspace",
+      error instanceof Error
+        ? `The migrated Workspace is not export-safe: ${error.message}`
+        : "The migrated Workspace is not export-safe.",
+    );
   }
 
   return [...violations.values()].sort(

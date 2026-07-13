@@ -20,8 +20,15 @@ import {
   type AtomicWorkspaceRepository,
   type RepositoryTransactionOperation,
 } from "./browserWorkspaceRepository";
-import { CommandService } from "./commandService";
+import {
+  CommandService,
+  CommandServiceBoundaryError,
+} from "./commandService";
 import { deleteV2Database } from "./indexedDb";
+import {
+  buildWorkspaceBackupV2,
+  exportWorkspaceBackup,
+} from "./workspaceTransfer";
 
 const NOW = "2026-07-12T02:00:00.000Z";
 
@@ -228,6 +235,294 @@ describe("CommandService", () => {
         status: "pending",
       }),
     ]);
+  });
+
+  it.each([
+    {
+      name: "context unknown key",
+      poison(context: CommandContext) {
+        (context as unknown as Record<string, unknown>).unexpected = true;
+      },
+    },
+    {
+      name: "source unknown key",
+      poison(context: CommandContext) {
+        (context.source as unknown as Record<string, unknown>).unexpected = true;
+      },
+    },
+    {
+      name: "unknown capability",
+      poison(context: CommandContext) {
+        context.source.capabilities = ["unknown_capability" as never];
+      },
+    },
+    {
+      name: "duplicate capability",
+      poison(context: CommandContext) {
+        context.source.capabilities = ["human_decision", "human_decision"];
+      },
+    },
+    {
+      name: "sparse capability array",
+      poison(context: CommandContext) {
+        context.source.capabilities = new Array(1);
+      },
+    },
+    {
+      name: "custom capability array key",
+      poison(context: CommandContext) {
+        const capabilities: CommandContext["source"]["capabilities"] = [
+          "human_decision",
+        ];
+        (capabilities as unknown as Record<string, unknown>).unexpected = true;
+        context.source.capabilities = capabilities;
+      },
+    },
+    {
+      name: "fractional revision",
+      poison(context: CommandContext) {
+        context.expectedRevision = 0.5;
+      },
+    },
+    {
+      name: "noncanonical timestamp",
+      poison(context: CommandContext) {
+        context.now = "2026-07-12T02:00:00Z";
+      },
+    },
+  ])("rejects $name before every repository read or write", async ({ poison }) => {
+    const repo = repository(`invalid-context-${poison.name}`);
+    const initial = buildWorkspaceV2("workspace-invalid-context");
+    await repo.initialize(initial);
+    const load = vi.fn(() => repo.load());
+    const commit = vi.fn(async () => "committed" as const);
+    const appendRejectedReceipt = vi.fn(async () => undefined);
+    const findReceipt = vi.fn(async () => undefined);
+    const service = new CommandService(
+      repositoryProxy(repo, {
+        load,
+        commit,
+        appendRejectedReceipt,
+        findReceipt,
+      }),
+      initial.workspaceId,
+    );
+    const context = humanContext(`invalid-context-${poison.name}`, 0);
+    poison(context);
+
+    await expect(
+      service.dispatch(capture(`invalid-context-${poison.name}`), context),
+    ).rejects.toEqual(
+      expect.objectContaining<Partial<CommandServiceBoundaryError>>({
+        name: "CommandServiceBoundaryError",
+        code: "INVALID_COMMAND_CONTEXT",
+      }),
+    );
+    expect(load).not.toHaveBeenCalled();
+    expect(commit).not.toHaveBeenCalled();
+    expect(appendRejectedReceipt).not.toHaveBeenCalled();
+    expect(findReceipt).not.toHaveBeenCalled();
+    expect(await repo.load()).toEqual(initial);
+    expect(await repo.listPendingOutbox()).toEqual([]);
+    expect(await repo.listReceipts()).toEqual([]);
+  });
+
+  it("rejects the single context snapshot when an accessor hides malformed source keys on later reads", async () => {
+    const repo = repository("accessor-context-snapshot");
+    const initial = buildWorkspaceV2("workspace-accessor-context-snapshot");
+    await repo.initialize(initial);
+    const load = vi.fn(() => repo.load());
+    const commit = vi.fn(async () => "committed" as const);
+    const appendRejectedReceipt = vi.fn(async () => undefined);
+    const findReceipt = vi.fn(async () => undefined);
+    const service = new CommandService(
+      repositoryProxy(repo, {
+        load,
+        commit,
+        appendRejectedReceipt,
+        findReceipt,
+      }),
+      initial.workspaceId,
+    );
+    const context = humanContext("accessor-context-snapshot", 0);
+    const validSource = structuredClone(context.source);
+    let sourceReads = 0;
+    Object.defineProperty(context, "source", {
+      enumerable: true,
+      configurable: true,
+      get() {
+        sourceReads += 1;
+        return sourceReads === 1
+          ? { ...validSource, unexpected: true }
+          : validSource;
+      },
+    });
+
+    await expect(
+      service.dispatch(capture("accessor-context-snapshot"), context),
+    ).rejects.toEqual(
+      expect.objectContaining<Partial<CommandServiceBoundaryError>>({
+        name: "CommandServiceBoundaryError",
+        code: "INVALID_COMMAND_CONTEXT",
+      }),
+    );
+    expect(sourceReads).toBe(1);
+    expect(load).not.toHaveBeenCalled();
+    expect(commit).not.toHaveBeenCalled();
+    expect(appendRejectedReceipt).not.toHaveBeenCalled();
+    expect(findReceipt).not.toHaveBeenCalled();
+  });
+
+  it("maps an uncloneable context to the exact boundary error before repository I/O", async () => {
+    const repo = repository("uncloneable-context");
+    const initial = buildWorkspaceV2("workspace-uncloneable-context");
+    await repo.initialize(initial);
+    const load = vi.fn(() => repo.load());
+    const commit = vi.fn(async () => "committed" as const);
+    const appendRejectedReceipt = vi.fn(async () => undefined);
+    const findReceipt = vi.fn(async () => undefined);
+    const service = new CommandService(
+      repositoryProxy(repo, {
+        load,
+        commit,
+        appendRejectedReceipt,
+        findReceipt,
+      }),
+      initial.workspaceId,
+    );
+    const context = new Proxy(
+      humanContext("uncloneable-context", 0),
+      {},
+    );
+
+    await expect(
+      service.dispatch(capture("uncloneable-context"), context),
+    ).rejects.toEqual(
+      expect.objectContaining<Partial<CommandServiceBoundaryError>>({
+        name: "CommandServiceBoundaryError",
+        code: "INVALID_COMMAND_CONTEXT",
+      }),
+    );
+    expect(load).not.toHaveBeenCalled();
+    expect(commit).not.toHaveBeenCalled();
+    expect(appendRejectedReceipt).not.toHaveBeenCalled();
+    expect(findReceipt).not.toHaveBeenCalled();
+  });
+
+  it.each(["conflict open", "equivalent resolution"] as const)(
+    "rejects malformed opaque %s context before loading the Workspace",
+    async (boundary) => {
+      const repo = repository(`invalid-authority-context-${boundary}`);
+      const initial = buildWorkspaceV2("workspace-invalid-authority-context");
+      await repo.initialize(initial);
+      const load = vi.fn(() => repo.load());
+      const service = new CommandService(
+        repositoryProxy(repo, { load }),
+        initial.workspaceId,
+      );
+      const context = humanContext(`invalid-authority-${boundary}`, 0) as
+        CommandContext & { unexpected?: boolean };
+      context.unexpected = true;
+      const forged = { context } as never;
+
+      const call = boundary === "conflict open"
+        ? service.dispatchAuthorizedConflictOpen(forged)
+        : service.dispatchAuthorizedEquivalentConflictResolution(forged);
+      await expect(call).rejects.toMatchObject({
+        name: "CommandServiceBoundaryError",
+        code: "INVALID_COMMAND_CONTEXT",
+      });
+      expect(load).not.toHaveBeenCalled();
+      expect(await repo.load()).toEqual(initial);
+    },
+  );
+
+  it("returns the exact applied winner when identical commands lose the same-revision CAS race", async () => {
+    const repo = repository("identical-cas-race");
+    const initial = buildWorkspaceV2("workspace-identical-cas-race");
+    await repo.initialize(initial);
+    let waitingLoads = 0;
+    let releaseLoads: (() => void) | undefined;
+    const bothLoaded = new Promise<void>((resolve) => {
+      releaseLoads = resolve;
+    });
+    const racingRepository = () =>
+      repositoryProxy(repo, {
+        async load() {
+          const snapshot = await repo.load();
+          waitingLoads += 1;
+          if (waitingLoads === 2) releaseLoads?.();
+          await bothLoaded;
+          return snapshot;
+        },
+      });
+    const command = capture("identical-race");
+    const context = humanContext("identical-race", 0);
+
+    const [left, right] = await Promise.all([
+      new CommandService(racingRepository(), initial.workspaceId).dispatch(
+        command,
+        context,
+      ),
+      new CommandService(racingRepository(), initial.workspaceId).dispatch(
+        command,
+        context,
+      ),
+    ]);
+
+    expect(left.ok).toBe(true);
+    expect(right.ok).toBe(true);
+    if (!left.ok || !right.ok) throw new Error("Expected exact CAS winner");
+    expect(left.receipt).toEqual(right.receipt);
+    expect((await repo.load())?.commandReceipts).toEqual([left.receipt]);
+    expect(await repo.listReceipts()).toEqual([]);
+    expect(await repo.listPendingOutbox()).toHaveLength(1);
+  });
+
+  it("atomically prevents a stale human CAS rejection from colliding with a later applied owner", async () => {
+    const repo = repository("atomic-receipt-owner-race");
+    const initial = buildWorkspaceV2("workspace-atomic-receipt-owner-race");
+    await repo.initialize(initial);
+    const command = capture("shared-owner");
+    let findCount = 0;
+    let appliedRetry: Awaited<ReturnType<CommandService["dispatch"]>> | undefined;
+    const racing = repositoryProxy(repo, {
+      async commit() {
+        const unrelated = await new CommandService(
+          repo,
+          initial.workspaceId,
+        ).dispatch(capture("unrelated-winner"), humanContext("unrelated-winner", 0));
+        if (!unrelated.ok) throw new Error("Expected unrelated CAS winner");
+        return "revision_conflict";
+      },
+      async findReceipt(commandId) {
+        findCount += 1;
+        const observed = await repo.findReceipt(commandId);
+        if (findCount === 2) {
+          appliedRetry = await new CommandService(
+            repo,
+            initial.workspaceId,
+          ).dispatch(command, humanContext("shared-owner", 1));
+        }
+        return observed;
+      },
+    });
+
+    const stale = await new CommandService(racing, initial.workspaceId).dispatch(
+      command,
+      humanContext("shared-owner", 0),
+    );
+
+    expect(stale.ok).toBe(false);
+    expect(appliedRetry?.ok).toBe(true);
+    expect((await repo.load())?.commandReceipts).toEqual([
+      expect.objectContaining({ commandId: "unrelated-winner" }),
+      expect.objectContaining({ commandId: "shared-owner", status: "applied" }),
+    ]);
+    expect(await repo.listReceipts()).toEqual([]);
+    await expect(
+      exportWorkspaceBackup({ repository: repo, exportedAt: NOW }),
+    ).resolves.toMatchObject({ schemaVersion: 2 });
   });
 
   it("snapshots command and context synchronously before the first repository await", async () => {
@@ -594,14 +889,37 @@ describe("CommandService", () => {
     expect(conflict.ok).toBe(false);
     if (conflict.ok) throw new Error("Expected first system CAS conflict");
     expect(conflict.rejection.code).toBe("REVISION_CONFLICT");
-    const applied = await service.dispatch(proposal.command, commandContext);
+    const appliedAt = "2026-07-12T02:05:00.000Z";
+    const applied = await service.dispatch(proposal.command, {
+      ...commandContext,
+      now: appliedAt,
+    });
 
     expect(applied.ok).toBe(true);
     expect(commitAttempts).toBe(2);
     expect((await repo.load())?.commandReceipts).toEqual([
       expect.objectContaining({ commandId, status: "applied" }),
     ]);
-    expect((await repo.findReceipt(commandId))?.status).toBe("rejected");
+    expect((await repo.findReceipt(commandId))?.status).toBe("applied");
+    expect(await repo.listReceipts()).toEqual([
+      expect.objectContaining({ commandId, status: "rejected" }),
+    ]);
+    const rejectedReceipt = (await repo.listReceipts())[0];
+    if (rejectedReceipt === undefined) {
+      throw new Error("Expected append-only system CAS rejection");
+    }
+    await expect(
+      buildWorkspaceBackupV2({
+        snapshot: {
+          workspace: buildWorkspaceV2("workspace-system-overlap-export", {
+            revision: 1,
+            commandReceipts: [applied.receipt],
+          }),
+          rejectedReceipts: [rejectedReceipt],
+        },
+        exportedAt: appliedAt,
+      }),
+    ).resolves.toMatchObject({ schemaVersion: 2 });
 
     const appliedWinsDedupe = await service.dispatch(
       proposal.command,

@@ -1,3 +1,4 @@
+import { IDBFactory } from "fake-indexeddb";
 import { describe, expect, it } from "vitest";
 
 import { canonicalJson, sha256Hex } from "../../domain/canonical";
@@ -9,7 +10,13 @@ import {
 import { deriveReviewQueue } from "../domain/review";
 import { stableHash } from "../domain/stableHash";
 import { createEmptyWorkspaceV2 } from "../domain/workspace";
-import type { JsonValue, ReviewRecord, WorkspaceV2 } from "../domain/types";
+import type {
+  CommandReceipt,
+  JsonValue,
+  ReviewRecord,
+  WorkspaceV2,
+} from "../domain/types";
+import { buildSyncConflictRecord } from "../domain/conflicts";
 import {
   buildBetVersion,
   buildDirectionBrief,
@@ -26,6 +33,8 @@ import {
   protectedEffectBundleTouchedEntityIds,
   type ProtectedEffectBundle,
   validateProtectedEffectBundle,
+  validateProtectedEffectBundlePair,
+  validateProtectedEffectBundlePairMetadata,
 } from "./syncConflictBundles";
 import {
   authorizeConflictOpenFromBranchesV2,
@@ -39,6 +48,11 @@ import {
   verifySyncHistoryV2,
   type VerifiedSyncReplay,
 } from "./syncProtocol";
+import { BrowserWorkspaceRepository } from "./browserWorkspaceRepository";
+import {
+  buildWorkspaceBackupV2,
+  restoreVerifiedBackup,
+} from "./workspaceTransfer";
 
 const PASSPHRASE = "sync-conflict-bundle-test-passphrase";
 
@@ -58,67 +72,1500 @@ async function rehashBundle(
 ): Promise<ProtectedEffectBundle> {
   return {
     ...bundle,
-    hash: await sha256Hex(canonicalJson({
-      schemaVersion: bundle.schemaVersion,
-      logicalKey: bundle.logicalKey,
-      operations: bundle.operations,
-    })),
+    hash: await sha256Hex(
+      canonicalJson({
+        schemaVersion: bundle.schemaVersion,
+        logicalKey: bundle.logicalKey,
+        operations: bundle.operations,
+      }),
+    ),
+  };
+}
+
+async function actionOnlyDailyProjection(input: {
+  workspace: Readonly<WorkspaceV2>;
+  id: string;
+  localDate: string;
+  version: number;
+  createdAt: string;
+  seed: number;
+  supersedesId?: string;
+}) {
+  const value: WorkspaceV2["dailyCommitments"][number] = {
+    id: input.id,
+    localDate: input.localDate,
+    version: input.version,
+    proposalHash: `proposal:${input.id}`,
+    capacitySnapshot: {
+      timeZone: "UTC",
+      weeklyWindows: [],
+      dailyBudgets: [],
+      unavailableBlocks: [],
+      updatedAt: input.createdAt,
+      updatedBy: `human:${input.id}`,
+    },
+    slots: [],
+    actorId: `human:${input.id}`,
+    committedAt: input.createdAt,
+    ...(input.supersedesId === undefined
+      ? {}
+      : { supersedesId: input.supersedesId }),
+  };
+  const bundle = await projectProtectedEffectBundle({
+    ...operationProvenance(input.seed),
+    workspace: input.workspace,
+    command: {
+      type: "commit_today",
+      commitment: {
+        id: value.id,
+        localDate: value.localDate,
+        workspaceRevision: input.workspace.revision,
+        generatedAt: input.createdAt,
+        proposalHash: value.proposalHash,
+        slots: [],
+      },
+    },
+    commandId: `command:${input.id}`,
+    createdAt: input.createdAt,
+    diff: [
+      {
+        entity: "DailyCommitment",
+        entityId: value.id,
+        field: "created",
+        before: null,
+        after: value as unknown as JsonValue,
+      },
+    ],
+  });
+  if (bundle === undefined) throw new Error("Expected Daily Commitment bundle");
+  return { bundle, value };
+}
+
+async function betConflictPairFixture() {
+  const base = createEmptyWorkspaceV2("workspace-bundle-pair");
+  const brief = buildDirectionBrief({
+    id: "project-1:direction-brief:1",
+    projectId: "project-1",
+    appetiteSeconds: 3_600,
+    firstScope: [
+      {
+        id: "scope-1",
+        title: "Bounded scope",
+        description: "Produce one inspectable result.",
+      },
+    ],
+    createdAt: "2026-07-12T00:00:00.000Z",
+    updatedAt: "2026-07-12T00:00:00.000Z",
+  });
+  base.directionBriefs.push(brief);
+  base.projects.push(
+    buildProjectV2({
+      id: "project-1",
+      stage: "awaiting_bet",
+      activeDirectionBriefId: brief.id,
+      createdAt: brief.createdAt,
+      updatedAt: brief.updatedAt,
+    }),
+  );
+
+  const place = async (side: "local" | "remote", minute: string) => {
+    const command = {
+      type: "place_bet" as const,
+      projectId: "project-1",
+      betId: `bet-${side}`,
+      start: `2026-07-12T00:${minute}:00.000Z`,
+    };
+    const result = await executeCommand(base, command, {
+      commandId: `command-${side}`,
+      expectedRevision: base.revision,
+      actorId: `human-${side}`,
+      actorKind: "human",
+      origin: "ui",
+      source: {
+        sourceId: `verified-human-${side}`,
+        verified: true,
+        capabilities: ["human_decision"],
+      },
+      now: command.start,
+    });
+    if (!result.ok) {
+      throw new Error(
+        `Expected ${side} Bet: ${JSON.stringify(result.rejection)}`,
+      );
+    }
+    const bundle = await projectProtectedEffectBundle({
+      ...operationProvenance(side === "local" ? 701 : 702),
+      workspace: base,
+      command,
+      commandId: result.receipt.commandId,
+      createdAt: result.receipt.createdAt,
+      diff: result.receipt.diff,
+    });
+    if (bundle === undefined) throw new Error(`Expected ${side} bundle`);
+    const value = result.workspace.bets.find(({ id }) => id === command.betId);
+    if (value === undefined) throw new Error(`Expected ${side} Bet value`);
+    return { bundle, value, workspace: result.workspace };
+  };
+
+  const local = await place("local", "01");
+  const remote = await place("remote", "02");
+  const affectedRecordIds = [
+    ...new Set([
+      local.value.id,
+      remote.value.id,
+      ...protectedEffectBundleTouchedEntityIds(local.bundle),
+      ...protectedEffectBundleTouchedEntityIds(remote.bundle),
+    ]),
+  ].sort();
+  const affectedProjectIds = [
+    ...new Set([
+      ...protectedEffectBundleAffectedProjectIds(local.bundle),
+      ...protectedEffectBundleAffectedProjectIds(remote.bundle),
+    ]),
+  ].sort();
+  return { base, local, remote, affectedProjectIds, affectedRecordIds };
+}
+
+type BetPairFixture = Awaited<ReturnType<typeof betConflictPairFixture>>;
+
+function validBetPairInput(fixture: BetPairFixture) {
+  return {
+    workspace: fixture.local.workspace,
+    conflictId: "conflict-valid-bet",
+    recordType: "bet" as const,
+    projectId: "project-1",
+    logicalKey: fixture.local.bundle.logicalKey,
+    recordId: fixture.local.value.id,
+    remoteRecordId: fixture.remote.value.id,
+    localValue: fixture.local.value as unknown as JsonValue,
+    remoteValue: fixture.remote.value as unknown as JsonValue,
+    affectedRecordIds: fixture.affectedRecordIds,
+    affectedProjectIds: fixture.affectedProjectIds,
+    localBundle: fixture.local.bundle,
+    remoteBundle: fixture.remote.bundle,
   };
 }
 
 describe("sync conflict effect bundles", () => {
+  it("accepts a Bet conflict whose wrapper is bound to both bundle projections", async () => {
+    const fixture = await betConflictPairFixture();
+
+    await expect(
+      validateProtectedEffectBundlePair(validBetPairInput(fixture)),
+    ).resolves.toBe(true);
+  });
+
+  it("rejects incomplete, equal, mismatched-key, wrong-owner, and wrong-projection Bet pairs", async () => {
+    const fixture = await betConflictPairFixture();
+    const valid = validBetPairInput(fixture);
+    const cases = [
+      { ...valid, remoteBundle: undefined },
+      {
+        ...valid,
+        remoteRecordId: valid.recordId,
+        remoteValue: valid.localValue,
+        remoteBundle: valid.localBundle,
+        affectedRecordIds: protectedEffectBundleTouchedEntityIds(
+          valid.localBundle,
+        ),
+      },
+      { ...valid, logicalKey: '["bet","project-other"]' },
+      { ...valid, projectId: "project-other" },
+      {
+        ...valid,
+        remoteValue: {
+          ...(valid.remoteValue as Record<string, JsonValue>),
+          actorId: "forged-remote-actor",
+        },
+      },
+    ];
+
+    for (const candidate of cases) {
+      await expect(validateProtectedEffectBundlePair(candidate)).resolves.toBe(
+        false,
+      );
+    }
+  });
+
+  it("rejects rehashed Bet branches that name different external predecessors", async () => {
+    const fixture = await betConflictPairFixture();
+    const valid = validBetPairInput(fixture);
+    const localBundle = structuredClone(valid.localBundle);
+    const created = localBundle.operations
+      .flatMap(({ cells }) => cells)
+      .find((cell) => cell.kind === "create" && cell.entity === "BetVersion");
+    if (
+      created === undefined ||
+      created.kind !== "create" ||
+      created.entity !== "BetVersion"
+    ) {
+      throw new Error("Expected local Bet create");
+    }
+    created.value.supersedesId = "bet-unrelated-root";
+    const rehashed = await rehashBundle(localBundle);
+    const localValue = {
+      ...(valid.localValue as Record<string, JsonValue>),
+      supersedesId: "bet-unrelated-root",
+    } as JsonValue;
+
+    await expect(
+      validateProtectedEffectBundlePairMetadata({
+        ...valid,
+        localValue,
+        localBundle: rehashed,
+      }),
+    ).resolves.toBe(false);
+  });
+
+  it("rejects branching, cyclic, and disconnected Daily supersession graphs", async () => {
+    const base = createEmptyWorkspaceV2("workspace-daily-invalid-graphs");
+    const localDate = "2026-07-12";
+    const projection = (
+      id: string,
+      version: number,
+      seed: number,
+      supersedesId?: string,
+    ) =>
+      actionOnlyDailyProjection({
+        workspace: base,
+        id,
+        localDate,
+        version,
+        createdAt: `2026-07-12T00:${String(seed - 750).padStart(2, "0")}:00.000Z`,
+        seed,
+        ...(supersedesId === undefined ? {} : { supersedesId }),
+      });
+    const peer = await projection("commitment-graph-peer", 1, 751);
+
+    const branchRoot = await projection("commitment-branch-root", 1, 752);
+    const branchLeft = await projection(
+      "commitment-branch-left",
+      2,
+      753,
+      branchRoot.value.id,
+    );
+    const branchRight = await projection(
+      "commitment-branch-right",
+      2,
+      754,
+      branchRoot.value.id,
+    );
+
+    const cycleLeft = await projection(
+      "commitment-cycle-left",
+      1,
+      755,
+      "commitment-cycle-right",
+    );
+    const cycleRight = await projection(
+      "commitment-cycle-right",
+      2,
+      756,
+      cycleLeft.value.id,
+    );
+
+    const disconnectedLeaf = await projection(
+      "commitment-disconnected-leaf",
+      1,
+      757,
+    );
+    const disconnectedCycleLeft = await projection(
+      "commitment-disconnected-cycle-left",
+      2,
+      758,
+      "commitment-disconnected-cycle-right",
+    );
+    const disconnectedCycleRight = await projection(
+      "commitment-disconnected-cycle-right",
+      3,
+      759,
+      disconnectedCycleLeft.value.id,
+    );
+
+    const cases = [
+      {
+        name: "branching",
+        projections: [branchRoot, branchLeft, branchRight],
+        wrapper: branchLeft.value,
+      },
+      {
+        name: "cycle",
+        projections: [cycleLeft, cycleRight],
+        wrapper: cycleLeft.value,
+      },
+      {
+        name: "disconnected component",
+        projections: [
+          disconnectedLeaf,
+          disconnectedCycleLeft,
+          disconnectedCycleRight,
+        ],
+        wrapper: disconnectedLeaf.value,
+      },
+    ];
+
+    for (const candidate of cases) {
+      const bundle = await combineProtectedEffectBundles(
+        candidate.projections.map(({ bundle }) => bundle),
+      );
+      await expect(
+        validateProtectedEffectBundle(bundle),
+        candidate.name,
+      ).resolves.toBe(true);
+      const affectedRecordIds = [
+        ...new Set([
+          candidate.wrapper.id,
+          peer.value.id,
+          ...protectedEffectBundleTouchedEntityIds(bundle),
+          ...protectedEffectBundleTouchedEntityIds(peer.bundle),
+        ]),
+      ].sort();
+
+      await expect(
+        validateProtectedEffectBundlePairMetadata({
+          workspace: base,
+          conflictId: `conflict-daily-${candidate.name}`,
+          recordType: "daily_commitment",
+          projectId: undefined,
+          logicalKey: bundle.logicalKey,
+          recordId: candidate.wrapper.id,
+          remoteRecordId: peer.value.id,
+          localValue: candidate.wrapper as unknown as JsonValue,
+          remoteValue: peer.value as unknown as JsonValue,
+          affectedRecordIds,
+          affectedProjectIds: [],
+          localBundle: bundle,
+          remoteBundle: peer.bundle,
+        }),
+        candidate.name,
+      ).resolves.toBe(false);
+    }
+  });
+
+  it("rejects a primary scalar identity outside the created Bet chain and its external root", async () => {
+    const fixture = await betConflictPairFixture();
+    const activeBrief = fixture.local.workspace.directionBriefs.find(
+      ({ id }) =>
+        id === fixture.local.workspace.projects[0]?.activeDirectionBriefId,
+    );
+    if (activeBrief === undefined)
+      throw new Error("Expected active Direction Brief");
+    const {
+      version: _version,
+      createdAt: _createdAt,
+      updatedAt: _updatedAt,
+      ...briefDraft
+    } = activeBrief;
+    const command = {
+      type: "update_direction" as const,
+      projectId: "project-1",
+      brief: {
+        ...briefDraft,
+        successEvidence: "A materially different success signal.",
+      },
+    };
+    const result = await executeCommand(fixture.local.workspace, command, {
+      commandId: "command-off-chain-bet-scalar",
+      expectedRevision: fixture.local.workspace.revision,
+      actorId: "human-local",
+      actorKind: "human",
+      origin: "ui",
+      source: {
+        sourceId: "verified-human-local",
+        verified: true,
+        capabilities: ["human_decision"],
+      },
+      now: "2026-07-12T00:03:00.000Z",
+    });
+    if (!result.ok) {
+      throw new Error(
+        `Expected material Direction update: ${result.rejection.reason}`,
+      );
+    }
+    const updateBundle = await projectProtectedEffectBundle({
+      ...operationProvenance(760),
+      workspace: fixture.local.workspace,
+      command,
+      commandId: result.receipt.commandId,
+      createdAt: result.receipt.createdAt,
+      diff: result.receipt.diff,
+    });
+    if (updateBundle === undefined) {
+      throw new Error("Expected material Direction bundle");
+    }
+    const forged = await combineProtectedEffectBundles([
+      fixture.local.bundle,
+      updateBundle,
+    ]);
+    const updateOperation = forged.operations.find(
+      ({ commandType }) => commandType === "update_direction",
+    );
+    if (updateOperation === undefined)
+      throw new Error("Expected update operation");
+    const primaryScalars = updateOperation.cells.filter(
+      (cell) => cell.kind === "scalar" && cell.entity === "BetVersion",
+    );
+    expect(primaryScalars).toHaveLength(2);
+    for (const scalar of primaryScalars) {
+      if (scalar.kind !== "scalar") throw new Error("Expected Bet scalar");
+      scalar.entityId = "bet-off-chain";
+    }
+    const rebetHold = updateOperation.cells.find(
+      (cell) => cell.kind === "project_hold_delta",
+    );
+    if (
+      rebetHold === undefined ||
+      rebetHold.kind !== "project_hold_delta" ||
+      rebetHold.after === null
+    ) {
+      throw new Error("Expected added Re-bet hold");
+    }
+    rebetHold.after.value.sourceId = "bet-off-chain";
+    rebetHold.after.value.affectedRecordIds =
+      rebetHold.after.value.affectedRecordIds.map((id) =>
+        id === fixture.local.value.id ? "bet-off-chain" : id,
+      );
+    rebetHold.holdKey = JSON.stringify(["rebet_required", "bet-off-chain"]);
+    const rehashed = await rehashBundle(forged);
+    await expect(validateProtectedEffectBundle(rehashed)).resolves.toBe(true);
+    const affectedRecordIds = [
+      ...new Set([
+        fixture.local.value.id,
+        fixture.remote.value.id,
+        ...protectedEffectBundleTouchedEntityIds(rehashed),
+        ...protectedEffectBundleTouchedEntityIds(fixture.remote.bundle),
+      ]),
+    ].sort();
+    const affectedProjectIds = [
+      ...new Set([
+        ...protectedEffectBundleAffectedProjectIds(rehashed),
+        ...protectedEffectBundleAffectedProjectIds(fixture.remote.bundle),
+      ]),
+    ].sort();
+
+    await expect(
+      validateProtectedEffectBundlePairMetadata({
+        ...validBetPairInput(fixture),
+        affectedRecordIds,
+        affectedProjectIds,
+        localBundle: rehashed,
+      }),
+    ).resolves.toBe(false);
+  });
+
+  it("binds a resolved conflict retainedVersion to the exact selected bundle hash", async () => {
+    const fixture = await betConflictPairFixture();
+    const valid = validBetPairInput(fixture);
+
+    await expect(
+      validateProtectedEffectBundlePair({
+        ...valid,
+        retainedVersion: "local",
+        retainedBundleHash: valid.localBundle.hash,
+      }),
+    ).resolves.toBe(true);
+    await expect(
+      validateProtectedEffectBundlePair({
+        ...valid,
+        retainedVersion: "local",
+        retainedBundleHash: valid.remoteBundle.hash,
+      }),
+    ).resolves.toBe(false);
+    await expect(
+      validateProtectedEffectBundlePair({
+        ...valid,
+        retainedBundleHash: valid.localBundle.hash,
+      }),
+    ).resolves.toBe(false);
+
+    const remoteWorkspace = await applyRemoteProtectedEffectBundle({
+      workspace: valid.workspace,
+      localBundle: valid.localBundle,
+      remoteBundle: valid.remoteBundle,
+      conflictId: valid.conflictId,
+      now: "2026-07-12T00:04:00.000Z",
+    });
+    await expect(
+      validateProtectedEffectBundlePair({
+        ...valid,
+        workspace: remoteWorkspace,
+        retainedVersion: "remote",
+        retainedBundleHash: valid.remoteBundle.hash,
+      }),
+    ).resolves.toBe(true);
+
+    const laterWorkspace = structuredClone(remoteWorkspace);
+    const laterBet = {
+      ...structuredClone(fixture.remote.value),
+      id: "bet-later",
+      version: fixture.remote.value.version + 1,
+      supersedesId: fixture.remote.value.id,
+    };
+    laterWorkspace.bets.push(laterBet);
+    laterWorkspace.projects[0]!.activeBetId = laterBet.id;
+    const historical = {
+      ...valid,
+      workspace: laterWorkspace,
+      retainedVersion: "remote" as const,
+      retainedBundleHash: valid.remoteBundle.hash,
+    };
+    await expect(
+      validateProtectedEffectBundlePairMetadata(historical),
+    ).resolves.toBe(true);
+    await expect(validateProtectedEffectBundlePair(historical)).resolves.toBe(
+      false,
+    );
+
+    await expect(
+      validateProtectedEffectBundlePairMetadata({
+        ...historical,
+        remoteValue: {
+          ...(historical.remoteValue as Record<string, JsonValue>),
+          id: "forged-history-id",
+        },
+      }),
+    ).resolves.toBe(false);
+
+    await expect(
+      validateProtectedEffectBundlePairMetadata({
+        ...historical,
+        remoteValue: {
+          ...(historical.remoteValue as Record<string, JsonValue>),
+          actorId: "forged-historical-actor",
+        },
+      }),
+    ).resolves.toBe(false);
+  });
+
+  it("keeps a resolved remote Bet exportable after a material Direction change and completed Re-bet", async () => {
+    const fixture = await betConflictPairFixture();
+    const pair = validBetPairInput(fixture);
+    const conflictId = "conflict-bet-history";
+    const openedAt = "2026-07-12T00:03:00.000Z";
+    const openCommand = {
+      type: "open_sync_conflict",
+      conflict: {
+        id: conflictId,
+        recordType: "bet",
+        recordId: fixture.local.value.id,
+        remoteRecordId: fixture.remote.value.id,
+        logicalKey: fixture.local.bundle.logicalKey,
+        affectedProjectIds: fixture.affectedProjectIds,
+        affectedRecordIds: fixture.affectedRecordIds,
+        commonAncestorHash: "genesis:workspace-bundle-pair",
+        localValue: fixture.local.value as unknown as JsonValue,
+        remoteValue: fixture.remote.value as unknown as JsonValue,
+        localBundle: fixture.local.bundle,
+        remoteBundle: fixture.remote.bundle,
+      },
+    } as const satisfies V2Command;
+    const conflict = buildSyncConflictRecord(
+      openCommand.conflict,
+      {
+        record: structuredClone(fixture.local.value) as unknown as JsonValue,
+        projectIds: ["project-1"],
+        projectId: "project-1",
+      },
+      openedAt,
+    );
+    const provisional = {
+      ...structuredClone(fixture.local.workspace),
+      syncConflicts: [conflict],
+    };
+    const reviewDraft = deriveReviewQueue(provisional, openedAt).find(
+      ({ triggerKey }) => triggerKey === `sync_conflict:${conflictId}`,
+    );
+    if (reviewDraft === undefined) throw new Error("Expected conflict Review");
+    const openReceiptBase: Omit<CommandReceipt, "receiptHash"> = {
+      id: "open-bet-history",
+      commandId: "open-bet-history",
+      commandType: "open_sync_conflict",
+      baseRevision: 1,
+      revision: 2,
+      payloadHash: await stableHash(openCommand as unknown as JsonValue),
+      actorId: "sync-conflict-detector",
+      actorKind: "system",
+      origin: "agent",
+      source: {
+        sourceId: "verified-sync-conflict-detector",
+        verified: true,
+        capabilities: ["open_conflict"],
+      },
+      status: "applied",
+      createdAt: openedAt,
+      diff: [
+        {
+          entity: "SyncConflictRecord",
+          entityId: conflictId,
+          field: "created",
+          before: null,
+          after: structuredClone(conflict) as unknown as JsonValue,
+        },
+      ],
+    };
+    const openReceipt: CommandReceipt = {
+      ...openReceiptBase,
+      receiptHash: await stableHash(openReceiptBase as unknown as JsonValue),
+    };
+    const opened: WorkspaceV2 = {
+      ...structuredClone(fixture.local.workspace),
+      revision: 2,
+      syncConflicts: [conflict],
+      reviews: [{ ...reviewDraft, status: "open", createdAt: openedAt }],
+      projects: fixture.local.workspace.projects.map((project) => ({
+        ...structuredClone(project),
+        holds: [
+          ...structuredClone(project.holds),
+          {
+            type: "sync_conflict",
+            sourceId: conflictId,
+            affectedRecordIds: structuredClone(fixture.affectedRecordIds),
+            createdAt: openedAt,
+          },
+        ],
+        updatedAt: openedAt,
+      })),
+      commandReceipts: [
+        ...structuredClone(fixture.local.workspace.commandReceipts),
+        openReceipt,
+      ],
+    };
+    await expect(
+      validateProtectedEffectBundlePair({ ...pair, workspace: opened }),
+    ).resolves.toBe(true);
+
+    const resolved = await executeCommand(
+      opened,
+      {
+        type: "resolve_sync_conflict",
+        reviewId: `review:sync_conflict:${conflictId}`,
+        resolution: {
+          conflictId,
+          retainedVersion: "remote",
+          retainedValue: fixture.remote.value as unknown as JsonValue,
+          retainedBundleHash: fixture.remote.bundle.hash,
+          rationale: "Keep the verified remote Bet.",
+        },
+      },
+      {
+        commandId: "resolve-bet-history",
+        expectedRevision: 2,
+        actorId: "resolving-human",
+        actorKind: "human",
+        origin: "ui",
+        source: {
+          sourceId: "verified-resolving-human",
+          verified: true,
+          capabilities: ["human_decision"],
+        },
+        now: "2026-07-12T00:04:00.000Z",
+      },
+    );
+    if (!resolved.ok) {
+      throw new Error(
+        `Expected Bet conflict resolution: ${resolved.rejection.reason}`,
+      );
+    }
+    const activeBrief = resolved.workspace.directionBriefs.find(
+      ({ id }) => id === resolved.workspace.projects[0]?.activeDirectionBriefId,
+    );
+    if (activeBrief === undefined) throw new Error("Expected active Direction");
+    const {
+      version: _activeBriefVersion,
+      createdAt: _activeBriefCreatedAt,
+      updatedAt: _activeBriefUpdatedAt,
+      ...activeBriefDraft
+    } = activeBrief;
+    const invalidated = await executeCommand(
+      resolved.workspace,
+      {
+        type: "update_direction",
+        projectId: "project-1",
+        brief: {
+          ...activeBriefDraft,
+          audienceAndProblem:
+            "A materially different operator now needs the flow.",
+        },
+      },
+      {
+        commandId: "invalidate-remote-bet",
+        expectedRevision: resolved.workspace.revision,
+        actorId: "resolving-human",
+        actorKind: "human",
+        origin: "ui",
+        source: {
+          sourceId: "verified-resolving-human",
+          verified: true,
+          capabilities: ["human_decision"],
+        },
+        now: "2026-07-12T00:05:00.000Z",
+      },
+    );
+    if (!invalidated.ok) throw new Error("Expected material Direction change");
+    await expect(
+      buildWorkspaceBackupV2({
+        snapshot: { workspace: invalidated.workspace, rejectedReceipts: [] },
+        exportedAt: "2026-07-12T00:05:30.000Z",
+      }),
+    ).resolves.toMatchObject({ schemaVersion: 2 });
+
+    const rebet = await executeCommand(
+      invalidated.workspace,
+      {
+        type: "place_bet",
+        projectId: "project-1",
+        betId: "bet-after-conflict",
+        start: "2026-07-12T00:06:00.000Z",
+      },
+      {
+        commandId: "rebet-after-conflict",
+        expectedRevision: invalidated.workspace.revision,
+        actorId: "resolving-human",
+        actorKind: "human",
+        origin: "ui",
+        source: {
+          sourceId: "verified-resolving-human",
+          verified: true,
+          capabilities: ["human_decision"],
+        },
+        now: "2026-07-12T00:06:00.000Z",
+      },
+    );
+    if (!rebet.ok) throw new Error("Expected post-conflict Re-bet");
+    await expect(
+      buildWorkspaceBackupV2({
+        snapshot: { workspace: rebet.workspace, rejectedReceipts: [] },
+        exportedAt: "2026-07-12T00:07:00.000Z",
+      }),
+    ).resolves.toMatchObject({
+      workspace: {
+        projects: [
+          expect.objectContaining({ activeBetId: "bet-after-conflict" }),
+        ],
+      },
+    });
+  });
+
+  it("rejects valid same-owner Bet bundles reparented to an unrelated Bet identity", async () => {
+    const fixture = await betConflictPairFixture();
+    const unrelated = {
+      ...structuredClone(fixture.local.value),
+      id: "bet-unrelated",
+    };
+    const workspace = structuredClone(fixture.local.workspace);
+    workspace.bets.push(unrelated);
+
+    await expect(
+      validateProtectedEffectBundlePair({
+        workspace,
+        conflictId: "conflict-reparented-bet",
+        recordType: "bet",
+        projectId: "project-1",
+        logicalKey: fixture.local.bundle.logicalKey,
+        recordId: unrelated.id,
+        remoteRecordId: unrelated.id,
+        localValue: unrelated as unknown as JsonValue,
+        remoteValue: unrelated as unknown as JsonValue,
+        affectedRecordIds: [
+          ...new Set([unrelated.id, ...fixture.affectedRecordIds]),
+        ].sort(),
+        affectedProjectIds: fixture.affectedProjectIds,
+        localBundle: fixture.local.bundle,
+        remoteBundle: fixture.remote.bundle,
+      }),
+    ).resolves.toBe(false);
+  });
+
+  it("keeps an action-only Daily Commitment conflict ownerless like lookupConflictTarget", async () => {
+    const base = createEmptyWorkspaceV2("workspace-action-only-pair");
+    const localDate = "2026-07-12";
+    const buildSide = async (side: "local" | "remote", minute: string) => {
+      const committedAt = `2026-07-12T00:${minute}:00.000Z`;
+      const commitment = {
+        id: `commitment-${side}`,
+        localDate,
+        version: 1,
+        proposalHash: `proposal-${side}`,
+        capacitySnapshot: {
+          timeZone: "UTC",
+          weeklyWindows: [],
+          dailyBudgets: [],
+          unavailableBlocks: [],
+          updatedAt: committedAt,
+          updatedBy: `human-${side}`,
+        },
+        slots: [
+          {
+            id: `slot-${side}`,
+            target: { kind: "action" as const, actionId: "action-1" },
+            targetRevision: 1,
+            start: committedAt,
+            finish: `2026-07-12T00:${String(Number(minute) + 1).padStart(2, "0")}:00.000Z`,
+            attention: "deep" as const,
+          },
+        ],
+        actorId: `human-${side}`,
+        committedAt,
+      };
+      const command = {
+        type: "commit_today" as const,
+        commitment: {
+          id: commitment.id,
+          localDate,
+          workspaceRevision: 0,
+          generatedAt: committedAt,
+          proposalHash: commitment.proposalHash,
+          slots: commitment.slots,
+        },
+      };
+      const bundle = await projectProtectedEffectBundle({
+        ...operationProvenance(side === "local" ? 711 : 712),
+        workspace: base,
+        command,
+        commandId: `command-${side}`,
+        createdAt: committedAt,
+        diff: [
+          {
+            entity: "DailyCommitment",
+            entityId: commitment.id,
+            field: "created",
+            before: null,
+            after: commitment as unknown as JsonValue,
+          },
+        ],
+      });
+      if (bundle === undefined) throw new Error("Expected commitment bundle");
+      return { bundle, commitment };
+    };
+    const local = await buildSide("local", "01");
+    const remote = await buildSide("remote", "03");
+    const workspace = structuredClone(base);
+    workspace.dailyCommitments.push(local.commitment);
+
+    const pair = {
+      workspace,
+      conflictId: "conflict-action-only",
+      recordType: "daily_commitment",
+      projectId: undefined,
+      logicalKey: local.bundle.logicalKey,
+      recordId: local.commitment.id,
+      remoteRecordId: remote.commitment.id,
+      localValue: local.commitment as unknown as JsonValue,
+      remoteValue: remote.commitment as unknown as JsonValue,
+      affectedRecordIds: [local.commitment.id, remote.commitment.id].sort(),
+      affectedProjectIds: [],
+      localBundle: local.bundle,
+      remoteBundle: remote.bundle,
+    } as const;
+    await expect(validateProtectedEffectBundlePair(pair)).resolves.toBe(true);
+    await expect(
+      validateProtectedEffectBundlePairMetadata({
+        ...pair,
+        retainedVersion: "local",
+        retainedBundleHash: local.bundle.hash,
+      }),
+    ).resolves.toBe(true);
+    await expect(
+      validateProtectedEffectBundlePairMetadata({
+        ...pair,
+        retainedVersion: "local",
+        retainedBundleHash: local.bundle.hash,
+        remoteValue: {
+          ...(remote.commitment as unknown as Record<string, JsonValue>),
+          proposalHash: "forged-historical-proposal",
+        },
+      }),
+    ).resolves.toBe(false);
+  });
+
+  it("binds a combined Daily bundle wrapper to its unique supersession leaf", async () => {
+    const base = createEmptyWorkspaceV2("workspace-daily-leaf-pair");
+    const localDate = "2026-07-12";
+    const first = await actionOnlyDailyProjection({
+      workspace: base,
+      id: "commitment-chain-1",
+      localDate,
+      version: 1,
+      createdAt: "2026-07-12T00:01:00.000Z",
+      seed: 731,
+    });
+    const afterFirst = structuredClone(base);
+    afterFirst.dailyCommitments.push(first.value);
+    const leaf = await actionOnlyDailyProjection({
+      workspace: afterFirst,
+      id: "commitment-chain-2",
+      localDate,
+      version: 2,
+      createdAt: "2026-07-12T00:02:00.000Z",
+      seed: 732,
+      supersedesId: first.value.id,
+    });
+    const peer = await actionOnlyDailyProjection({
+      workspace: base,
+      id: "commitment-peer",
+      localDate,
+      version: 1,
+      createdAt: "2026-07-12T00:03:00.000Z",
+      seed: 733,
+    });
+    const combined = await combineProtectedEffectBundles([
+      first.bundle,
+      leaf.bundle,
+    ]);
+    const affectedRecordIds = [
+      ...new Set([
+        first.value.id,
+        leaf.value.id,
+        peer.value.id,
+        ...protectedEffectBundleTouchedEntityIds(combined),
+        ...protectedEffectBundleTouchedEntityIds(peer.bundle),
+      ]),
+    ].sort();
+    const valid = {
+      workspace: afterFirst,
+      conflictId: "conflict-daily-leaf",
+      recordType: "daily_commitment" as const,
+      projectId: undefined,
+      logicalKey: combined.logicalKey,
+      recordId: leaf.value.id,
+      remoteRecordId: peer.value.id,
+      localValue: leaf.value as unknown as JsonValue,
+      remoteValue: peer.value as unknown as JsonValue,
+      affectedRecordIds,
+      affectedProjectIds: [],
+      localBundle: combined,
+      remoteBundle: peer.bundle,
+    };
+
+    await expect(
+      validateProtectedEffectBundlePairMetadata(valid),
+    ).resolves.toBe(true);
+    await expect(
+      validateProtectedEffectBundlePairMetadata({
+        ...valid,
+        recordId: first.value.id,
+        localValue: first.value as unknown as JsonValue,
+      }),
+    ).resolves.toBe(false);
+  });
+
+  it("accepts a proposal-only Daily branch only when the created successor names that exact predecessor", async () => {
+    const base = createEmptyWorkspaceV2("workspace-daily-existing-created");
+    const localDate = "2026-07-12";
+    const baseline = await actionOnlyDailyProjection({
+      workspace: base,
+      id: "commitment-existing",
+      localDate,
+      version: 1,
+      createdAt: "2026-07-12T00:00:00.000Z",
+      seed: 741,
+    });
+    base.dailyCommitments.push(baseline.value);
+    const proposal = (
+      id: string,
+      createdAt: string,
+    ): WorkspaceV2["replanProposals"][number] => ({
+      id,
+      localDate,
+      baseCommitmentId: baseline.value.id,
+      baseRevision: 0,
+      reasonCodes: ["ACTUAL_CHANGED"],
+      proposedSlots: [],
+      proposalHash: `proposal-hash:${id}`,
+      createdAt,
+      createdBy: `human:${id}`,
+      status: "open",
+    });
+    const localProposal = proposal(
+      "proposal-local-existing",
+      "2026-07-12T00:01:00.000Z",
+    );
+    const remoteProposal = proposal(
+      "proposal-remote-created",
+      "2026-07-12T00:02:00.000Z",
+    );
+    const proposalBundle = async (
+      value: WorkspaceV2["replanProposals"][number],
+      seed: number,
+    ) => {
+      const bundle = await projectProtectedEffectBundle({
+        ...operationProvenance(seed),
+        workspace: base,
+        command: { type: "propose_replan", proposal: value },
+        commandId: `command:${value.id}`,
+        createdAt: value.createdAt,
+        diff: [
+          {
+            entity: "ReplanProposal",
+            entityId: value.id,
+            field: "created",
+            before: null,
+            after: value as unknown as JsonValue,
+          },
+        ],
+      });
+      if (bundle === undefined)
+        throw new Error("Expected Replan proposal bundle");
+      return bundle;
+    };
+    const localBundle = await proposalBundle(localProposal, 742);
+    const remoteProposed = await proposalBundle(remoteProposal, 743);
+    const successor: WorkspaceV2["dailyCommitments"][number] = {
+      ...structuredClone(baseline.value),
+      id: "commitment-created-successor",
+      version: 2,
+      proposalHash: remoteProposal.proposalHash,
+      actorId: "human:remote-successor",
+      committedAt: "2026-07-12T00:03:00.000Z",
+      supersedesId: baseline.value.id,
+    };
+    const beforeAccept = structuredClone(base);
+    beforeAccept.replanProposals.push(remoteProposal);
+    const accepted = await projectProtectedEffectBundle({
+      ...operationProvenance(744),
+      workspace: beforeAccept,
+      command: {
+        type: "accept_replan",
+        proposalId: remoteProposal.id,
+        commitmentId: successor.id,
+      },
+      commandId: "command:accept-created-successor",
+      createdAt: successor.committedAt,
+      diff: [
+        {
+          entity: "DailyCommitment",
+          entityId: successor.id,
+          field: "created",
+          before: null,
+          after: successor as unknown as JsonValue,
+        },
+        {
+          entity: "ReplanProposal",
+          entityId: remoteProposal.id,
+          field: "status",
+          before: "open",
+          after: "accepted",
+        },
+      ],
+    });
+    if (accepted === undefined)
+      throw new Error("Expected accepted Replan bundle");
+    const remoteBundle = await combineProtectedEffectBundles([
+      remoteProposed,
+      accepted,
+    ]);
+    const workspace = structuredClone(base);
+    workspace.replanProposals.push(localProposal);
+    const affectedRecordIds = [
+      ...new Set([
+        baseline.value.id,
+        successor.id,
+        ...protectedEffectBundleTouchedEntityIds(localBundle),
+        ...protectedEffectBundleTouchedEntityIds(remoteBundle),
+      ]),
+    ].sort();
+    const valid = {
+      workspace,
+      conflictId: "conflict-daily-existing-created",
+      recordType: "daily_commitment" as const,
+      projectId: undefined,
+      logicalKey: localBundle.logicalKey,
+      recordId: baseline.value.id,
+      remoteRecordId: successor.id,
+      localValue: baseline.value as unknown as JsonValue,
+      remoteValue: successor as unknown as JsonValue,
+      affectedRecordIds,
+      affectedProjectIds: [],
+      localBundle,
+      remoteBundle,
+    };
+
+    await expect(validateProtectedEffectBundlePair(valid)).resolves.toBe(true);
+
+    const forgedBundle = structuredClone(remoteBundle);
+    const created = forgedBundle.operations
+      .flatMap(({ cells }) => cells)
+      .find(
+        (cell) => cell.kind === "create" && cell.entity === "DailyCommitment",
+      );
+    if (
+      created === undefined ||
+      created.kind !== "create" ||
+      created.entity !== "DailyCommitment"
+    ) {
+      throw new Error("Expected successor create");
+    }
+    created.value.supersedesId = "commitment-unrelated-root";
+    await expect(
+      validateProtectedEffectBundlePairMetadata({
+        ...valid,
+        remoteValue: {
+          ...(successor as unknown as Record<string, JsonValue>),
+          supersedesId: "commitment-unrelated-root",
+        },
+        remoteBundle: await rehashBundle(forgedBundle),
+      }),
+    ).resolves.toBe(false);
+  });
+
+  it("rejects scalar-only Review bundles whose mutation identity differs from the wrapper", async () => {
+    const triggerKey = "hard_gate:wrapper-identity";
+    const wrapper: ReviewRecord = {
+      id: "review-wrapper",
+      kind: "event",
+      triggerKey,
+      triggerType: "hard_gate",
+      status: "open",
+      affectedProjectIds: [],
+      affectedRecordIds: [],
+      dueAt: "2026-07-12T01:00:00.000Z",
+      createdAt: "2026-07-12T00:00:00.000Z",
+    };
+    const completionBundle = async (
+      id: string,
+      minute: string,
+      seed: number,
+    ) => {
+      const review = { ...wrapper, id };
+      const workspace = createEmptyWorkspaceV2(`workspace-${id}`);
+      workspace.reviews.push(review);
+      const completedAt = `2026-07-12T00:${minute}:00.000Z`;
+      const conclusion = {
+        summary: `Conclusion for ${id}`,
+        decisionCodes: ["continue"],
+        followUpCommandIds: [],
+        actorId: `human:${id}`,
+        completedAt,
+      };
+      const bundle = await projectProtectedEffectBundle({
+        ...operationProvenance(seed),
+        workspace,
+        command: {
+          type: "complete_review",
+          reviewId: id,
+          conclusion: {
+            summary: conclusion.summary,
+            decisionCodes: conclusion.decisionCodes,
+            followUpCommandIds: conclusion.followUpCommandIds,
+          },
+        },
+        commandId: `command:${id}`,
+        createdAt: completedAt,
+        diff: [
+          {
+            entity: "ReviewRecord",
+            entityId: id,
+            field: "status",
+            before: "open",
+            after: "completed",
+          },
+          {
+            entity: "ReviewRecord",
+            entityId: id,
+            field: "conclusion",
+            before: null,
+            after: conclusion as unknown as JsonValue,
+          },
+        ],
+      });
+      if (bundle === undefined)
+        throw new Error("Expected Review completion bundle");
+      return bundle;
+    };
+    const localBundle = await completionBundle("review-local-other", "01", 751);
+    const remoteBundle = await completionBundle(
+      "review-remote-other",
+      "02",
+      752,
+    );
+
+    await expect(
+      validateProtectedEffectBundlePairMetadata({
+        workspace: createEmptyWorkspaceV2("workspace-review-wrapper-pair"),
+        conflictId: "conflict-review-wrapper",
+        recordType: "review",
+        projectId: undefined,
+        logicalKey: localBundle.logicalKey,
+        recordId: wrapper.id,
+        remoteRecordId: wrapper.id,
+        localValue: wrapper as unknown as JsonValue,
+        remoteValue: wrapper as unknown as JsonValue,
+        affectedRecordIds: [
+          wrapper.id,
+          "review-local-other",
+          "review-remote-other",
+        ].sort(),
+        affectedProjectIds: [],
+        localBundle,
+        remoteBundle,
+      }),
+    ).resolves.toBe(false);
+  });
+
+  it("rejects a combined Close bundle containing two independently valid decisions", async () => {
+    const workspace = createEmptyWorkspaceV2("workspace-close-primary-pair");
+    workspace.projects.push(
+      buildProjectV2({
+        id: "project-close-primary",
+        activeDirectionBriefId: "brief-close-primary",
+        stage: "closed",
+        createdAt: "2026-07-12T00:00:00.000Z",
+        updatedAt: "2026-07-12T00:00:00.000Z",
+      }),
+    );
+    const closeBundle = async (id: string, minute: string, seed: number) => {
+      const closedAt = `2026-07-12T00:${minute}:00.000Z`;
+      const decision: WorkspaceV2["closeDecisions"][number] = {
+        id,
+        projectId: "project-close-primary",
+        successComparison: `Comparison ${id}`,
+        outcome: "achieved",
+        keyLearning: `Learning ${id}`,
+        unfinishedDisposition: "discard",
+        actorId: `human:${id}`,
+        closedAt,
+      };
+      const bundle = await projectProtectedEffectBundle({
+        ...operationProvenance(seed),
+        workspace,
+        command: {
+          type: "close_project",
+          projectId: decision.projectId,
+          decision: {
+            id: decision.id,
+            projectId: decision.projectId,
+            successComparison: decision.successComparison,
+            outcome: decision.outcome,
+            keyLearning: decision.keyLearning,
+            unfinishedDisposition: decision.unfinishedDisposition,
+          },
+        },
+        commandId: `command:${id}`,
+        createdAt: closedAt,
+        diff: [
+          {
+            entity: "CloseDecision",
+            entityId: decision.id,
+            field: "created",
+            before: null,
+            after: decision as unknown as JsonValue,
+          },
+        ],
+      });
+      if (bundle === undefined) throw new Error("Expected Close bundle");
+      return { bundle, decision };
+    };
+    const first = await closeBundle("close-primary-1", "01", 761);
+    const second = await closeBundle("close-primary-2", "02", 762);
+    const peer = await closeBundle("close-primary-peer", "03", 763);
+    const combined = await combineProtectedEffectBundles([
+      first.bundle,
+      second.bundle,
+    ]);
+
+    await expect(
+      validateProtectedEffectBundlePairMetadata({
+        workspace,
+        conflictId: "conflict-close-primary",
+        recordType: "close",
+        projectId: "project-close-primary",
+        logicalKey: combined.logicalKey,
+        recordId: first.decision.id,
+        remoteRecordId: peer.decision.id,
+        localValue: first.decision as unknown as JsonValue,
+        remoteValue: peer.decision as unknown as JsonValue,
+        affectedRecordIds: [
+          first.decision.id,
+          second.decision.id,
+          peer.decision.id,
+        ].sort(),
+        affectedProjectIds: ["project-close-primary"],
+        localBundle: combined,
+        remoteBundle: peer.bundle,
+      }),
+    ).resolves.toBe(false);
+  });
+
+  it("rejects an Exception bundle that keeps the logical ID but changes Project owner", async () => {
+    const base = createEmptyWorkspaceV2("workspace-exception-owner-pair");
+    for (const id of ["project-local", "project-remote"]) {
+      base.projects.push(
+        buildProjectV2({
+          id,
+          activeDirectionBriefId: `${id}:brief:1`,
+          createdAt: "2026-07-12T00:00:00.000Z",
+          updatedAt: "2026-07-12T00:00:00.000Z",
+        }),
+      );
+    }
+    const buildSide = async (
+      side: "local" | "remote",
+      projectId: string,
+      minute: string,
+    ) => {
+      const createdAt = `2026-07-12T00:${minute}:00.000Z`;
+      const value = {
+        id: "exception-1",
+        projectId,
+        requirementId: "requirement-1",
+        rationale: `${side} rationale`,
+        knownConsequence: `${side} consequence`,
+        reviewAt: "2026-07-13T00:00:00.000Z",
+        expiresAt: "2026-07-14T00:00:00.000Z",
+        approvedBy: `human-${side}`,
+        createdAt,
+        history: [
+          {
+            action: "created" as const,
+            actorId: `human-${side}`,
+            at: createdAt,
+            note: `${side} rationale`,
+          },
+        ],
+      };
+      const bundle = await projectProtectedEffectBundle({
+        ...operationProvenance(side === "local" ? 721 : 722),
+        workspace: base,
+        command: {
+          type: "approve_evidence_exception",
+          exception: {
+            id: value.id,
+            projectId,
+            requirementId: value.requirementId,
+            rationale: value.rationale,
+            knownConsequence: value.knownConsequence,
+            reviewAt: value.reviewAt,
+            expiresAt: value.expiresAt,
+          },
+        },
+        commandId: `command-${side}`,
+        createdAt,
+        diff: [
+          {
+            entity: "ExceptionRecord",
+            entityId: value.id,
+            field: "created",
+            before: null,
+            after: value as unknown as JsonValue,
+          },
+        ],
+      });
+      if (bundle === undefined) throw new Error("Expected Exception bundle");
+      return { bundle, value };
+    };
+    const local = await buildSide("local", "project-local", "01");
+    const remote = await buildSide("remote", "project-remote", "02");
+    const workspace = structuredClone(base);
+    workspace.exceptions.push(local.value);
+
+    await expect(
+      validateProtectedEffectBundlePair({
+        workspace,
+        conflictId: "conflict-exception-owner",
+        recordType: "exception",
+        projectId: "project-local",
+        logicalKey: local.bundle.logicalKey,
+        recordId: local.value.id,
+        remoteRecordId: remote.value.id,
+        localValue: local.value as unknown as JsonValue,
+        remoteValue: remote.value as unknown as JsonValue,
+        affectedRecordIds: [local.value.id],
+        affectedProjectIds: ["project-local", "project-remote"],
+        localBundle: local.bundle,
+        remoteBundle: remote.bundle,
+      }),
+    ).resolves.toBe(false);
+
+    const sameOwnerRemote = await buildSide("remote", "project-local", "03");
+    const historicalPair = {
+      workspace,
+      conflictId: "conflict-exception-history",
+      recordType: "exception" as const,
+      projectId: "project-local",
+      logicalKey: local.bundle.logicalKey,
+      recordId: local.value.id,
+      remoteRecordId: sameOwnerRemote.value.id,
+      localValue: local.value as unknown as JsonValue,
+      remoteValue: sameOwnerRemote.value as unknown as JsonValue,
+      retainedVersion: "local" as const,
+      retainedBundleHash: local.bundle.hash,
+      affectedRecordIds: [local.value.id],
+      affectedProjectIds: ["project-local"],
+      localBundle: local.bundle,
+      remoteBundle: sameOwnerRemote.bundle,
+    };
+    await expect(
+      validateProtectedEffectBundlePairMetadata(historicalPair),
+    ).resolves.toBe(true);
+    await expect(
+      validateProtectedEffectBundlePairMetadata({
+        ...historicalPair,
+        remoteValue: {
+          ...(sameOwnerRemote.value as unknown as Record<string, JsonValue>),
+          rationale: "forged historical rationale",
+        },
+      }),
+    ).resolves.toBe(false);
+  });
+
   it("keeps ordinary lifecycle writers on the normal replay path", () => {
     const at = "2026-07-12T00:00:00.000Z";
-    expect(isKnownUnprotectedLifecycleWriter({
-      command: {
-        type: "record_bet_boundary",
-        projectId: "project-1",
-        boundary: "midpoint",
-        triggerKey: "bet-1:midpoint",
-      },
-      createdAt: at,
-      diff: [],
-    })).toBe(true);
-    expect(isKnownUnprotectedLifecycleWriter({
-      command: { type: "request_validation", projectId: "project-1" },
-      createdAt: at,
-      diff: [
-        {
-          entity: "ProjectV2",
-          entityId: "project-1",
-          field: "stage",
-          before: "executing",
-          after: "validating",
+    expect(
+      isKnownUnprotectedLifecycleWriter({
+        command: {
+          type: "record_bet_boundary",
+          projectId: "project-1",
+          boundary: "midpoint",
+          triggerKey: "bet-1:midpoint",
         },
-        {
-          entity: "ProjectV2",
-          entityId: "project-1",
-          field: "updatedAt",
-          before: "2026-07-11T00:00:00.000Z",
-          after: at,
-        },
-      ],
-    })).toBe(true);
-    expect(isKnownUnprotectedLifecycleWriter({
-      command: { type: "satisfy_validation", projectId: "project-1" },
-      createdAt: at,
-      diff: [
-        {
-          entity: "ProjectV2",
-          entityId: "project-1",
-          field: "stage",
-          before: "validating",
-          after: "closing",
-        },
-        {
-          entity: "ProjectV2",
-          entityId: "project-1",
-          field: "updatedAt",
-          before: "2026-07-11T00:00:00.000Z",
-          after: at,
-        },
-      ],
-    })).toBe(true);
+        createdAt: at,
+        diff: [],
+      }),
+    ).toBe(true);
+    expect(
+      isKnownUnprotectedLifecycleWriter({
+        command: { type: "request_validation", projectId: "project-1" },
+        createdAt: at,
+        diff: [
+          {
+            entity: "ProjectV2",
+            entityId: "project-1",
+            field: "stage",
+            before: "executing",
+            after: "validating",
+          },
+          {
+            entity: "ProjectV2",
+            entityId: "project-1",
+            field: "updatedAt",
+            before: "2026-07-11T00:00:00.000Z",
+            after: at,
+          },
+        ],
+      }),
+    ).toBe(true);
+    expect(
+      isKnownUnprotectedLifecycleWriter({
+        command: { type: "satisfy_validation", projectId: "project-1" },
+        createdAt: at,
+        diff: [
+          {
+            entity: "ProjectV2",
+            entityId: "project-1",
+            field: "stage",
+            before: "validating",
+            after: "closing",
+          },
+          {
+            entity: "ProjectV2",
+            entityId: "project-1",
+            field: "updatedAt",
+            before: "2026-07-11T00:00:00.000Z",
+            after: at,
+          },
+        ],
+      }),
+    ).toBe(true);
     const editorialBrief = buildDirectionBrief({
       id: "project-1:direction-brief:2",
       projectId: "project-1",
@@ -127,37 +1574,39 @@ describe("sync conflict effect bundles", () => {
       createdAt: at,
       updatedAt: at,
     });
-    expect(isKnownUnprotectedLifecycleWriter({
-      command: {
-        type: "update_direction",
-        projectId: "project-1",
-        brief: editorialBrief,
-      },
-      createdAt: at,
-      diff: [
-        {
-          entity: "DirectionBrief",
-          entityId: editorialBrief.id,
-          field: "created",
-          before: null,
-          after: editorialBrief as unknown as JsonValue,
+    expect(
+      isKnownUnprotectedLifecycleWriter({
+        command: {
+          type: "update_direction",
+          projectId: "project-1",
+          brief: editorialBrief,
         },
-        {
-          entity: "ProjectV2",
-          entityId: "project-1",
-          field: "activeDirectionBriefId",
-          before: "project-1:direction-brief:1",
-          after: editorialBrief.id,
-        },
-        {
-          entity: "ProjectV2",
-          entityId: "project-1",
-          field: "updatedAt",
-          before: "2026-07-11T00:00:00.000Z",
-          after: at,
-        },
-      ],
-    })).toBe(true);
+        createdAt: at,
+        diff: [
+          {
+            entity: "DirectionBrief",
+            entityId: editorialBrief.id,
+            field: "created",
+            before: null,
+            after: editorialBrief as unknown as JsonValue,
+          },
+          {
+            entity: "ProjectV2",
+            entityId: "project-1",
+            field: "activeDirectionBriefId",
+            before: "project-1:direction-brief:1",
+            after: editorialBrief.id,
+          },
+          {
+            entity: "ProjectV2",
+            entityId: "project-1",
+            field: "updatedAt",
+            before: "2026-07-11T00:00:00.000Z",
+            after: at,
+          },
+        ],
+      }),
+    ).toBe(true);
   });
 
   it("uses command-aware logical identities instead of generated record IDs", () => {
@@ -310,23 +1759,24 @@ describe("sync conflict effect bundles", () => {
       actorId: "human-1",
       approvedAt: oldBrief.createdAt,
     });
+    const {
+      version: _oldBriefVersion,
+      createdAt: _oldBriefCreatedAt,
+      updatedAt: _oldBriefUpdatedAt,
+      ...oldBriefDraft
+    } = oldBrief;
     const command = {
       type: "update_direction",
       projectId: "project-1",
       brief: {
-        ...oldBrief,
+        ...oldBriefDraft,
         successEvidence: newBrief.successEvidence,
       },
     } as const satisfies V2Command;
     const hold = {
       type: "rebet_required" as const,
       sourceId: "bet-1",
-      affectedRecordIds: [
-        "project-1",
-        oldBrief.id,
-        newBrief.id,
-        "bet-1",
-      ],
+      affectedRecordIds: ["project-1", oldBrief.id, newBrief.id, "bet-1"],
       createdAt: now,
     };
 
@@ -417,40 +1867,42 @@ describe("sync conflict effect bundles", () => {
       createdAt: now,
       updatedAt: now,
     };
-    await expect(projectProtectedEffectBundle({
-      ...operationProvenance(92),
-      workspace,
-      command: {
-        type: "update_direction",
-        projectId: "project-1",
-        brief: { ...oldBrief, advancedNotes: "Editorial only" },
-      },
-      commandId: "editorial-direction",
-      createdAt: now,
-      diff: [
-        {
-          entity: "DirectionBrief",
-          entityId: editorialBrief.id,
-          field: "created",
-          before: null,
-          after: editorialBrief,
+    await expect(
+      projectProtectedEffectBundle({
+        ...operationProvenance(92),
+        workspace,
+        command: {
+          type: "update_direction",
+          projectId: "project-1",
+          brief: { ...oldBrief, advancedNotes: "Editorial only" },
         },
-        {
-          entity: "ProjectV2",
-          entityId: "project-1",
-          field: "activeDirectionBriefId",
-          before: oldBrief.id,
-          after: editorialBrief.id,
-        },
-        {
-          entity: "ProjectV2",
-          entityId: "project-1",
-          field: "updatedAt",
-          before: oldBrief.updatedAt,
-          after: now,
-        },
-      ],
-    })).resolves.toBeUndefined();
+        commandId: "editorial-direction",
+        createdAt: now,
+        diff: [
+          {
+            entity: "DirectionBrief",
+            entityId: editorialBrief.id,
+            field: "created",
+            before: null,
+            after: editorialBrief,
+          },
+          {
+            entity: "ProjectV2",
+            entityId: "project-1",
+            field: "activeDirectionBriefId",
+            before: oldBrief.id,
+            after: editorialBrief.id,
+          },
+          {
+            entity: "ProjectV2",
+            entityId: "project-1",
+            field: "updatedAt",
+            before: oldBrief.updatedAt,
+            after: now,
+          },
+        ],
+      }),
+    ).resolves.toBeUndefined();
   });
 
   it("projects a Re-bet into typed cells without copying Project updatedAt or whole hold arrays", async () => {
@@ -501,7 +1953,9 @@ describe("sync conflict effect bundles", () => {
         createdAt: "2026-07-10T00:00:00.000Z",
         updatedAt: "2026-07-10T00:00:00.000Z",
       },
-      committedScope: [{ id: "scope-1", title: "Scope", description: "Bounded" }],
+      committedScope: [
+        { id: "scope-1", title: "Scope", description: "Bounded" },
+      ],
       appetiteStart: now,
       appetiteEnd: "2026-07-12T01:00:00.000Z",
       actorId: "human-1",
@@ -632,13 +2086,15 @@ describe("sync conflict effect bundles", () => {
       command: { type: "propose_replan", proposal },
       commandId: "command-propose",
       createdAt: proposal.createdAt,
-      diff: [{
-        entity: "ReplanProposal",
-        entityId: proposal.id,
-        field: "created",
-        before: null,
-        after: proposal as unknown as JsonValue,
-      }],
+      diff: [
+        {
+          entity: "ReplanProposal",
+          entityId: proposal.id,
+          field: "created",
+          before: null,
+          after: proposal as unknown as JsonValue,
+        },
+      ],
     });
     expect(proposed).toBeDefined();
 
@@ -713,10 +2169,7 @@ describe("sync conflict effect bundles", () => {
     });
     expect(accepted).toBeDefined();
 
-    const bundle = await combineProtectedEffectBundles([
-      proposed!,
-      accepted!,
-    ]);
+    const bundle = await combineProtectedEffectBundles([proposed!, accepted!]);
     expect(bundle.logicalKey).toBe('["daily_commitment","2026-07-12"]');
     expect(bundle.operations.map(({ commandType }) => commandType)).toEqual([
       "propose_replan",
@@ -754,11 +2207,7 @@ describe("sync conflict effect bundles", () => {
       closedAt: localAt,
     };
     const localInbox = {
-      id: JSON.stringify([
-        "close_return_to_inbox",
-        localDecision.id,
-        "work-1",
-      ]),
+      id: JSON.stringify(["close_return_to_inbox", localDecision.id, "work-1"]),
       originalText: "Unfinished work",
       sourceId: "work-1",
       actorId: "human-local",
@@ -919,12 +2368,14 @@ describe("sync conflict effect bundles", () => {
     current.projects[0] = {
       ...current.projects[0],
       stage: "closed",
-      holds: [{
-        type: "sync_conflict",
-        sourceId: "conflict-close",
-        affectedRecordIds: [localDecision.id, remoteDecision.id],
-        createdAt: "2026-07-12T01:02:00.000Z",
-      }],
+      holds: [
+        {
+          type: "sync_conflict",
+          sourceId: "conflict-close",
+          affectedRecordIds: [localDecision.id, remoteDecision.id],
+          createdAt: "2026-07-12T01:02:00.000Z",
+        },
+      ],
       updatedAt: "2026-07-12T01:02:00.000Z",
     };
     current.closeDecisions.push(localDecision);
@@ -1056,6 +2507,28 @@ describe("sync conflict effect bundles", () => {
       affectedRecordIds: [exception.id],
       createdAt: "2026-07-12T01:02:00.000Z",
     });
+    const remoteValue = {
+      ...exception,
+      resolvedAt: remote.resolvedEntry.at,
+      history: [createdEntry, remote.resolvedEntry],
+    };
+    await expect(
+      validateProtectedEffectBundlePair({
+        workspace: current,
+        conflictId: "conflict-exception",
+        recordType: "exception",
+        projectId: "project-1",
+        logicalKey: local.bundle.logicalKey,
+        recordId: exception.id,
+        remoteRecordId: exception.id,
+        localValue: current.exceptions[0] as unknown as JsonValue,
+        remoteValue: remoteValue as unknown as JsonValue,
+        affectedRecordIds: [exception.id],
+        affectedProjectIds: ["project-1"],
+        localBundle: local.bundle,
+        remoteBundle: remote.bundle,
+      }),
+    ).resolves.toBe(true);
     const resolvedAt = "2026-07-12T01:03:00.000Z";
     const resolved = await applyRemoteProtectedEffectBundle({
       workspace: current,
@@ -1065,11 +2538,7 @@ describe("sync conflict effect bundles", () => {
       now: resolvedAt,
     });
 
-    expect(resolved.exceptions[0]).toEqual({
-      ...exception,
-      resolvedAt: remote.resolvedEntry.at,
-      history: [createdEntry, remote.resolvedEntry],
-    });
+    expect(resolved.exceptions[0]).toEqual(remoteValue);
     expect(resolved.projects[0].holds).toEqual([]);
     expect(resolved.projects[0].updatedAt).toBe(resolvedAt);
   });
@@ -1106,33 +2575,84 @@ describe("sync conflict effect bundles", () => {
       },
       commandId: "command-create-review",
       createdAt: review.createdAt,
-      diff: [{
-        entity: "ReviewRecord",
-        entityId: review.id,
-        field: "created",
-        before: null,
-        after: review as unknown as JsonValue,
-      }],
+      diff: [
+        {
+          entity: "ReviewRecord",
+          entityId: review.id,
+          field: "created",
+          before: null,
+          after: review as unknown as JsonValue,
+        },
+      ],
     });
     expect(bundle).toBeDefined();
     expect(await validateProtectedEffectBundle(bundle)).toBe(true);
 
     const tampered = structuredClone(bundle!);
-    tampered.operations[0].cells = [{
-      kind: "scalar",
-      entity: "ProjectV2",
-      entityId: "project-1",
-      field: "name",
-      before: "Before",
-      after: "Overwritten",
-    }];
-    tampered.hash = await sha256Hex(canonicalJson({
-      schemaVersion: tampered.schemaVersion,
-      logicalKey: tampered.logicalKey,
-      operations: tampered.operations,
-    }));
+    tampered.operations[0].cells = [
+      {
+        kind: "scalar",
+        entity: "ProjectV2",
+        entityId: "project-1",
+        field: "name",
+        before: "Before",
+        after: "Overwritten",
+      },
+    ];
+    tampered.hash = await sha256Hex(
+      canonicalJson({
+        schemaVersion: tampered.schemaVersion,
+        logicalKey: tampered.logicalKey,
+        operations: tampered.operations,
+      }),
+    );
 
     expect(await validateProtectedEffectBundle(tampered)).toBe(false);
+
+    const exactShapeMutations = [
+      (candidate: Record<string, unknown>) => {
+        candidate.unexpected = true;
+      },
+      (candidate: Record<string, unknown>) => {
+        const operation = (
+          candidate.operations as Array<Record<string, unknown>>
+        )[0]!;
+        operation.unexpected = true;
+      },
+      (candidate: Record<string, unknown>) => {
+        const operation = (
+          candidate.operations as Array<Record<string, unknown>>
+        )[0]!;
+        (operation.command as Record<string, unknown>).unexpected = true;
+      },
+      (candidate: Record<string, unknown>) => {
+        const operation = (
+          candidate.operations as Array<Record<string, unknown>>
+        )[0]!;
+        const cell = (operation.cells as Array<Record<string, unknown>>)[0]!;
+        cell.unexpected = true;
+      },
+      (candidate: Record<string, unknown>) => {
+        const operation = (
+          candidate.operations as Array<Record<string, unknown>>
+        )[0]!;
+        const cell = (operation.cells as Array<Record<string, unknown>>)[0]!;
+        (cell.value as Record<string, unknown>).unexpected = true;
+      },
+    ];
+    for (const mutate of exactShapeMutations) {
+      const candidate = structuredClone(bundle!) as unknown as Record<
+        string,
+        unknown
+      >;
+      mutate(candidate);
+      const resigned = await rehashBundle(
+        candidate as unknown as ProtectedEffectBundle,
+      );
+      await expect(validateProtectedEffectBundle(resigned)).resolves.toBe(
+        false,
+      );
+    }
   });
 
   it("persists verified Review bundles and resolves by stable bundle hash", async () => {
@@ -1149,7 +2669,8 @@ describe("sync conflict effect bundles", () => {
       base,
       "2026-07-12T00:00:00.000Z",
     ).find(({ triggerType }) => triggerType === "weekly");
-    if (reviewDraft === undefined) throw new Error("Expected weekly Review draft");
+    if (reviewDraft === undefined)
+      throw new Error("Expected weekly Review draft");
     const localCreateCommand = {
       type: "create_review",
       review: reviewDraft,
@@ -1193,9 +2714,13 @@ describe("sync conflict effect bundles", () => {
     if (!localCreated.ok || !remoteCreatedResult.ok) {
       throw new Error(
         `Expected both Review creates to apply: ${
-          localCreated.ok ? "local-ok" : `${localCreated.rejection.code}:${localCreated.rejection.gate}`
+          localCreated.ok
+            ? "local-ok"
+            : `${localCreated.rejection.code}:${localCreated.rejection.gate}`
         } / ${
-          remoteCreatedResult.ok ? "remote-ok" : `${remoteCreatedResult.rejection.code}:${remoteCreatedResult.rejection.gate}`
+          remoteCreatedResult.ok
+            ? "remote-ok"
+            : `${remoteCreatedResult.rejection.code}:${remoteCreatedResult.rejection.gate}`
         }`,
       );
     }
@@ -1383,7 +2908,8 @@ describe("sync conflict effect bundles", () => {
       V2Command,
       { type: "open_sync_conflict" }
     >;
-    const tamperedRemoteBundle = tamperedProvenanceCommand.conflict.remoteBundle;
+    const tamperedRemoteBundle =
+      tamperedProvenanceCommand.conflict.remoteBundle;
     if (tamperedRemoteBundle === undefined) {
       throw new Error("Expected remote provenance bundle");
     }
@@ -1408,7 +2934,9 @@ describe("sync conflict effect bundles", () => {
     leakedCommandCopy.conflict.id = "mutated-after-authorization";
     leakedCommandCopy.conflict.localBundle.hash = "0".repeat(64);
     expect(authority.command.conflict.id).toBe(conflictId);
-    expect(authority.command.conflict.localBundle?.hash).toBe(localBundle!.hash);
+    expect(authority.command.conflict.localBundle?.hash).toBe(
+      localBundle!.hash,
+    );
     const substitutedCommand = {
       ...structuredClone(openCommand),
       conflict: {
@@ -1423,7 +2951,8 @@ describe("sync conflict effect bundles", () => {
       { authorizedConflictOpen: authority },
     );
     expect(substituted.ok).toBe(false);
-    if (substituted.ok) throw new Error("Expected token substitution rejection");
+    if (substituted.ok)
+      throw new Error("Expected token substitution rejection");
     expect(substituted.rejection).toMatchObject({
       code: "SOURCE_NOT_AUTHORIZED",
       gate: "sync_conflict:conflict-token-substitution:provenance_authority",
@@ -1439,6 +2968,16 @@ describe("sync conflict effect bundles", () => {
       localBundle: { hash: localBundle!.hash },
       remoteBundle: { hash: remoteBundle.hash },
     });
+    await expect(
+      validateProtectedEffectBundle(
+        opened.workspace.syncConflicts[0].localBundle,
+      ),
+    ).resolves.toBe(true);
+    await expect(
+      validateProtectedEffectBundle(
+        opened.workspace.syncConflicts[0].remoteBundle,
+      ),
+    ).resolves.toBe(true);
 
     const tamperedBeforeResolve = structuredClone(opened.workspace);
     const tamperedConflict = tamperedBeforeResolve.syncConflicts[0];
@@ -1503,7 +3042,8 @@ describe("sync conflict effect bundles", () => {
       },
     );
     expect(tamperedResolution.ok).toBe(false);
-    if (tamperedResolution.ok) throw new Error("Expected receipt-bound tamper rejection");
+    if (tamperedResolution.ok)
+      throw new Error("Expected receipt-bound tamper rejection");
     expect(tamperedResolution.rejection).toMatchObject({
       code: "SYNC_CONFLICT",
       gate: `sync_conflict:${conflictId}:creation_receipt`,
@@ -1533,6 +3073,16 @@ describe("sync conflict effect bundles", () => {
       },
       now: "2026-07-12T01:03:00.000Z",
     };
+    await expect(
+      validateProtectedEffectBundle(
+        opened.workspace.syncConflicts[0].localBundle,
+      ),
+    ).resolves.toBe(true);
+    await expect(
+      validateProtectedEffectBundle(
+        opened.workspace.syncConflicts[0].remoteBundle,
+      ),
+    ).resolves.toBe(true);
     const resolved = await executeCommand(
       opened.workspace,
       resolveCommand,
@@ -1548,7 +3098,54 @@ describe("sync conflict effect bundles", () => {
       retainedBundleHash: remoteBundle.hash,
       retainedVersion: "remote",
     });
-
+    const resolvedConflict = resolved.workspace.syncConflicts[0]!;
+    const historicalReviewPair = {
+      workspace: resolved.workspace,
+      conflictId: resolvedConflict.id,
+      recordType: resolvedConflict.recordType,
+      projectId: resolvedConflict.projectId,
+      logicalKey: resolvedConflict.logicalKey,
+      recordId: resolvedConflict.recordId,
+      remoteRecordId: resolvedConflict.remoteRecordId,
+      localValue: resolvedConflict.localValue,
+      remoteValue: resolvedConflict.remoteValue,
+      retainedVersion: resolvedConflict.retainedVersion,
+      retainedBundleHash: resolvedConflict.retainedBundleHash,
+      affectedRecordIds: resolvedConflict.affectedRecordIds,
+      affectedProjectIds: resolvedConflict.affectedProjectIds,
+      localBundle: resolvedConflict.localBundle,
+      remoteBundle: resolvedConflict.remoteBundle,
+    };
+    await expect(
+      validateProtectedEffectBundlePairMetadata(historicalReviewPair),
+    ).resolves.toBe(true);
+    await expect(
+      validateProtectedEffectBundlePairMetadata({
+        ...historicalReviewPair,
+        localValue: {
+          ...(resolvedConflict.localValue as Record<string, JsonValue>),
+          dueAt: "2099-01-01T00:00:00.000Z",
+        },
+      }),
+    ).resolves.toBe(false);
+    const bundledBackup = await buildWorkspaceBackupV2({
+      snapshot: { workspace: resolved.workspace, rejectedReceipts: [] },
+      exportedAt: "2026-07-12T01:04:00.000Z",
+    });
+    const restoreRepository = new BrowserWorkspaceRepository({
+      databaseName: "bundled-review-restore",
+      indexedDB: new IDBFactory(),
+    });
+    await restoreRepository.initialize(
+      createEmptyWorkspaceV2(base.workspaceId),
+    );
+    await expect(
+      restoreVerifiedBackup({
+        repository: restoreRepository,
+        backup: bundledBackup,
+        validationNow: "2026-07-12T01:05:00.000Z",
+      }),
+    ).resolves.toMatchObject({ status: "restored" });
     const persistedOpen = await createSyncOperationV2({
       workspaceId: base.workspaceId,
       deviceId: "local-device",
@@ -1618,7 +3215,8 @@ describe("sync conflict effect bundles", () => {
     expect(propagated.workspace.reviews).toContainEqual(remoteReview);
 
     const authorizedPersistedOpen = propagated.replays.find(
-      ({ operationHash }) => operationHash === persistedOpenReplay.operationHash,
+      ({ operationHash }) =>
+        operationHash === persistedOpenReplay.operationHash,
     );
     if (authorizedPersistedOpen === undefined) {
       throw new Error("Expected the history-proven persisted open replay");
@@ -1662,9 +3260,8 @@ describe("sync conflict effect bundles", () => {
     forgedRemoteBundle.operations[
       forgedRemoteBundle.operations.length - 1
     ].sourceOperationHash = "f".repeat(64);
-    forgedOpenCommand.conflict.remoteBundle = await rehashBundle(
-      forgedRemoteBundle,
-    );
+    forgedOpenCommand.conflict.remoteBundle =
+      await rehashBundle(forgedRemoteBundle);
     const forgedOpenReceipt = structuredClone(opened.receipt);
     forgedOpenReceipt.payloadHash = await stableHash(
       forgedOpenCommand as unknown as JsonValue,
@@ -1677,19 +3274,20 @@ describe("sync conflict effect bundles", () => {
         diff.after === null ||
         Array.isArray(diff.after) ||
         typeof diff.after !== "object"
-      ) return diff;
+      )
+        return diff;
       return {
         ...diff,
         after: {
           ...structuredClone(diff.after),
-          remoteBundle: structuredClone(forgedOpenCommand.conflict.remoteBundle),
+          remoteBundle: structuredClone(
+            forgedOpenCommand.conflict.remoteBundle,
+          ),
         } as unknown as JsonValue,
       };
     });
-    const {
-      receiptHash: _forgedOldReceiptHash,
-      ...forgedOpenReceiptBase
-    } = forgedOpenReceipt;
+    const { receiptHash: _forgedOldReceiptHash, ...forgedOpenReceiptBase } =
+      forgedOpenReceipt;
     forgedOpenReceipt.receiptHash = await stableHash(
       forgedOpenReceiptBase as unknown as JsonValue,
     );
@@ -1748,9 +3346,10 @@ describe("sync conflict effect bundles", () => {
       { type: "open_sync_conflict" }
     >;
     const borrowedRemoteBundle = structuredClone(remoteBundle);
-    const completionOperation = borrowedRemoteBundle.operations[
-      borrowedRemoteBundle.operations.length - 1
-    ];
+    const completionOperation =
+      borrowedRemoteBundle.operations[
+        borrowedRemoteBundle.operations.length - 1
+      ];
     const conclusionCell = completionOperation.cells.find(
       (cell) =>
         cell.kind === "scalar" &&
@@ -1770,11 +3369,13 @@ describe("sync conflict effect bundles", () => {
       ...conclusionCell.after,
       summary: "Borrowed provenance with altered conclusion.",
     };
-    borrowedOpenCommand.conflict.remoteBundle = await rehashBundle(
-      borrowedRemoteBundle,
-    );
+    borrowedOpenCommand.conflict.remoteBundle =
+      await rehashBundle(borrowedRemoteBundle);
     borrowedOpenCommand.conflict.remoteValue = {
-      ...(structuredClone(remoteReview) as unknown as Record<string, JsonValue>),
+      ...(structuredClone(remoteReview) as unknown as Record<
+        string,
+        JsonValue
+      >),
       conclusion: {
         ...(structuredClone(remoteReview.conclusion) as unknown as Record<
           string,
@@ -1800,7 +3401,8 @@ describe("sync conflict effect bundles", () => {
         diff.after === null ||
         Array.isArray(diff.after) ||
         typeof diff.after !== "object"
-      ) return diff;
+      )
+        return diff;
       return {
         ...diff,
         after: {
@@ -1814,10 +3416,8 @@ describe("sync conflict effect bundles", () => {
         } as unknown as JsonValue,
       };
     });
-    const {
-      receiptHash: _borrowedOldReceiptHash,
-      ...borrowedOpenReceiptBase
-    } = borrowedOpenReceipt;
+    const { receiptHash: _borrowedOldReceiptHash, ...borrowedOpenReceiptBase } =
+      borrowedOpenReceipt;
     borrowedOpenReceipt.receiptHash = await stableHash(
       borrowedOpenReceiptBase as unknown as JsonValue,
     );
@@ -2135,9 +3735,11 @@ describe("sync conflict effect bundles", () => {
           },
           "remote-recursive-device": {
             sequence: remoteSequence,
-            operationHash: remoteReplays[remoteReplays.length - 1].operationHash,
+            operationHash:
+              remoteReplays[remoteReplays.length - 1].operationHash,
             revision: remoteReplays[remoteReplays.length - 1].receipt.revision,
-            updatedAt: remoteReplays[remoteReplays.length - 1].receipt.createdAt,
+            updatedAt:
+              remoteReplays[remoteReplays.length - 1].receipt.createdAt,
           },
         },
         updatedAt: remoteReplays[remoteReplays.length - 1].receipt.createdAt,
@@ -2171,7 +3773,9 @@ describe("sync conflict effect bundles", () => {
           localValue: structuredClone(
             mergeWorkspace.reviews.find(({ id }) => id === draft.id)!,
           ) as unknown as JsonValue,
-          remoteValue: structuredClone(remoteReviews[index]) as unknown as JsonValue,
+          remoteValue: structuredClone(
+            remoteReviews[index],
+          ) as unknown as JsonValue,
           affectedProjectIds: [
             ...new Set([
               ...protectedEffectBundleAffectedProjectIds(localBundles[index]),
@@ -2235,29 +3839,28 @@ describe("sync conflict effect bundles", () => {
         resolution: {
           conflictId,
           retainedVersion: "remote",
-          retainedValue: structuredClone(remoteReviews[index]) as unknown as JsonValue,
+          retainedValue: structuredClone(
+            remoteReviews[index],
+          ) as unknown as JsonValue,
           retainedBundleHash: remoteBundles[index].hash,
           rationale: `Keep verified remote Review ${index + 1}.`,
         },
       } as const satisfies V2Command;
-      const resolved = await executeCommand(
-        opened.workspace,
-        resolveCommand,
-        {
-          commandId: `resolve-recursive-${index + 1}`,
-          expectedRevision: opened.workspace.revision,
-          actorId: "human-resolver-recursive",
-          actorKind: "human",
-          origin: "ui",
-          source: {
-            sourceId: "verified-human-resolver-recursive",
-            verified: true,
-            capabilities: ["human_decision"],
-          },
-          now: `2026-07-12T01:0${index * 2 + 1}:00.000Z`,
+      const resolved = await executeCommand(opened.workspace, resolveCommand, {
+        commandId: `resolve-recursive-${index + 1}`,
+        expectedRevision: opened.workspace.revision,
+        actorId: "human-resolver-recursive",
+        actorKind: "human",
+        origin: "ui",
+        source: {
+          sourceId: "verified-human-resolver-recursive",
+          verified: true,
+          capabilities: ["human_decision"],
         },
-      );
-      if (!resolved.ok) throw new Error("Expected independent conflict resolution");
+        now: `2026-07-12T01:0${index * 2 + 1}:00.000Z`,
+      });
+      if (!resolved.ok)
+        throw new Error("Expected independent conflict resolution");
       mergeSequence += 1;
       const resolveReplay = await persistReplay({
         deviceId: "merge-recursive-device",
@@ -2276,7 +3879,8 @@ describe("sync conflict effect bundles", () => {
           heads: {
             "local-recursive-device": {
               sequence: localReplays.length,
-              operationHash: localReplays[localReplays.length - 1].operationHash,
+              operationHash:
+                localReplays[localReplays.length - 1].operationHash,
               revision: localReplays[localReplays.length - 1].receipt.revision,
               updatedAt:
                 localReplays[localReplays.length - 1].receipt.createdAt,
@@ -2291,7 +3895,8 @@ describe("sync conflict effect bundles", () => {
               sequence: remoteSequence,
               operationHash:
                 remoteReplays[remoteReplays.length - 1].operationHash,
-              revision: remoteReplays[remoteReplays.length - 1].receipt.revision,
+              revision:
+                remoteReplays[remoteReplays.length - 1].receipt.revision,
               updatedAt:
                 remoteReplays[remoteReplays.length - 1].receipt.createdAt,
             },
@@ -2315,7 +3920,7 @@ describe("sync conflict effect bundles", () => {
     ).toBe(true);
     expect(authorized.replays).toHaveLength(12);
     expect(authorized.authorizationEvaluationCount).toBeLessThanOrEqual(9);
-  });
+  }, 15_000);
 
   it("rejects a first Bet create whose command and typed owner disagree", async () => {
     const workspace = createEmptyWorkspaceV2("workspace-bundles");
@@ -2346,13 +3951,15 @@ describe("sync conflict effect bundles", () => {
         },
         commandId: "command-first-bet",
         createdAt: now,
-        diff: [{
-          entity: "BetVersion",
-          entityId: forgedBet.id,
-          field: "created",
-          before: null,
-          after: forgedBet as unknown as JsonValue,
-        }],
+        diff: [
+          {
+            entity: "BetVersion",
+            entityId: forgedBet.id,
+            field: "created",
+            before: null,
+            after: forgedBet as unknown as JsonValue,
+          },
+        ],
       }),
     ).rejects.toMatchObject({ code: "UNSUPPORTED_DIFF" });
   });
@@ -2522,13 +4129,15 @@ describe("sync conflict effect bundles", () => {
       },
       commandId: "command-bet",
       createdAt: now,
-      diff: [{
-        entity: "BetVersion",
-        entityId: bet.id,
-        field: "created",
-        before: null,
-        after: bet as unknown as JsonValue,
-      }],
+      diff: [
+        {
+          entity: "BetVersion",
+          entityId: bet.id,
+          field: "created",
+          before: null,
+          after: bet as unknown as JsonValue,
+        },
+      ],
     });
     expect(bundle).toBeDefined();
     const tampered = structuredClone(bundle!);
@@ -2537,11 +4146,13 @@ describe("sync conflict effect bundles", () => {
       throw new Error("Expected projected Bet create");
     }
     created.value.projectId = "project-forged";
-    tampered.hash = await sha256Hex(canonicalJson({
-      schemaVersion: tampered.schemaVersion,
-      logicalKey: tampered.logicalKey,
-      operations: tampered.operations,
-    }));
+    tampered.hash = await sha256Hex(
+      canonicalJson({
+        schemaVersion: tampered.schemaVersion,
+        logicalKey: tampered.logicalKey,
+        operations: tampered.operations,
+      }),
+    );
 
     expect(await validateProtectedEffectBundle(tampered)).toBe(false);
   });
@@ -2573,13 +4184,15 @@ describe("sync conflict effect bundles", () => {
       },
       commandId: "place-bet-project-1",
       createdAt: now,
-      diff: [{
-        entity: "BetVersion",
-        entityId: bet.id,
-        field: "created",
-        before: null,
-        after: bet as unknown as JsonValue,
-      }],
+      diff: [
+        {
+          entity: "BetVersion",
+          entityId: bet.id,
+          field: "created",
+          before: null,
+          after: bet as unknown as JsonValue,
+        },
+      ],
     });
     if (bundle === undefined) throw new Error("Expected Bet bundle");
     const forged = structuredClone(bundle);
@@ -2629,13 +4242,15 @@ describe("sync conflict effect bundles", () => {
       },
       commandId: "create-review-trigger-a",
       createdAt: now,
-      diff: [{
-        entity: "ReviewRecord",
-        entityId: review.id,
-        field: "created",
-        before: null,
-        after: review as unknown as JsonValue,
-      }],
+      diff: [
+        {
+          entity: "ReviewRecord",
+          entityId: review.id,
+          field: "created",
+          before: null,
+          after: review as unknown as JsonValue,
+        },
+      ],
     });
     if (bundle === undefined) throw new Error("Expected Review bundle");
     const forged = structuredClone(bundle);
@@ -2720,13 +4335,15 @@ describe("sync conflict effect bundles", () => {
       },
       commandId: "commit-daily",
       createdAt: now,
-      diff: [{
-        entity: "DailyCommitment",
-        entityId: commitment.id,
-        field: "created",
-        before: null,
-        after: commitment as unknown as JsonValue,
-      }],
+      diff: [
+        {
+          entity: "DailyCommitment",
+          entityId: commitment.id,
+          field: "created",
+          before: null,
+          after: commitment as unknown as JsonValue,
+        },
+      ],
     });
     if (bundle === undefined) throw new Error("Expected Daily bundle");
     expect(await validateProtectedEffectBundle(bundle)).toBe(true);
@@ -2775,13 +4392,15 @@ describe("sync conflict effect bundles", () => {
       },
       commandId: "close-project-1",
       createdAt: now,
-      diff: [{
-        entity: "CloseDecision",
-        entityId: decision.id,
-        field: "created",
-        before: null,
-        after: decision as unknown as JsonValue,
-      }],
+      diff: [
+        {
+          entity: "CloseDecision",
+          entityId: decision.id,
+          field: "created",
+          before: null,
+          after: decision as unknown as JsonValue,
+        },
+      ],
     });
     if (bundle === undefined) throw new Error("Expected Close bundle");
     const forged = structuredClone(bundle);
@@ -2831,13 +4450,15 @@ describe("sync conflict effect bundles", () => {
       },
       commandId: "create-review-provenance",
       createdAt: now,
-      diff: [{
-        entity: "ReviewRecord",
-        entityId: review.id,
-        field: "created",
-        before: null,
-        after: review as unknown as JsonValue,
-      }],
+      diff: [
+        {
+          entity: "ReviewRecord",
+          entityId: review.id,
+          field: "created",
+          before: null,
+          after: review as unknown as JsonValue,
+        },
+      ],
     });
     if (bundle === undefined) throw new Error("Expected Review bundle");
     const forged = structuredClone(bundle);
@@ -2886,8 +4507,7 @@ describe("sync conflict effect bundles", () => {
     if (result.ok) throw new Error("Expected opaque authority rejection");
     expect(result.rejection).toMatchObject({
       code: "SOURCE_NOT_AUTHORIZED",
-      gate:
-        "sync_conflict:conflict-self-asserted-provenance:provenance_authority",
+      gate: "sync_conflict:conflict-self-asserted-provenance:provenance_authority",
     });
   });
 
@@ -2904,12 +4524,14 @@ describe("sync conflict effect bundles", () => {
       expiresAt: "2026-07-14T00:00:00.000Z",
       approvedBy: actorId,
       createdAt,
-      history: [{
-        action: "created" as const,
-        actorId,
-        at: createdAt,
-        note: rationale,
-      }],
+      history: [
+        {
+          action: "created" as const,
+          actorId,
+          at: createdAt,
+          note: rationale,
+        },
+      ],
     });
     const projection = async (rationale: string, actorId: string) => {
       const value = exceptionValue(rationale, actorId);
@@ -2930,13 +4552,15 @@ describe("sync conflict effect bundles", () => {
         },
         commandId: `approve-${actorId}`,
         createdAt,
-        diff: [{
-          entity: "ExceptionRecord",
-          entityId: value.id,
-          field: "created",
-          before: null,
-          after: value as unknown as JsonValue,
-        }],
+        diff: [
+          {
+            entity: "ExceptionRecord",
+            entityId: value.id,
+            field: "created",
+            before: null,
+            after: value as unknown as JsonValue,
+          },
+        ],
       });
       return { bundle: bundle!, value };
     };

@@ -113,8 +113,11 @@ describe("origin adapters", () => {
       async (_command: V2Command, _context: CommandContext) => accepted,
     );
     const dispatchVerifiedReplay = vi.fn(
-      async (_replay: Parameters<OriginCommandServicePort["dispatchVerifiedReplay"]>[0]) =>
-        accepted,
+      async (
+        _replay: Parameters<
+          OriginCommandServicePort["dispatchVerifiedReplay"]
+        >[0],
+      ) => accepted,
     );
     const service: OriginCommandServicePort = {
       dispatch,
@@ -145,6 +148,41 @@ describe("origin adapters", () => {
       command,
     ]);
     expect(dispatchVerifiedReplay).not.toHaveBeenCalled();
+  });
+
+  it("rejects commands outside the portable allowlist before Import can mint authority", async () => {
+    const accepted = {
+      ok: true,
+      workspace: buildWorkspaceV2("workspace-import-boundary"),
+      receipt: { id: "receipt-import-boundary" },
+    } as unknown as CommandResult;
+    const dispatch = vi.fn(async () => accepted);
+    const service: OriginCommandServicePort = {
+      dispatch,
+      dispatchVerifiedReplay: vi.fn(async () => accepted),
+    };
+    const input = humanInput(
+      {
+        type: "configure_capacity",
+        profile: {
+          timeZone: "UTC",
+          weeklyWindows: [],
+          dailyBudgets: [],
+          unavailableBlocks: [],
+          updatedAt: NOW,
+          updatedBy: "human-1",
+        },
+      },
+      "forbidden-direct-import",
+      0,
+      [],
+    );
+    input.source.verified = false;
+
+    await expect(
+      new ImportOriginAdapter(service).dispatch(input),
+    ).rejects.toThrow(/portable import allowlist/i);
+    expect(dispatch).not.toHaveBeenCalled();
   });
 
   it("produces origin parity for the same actor, payload, base state, and expected revision", async () => {
@@ -211,7 +249,9 @@ describe("origin adapters", () => {
     const imported = await seededService("import", workspaceId);
     const synced = await seededService("sync", workspaceId);
     const results = await Promise.all([
-      new UiOriginAdapter(ui.service).dispatch(humanInput(command, "parity", 1)),
+      new UiOriginAdapter(ui.service).dispatch(
+        humanInput(command, "parity", 1),
+      ),
       new AgentOriginAdapter(agent.service).dispatch(
         humanInput(command, "parity", 1),
       ),
@@ -248,10 +288,17 @@ describe("origin adapters", () => {
   });
 
   it("keeps actor authority distinct even when the UI origin and payload are identical", async () => {
-    const outcomes = [] as Array<{ actorKind: string; ok: boolean; code?: string }>;
+    const outcomes = [] as Array<{
+      actorKind: string;
+      ok: boolean;
+      code?: string;
+    }>;
     for (const actorKind of ["human", "agent", "system"] as const) {
       const workspaceId = `workspace-actor-${actorKind}`;
-      const { service } = await seededService(`actor-${actorKind}`, workspaceId);
+      const { service } = await seededService(
+        `actor-${actorKind}`,
+        workspaceId,
+      );
       const result = await new UiOriginAdapter(service).dispatch({
         command: capture(actorKind),
         commandId: `actor-${actorKind}`,

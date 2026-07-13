@@ -15,6 +15,7 @@ import {
   BrowserWorkspaceRepository,
 } from "../repositories/browserWorkspaceRepository";
 import { deleteV2Database } from "../repositories/indexedDb";
+import { exportWorkspaceBackup } from "../repositories/workspaceTransfer";
 import currentSampleFixture from "../tests/fixtures/v1/current-sample.json";
 import { createRawV1Backup, sha256Text } from "./backup";
 import { migrateV1Workspace } from "./migrateV1";
@@ -100,6 +101,260 @@ describe("atomic V1 migration coordinator", () => {
       rawPayload: rawV1Payload,
       checksum: backupChecksum,
     });
+  });
+
+  it("projects legacy Resource extensions before a committed migration is exported", async () => {
+    const repo = repository("resource-known-field-projection");
+    const snapshot = structuredClone(
+      currentSampleFixture.snapshot,
+    ) as unknown as WorkspaceSnapshot;
+    snapshot.actuals = [];
+    const resource = snapshot.resources[0] as unknown as Record<string, unknown>;
+    resource.legacyExtra = { shouldNotLeak: true };
+    const rawV1Payload = JSON.stringify({
+      schemaVersion: 1,
+      exportedAt: NOW,
+      snapshot,
+    });
+
+    const result = await migrateBrowserWorkspace({
+      rawV1Payload,
+      workspaceId: "workspace-resource-known-field-projection",
+      actorId: "human-migrator",
+      now: NOW,
+      repository: repo,
+    });
+
+    expect(result.status).toBe("committed");
+    expect((await repo.load())?.resources[0]).not.toHaveProperty("legacyExtra");
+    await expect(
+      exportWorkspaceBackup({ repository: repo, exportedAt: NOW }),
+    ).resolves.toMatchObject({ schemaVersion: 2 });
+  });
+
+  it("projects legacy AttentionCapacity extensions recursively before export", async () => {
+    const repo = repository("capacity-known-field-projection");
+    const snapshot = emptySnapshot();
+    snapshot.capacities.push({
+      date: "2026-07-12",
+      deepSeconds: 3_600,
+      mediumSeconds: 1_800,
+      shallowSeconds: 900,
+      unavailableBlocks: [
+        {
+          start: "2026-07-12T02:00:00.000Z",
+          finish: "2026-07-12T03:00:00.000Z",
+          legacyNestedExtra: true,
+        },
+      ],
+      legacyExtra: { shouldNotLeak: true },
+    } as unknown as WorkspaceSnapshot["capacities"][number]);
+    const rawV1Payload = JSON.stringify({
+      schemaVersion: 1,
+      exportedAt: NOW,
+      snapshot,
+    });
+
+    const result = await migrateBrowserWorkspace({
+      rawV1Payload,
+      workspaceId: "workspace-capacity-known-field-projection",
+      actorId: "human-migrator",
+      now: NOW,
+      repository: repo,
+    });
+
+    expect(result.status).toBe("committed");
+    const [capacity] = (await repo.load())?.capacities ?? [];
+    expect(capacity).not.toHaveProperty("legacyExtra");
+    expect(capacity?.unavailableBlocks[0]).not.toHaveProperty(
+      "legacyNestedExtra",
+    );
+    await expect(
+      exportWorkspaceBackup({ repository: repo, exportedAt: NOW }),
+    ).resolves.toMatchObject({ schemaVersion: 2 });
+  });
+
+  it("projects legacy WorkItem extensions recursively before export", async () => {
+    const repo = repository("work-item-known-field-projection");
+    const snapshot = structuredClone(
+      currentSampleFixture.snapshot,
+    ) as unknown as WorkspaceSnapshot;
+    snapshot.actuals = [];
+    const workItem = snapshot.workItems.find(({ id }) => id === "w-scheduler")!;
+    const rawWorkItem = workItem as unknown as Record<string, unknown>;
+    rawWorkItem.legacyExtra = true;
+    (workItem.estimate as unknown as Record<string, unknown>).legacyExtra = true;
+    workItem.constraint = {
+      noEarlierThan: "legacy-no-earlier-than",
+      fixedFinish: "legacy-fixed-finish",
+      legacyExtra: true,
+    } as WorkspaceSnapshot["workItems"][number]["constraint"];
+    (workItem.assignmentIds[0] as unknown as Record<string, unknown>).legacyExtra =
+      true;
+    (workItem.splitSegments![0] as unknown as Record<string, unknown>).legacyExtra =
+      true;
+    workItem.repeatRule = {
+      cadence: "every-n-days",
+      everyDays: 2,
+      count: 3,
+      startMode: "fixed-time",
+      startAt: "legacy-repeat-start",
+      legacyExtra: true,
+    } as WorkspaceSnapshot["workItems"][number]["repeatRule"];
+    const rawV1Payload = JSON.stringify({
+      schemaVersion: 1,
+      exportedAt: NOW,
+      snapshot,
+    });
+
+    const result = await migrateBrowserWorkspace({
+      rawV1Payload,
+      workspaceId: "workspace-work-item-known-field-projection",
+      actorId: "human-migrator",
+      now: NOW,
+      repository: repo,
+    });
+
+    expect(result.status).toBe("committed");
+    const stored = (await repo.load())?.workItems.find(
+      ({ id }) => id === workItem.id,
+    );
+    expect(stored).not.toHaveProperty("legacyExtra");
+    expect(stored?.estimate).not.toHaveProperty("legacyExtra");
+    expect(stored?.constraint).not.toHaveProperty("legacyExtra");
+    expect(stored?.assignmentIds[0]).not.toHaveProperty("legacyExtra");
+    expect(stored?.splitSegments?.[0]).not.toHaveProperty("legacyExtra");
+    expect(stored?.repeatRule).not.toHaveProperty("legacyExtra");
+    await expect(
+      exportWorkspaceBackup({ repository: repo, exportedAt: NOW }),
+    ).resolves.toMatchObject({ schemaVersion: 2 });
+  });
+
+  it("projects legacy Baseline extensions before export", async () => {
+    const repo = repository("baseline-known-field-projection");
+    const snapshot = structuredClone(
+      currentSampleFixture.snapshot,
+    ) as unknown as WorkspaceSnapshot;
+    snapshot.actuals = [];
+    const baseline = snapshot.baselines[0] as unknown as Record<string, unknown>;
+    baseline.legacyExtra = { shouldNotLeak: true };
+    const rawV1Payload = JSON.stringify({
+      schemaVersion: 1,
+      exportedAt: NOW,
+      snapshot,
+    });
+
+    const result = await migrateBrowserWorkspace({
+      rawV1Payload,
+      workspaceId: "workspace-baseline-known-field-projection",
+      actorId: "human-migrator",
+      now: NOW,
+      repository: repo,
+    });
+
+    expect(result.status).toBe("committed");
+    expect((await repo.load())?.baselines[0]).not.toHaveProperty("legacyExtra");
+    await expect(
+      exportWorkspaceBackup({ repository: repo, exportedAt: NOW }),
+    ).resolves.toMatchObject({ schemaVersion: 2 });
+  });
+
+  it("projects legacy Evidence extensions before export", async () => {
+    const repo = repository("evidence-known-field-projection");
+    const snapshot = structuredClone(
+      currentSampleFixture.snapshot,
+    ) as unknown as WorkspaceSnapshot;
+    snapshot.actuals = [];
+    const evidence = snapshot.evidence[0] as unknown as Record<string, unknown>;
+    evidence.legacyExtra = { shouldNotLeak: true };
+    const rawV1Payload = JSON.stringify({
+      schemaVersion: 1,
+      exportedAt: NOW,
+      snapshot,
+    });
+
+    const result = await migrateBrowserWorkspace({
+      rawV1Payload,
+      workspaceId: "workspace-evidence-known-field-projection",
+      actorId: "human-migrator",
+      now: NOW,
+      repository: repo,
+    });
+
+    expect(result.status).toBe("committed");
+    expect((await repo.load())?.evidence[0]).not.toHaveProperty("legacyExtra");
+    await expect(
+      exportWorkspaceBackup({ repository: repo, exportedAt: NOW }),
+    ).resolves.toMatchObject({ schemaVersion: 2 });
+  });
+
+  it("projects legacy Dependency extensions before export", async () => {
+    const repo = repository("dependency-known-field-projection");
+    const snapshot = structuredClone(
+      currentSampleFixture.snapshot,
+    ) as unknown as WorkspaceSnapshot;
+    snapshot.actuals = [];
+    const dependency = snapshot.dependencies[0] as unknown as Record<
+      string,
+      unknown
+    >;
+    dependency.legacyExtra = { shouldNotLeak: true };
+    const rawV1Payload = JSON.stringify({
+      schemaVersion: 1,
+      exportedAt: NOW,
+      snapshot,
+    });
+
+    const result = await migrateBrowserWorkspace({
+      rawV1Payload,
+      workspaceId: "workspace-dependency-known-field-projection",
+      actorId: "human-migrator",
+      now: NOW,
+      repository: repo,
+    });
+
+    expect(result.status).toBe("committed");
+    expect((await repo.load())?.dependencies[0]).not.toHaveProperty(
+      "legacyExtra",
+    );
+    await expect(
+      exportWorkspaceBackup({ repository: repo, exportedAt: NOW }),
+    ).resolves.toMatchObject({ schemaVersion: 2 });
+  });
+
+  it("rejects a migrated known field whose runtime value cannot be exported", async () => {
+    const repo = repository("invalid-known-field");
+    const snapshot = emptySnapshot();
+    snapshot.resources.push({
+      id: "resource-invalid-role",
+      name: "Invalid role",
+      role: 42,
+      capacityByAttention: { deep: 1, medium: 1, shallow: 1 },
+      hourlyRate: 1,
+    } as unknown as WorkspaceSnapshot["resources"][number]);
+    const rawV1Payload = JSON.stringify({
+      schemaVersion: 1,
+      exportedAt: NOW,
+      snapshot,
+    });
+
+    const result = await migrateBrowserWorkspace({
+      rawV1Payload,
+      workspaceId: "workspace-invalid-known-field",
+      actorId: "human-migrator",
+      now: NOW,
+      repository: repo,
+    });
+
+    expect(result.status).toBe("rejected");
+    if (result.status !== "rejected") throw new Error("Expected rejection");
+    expect(result.violations).toContainEqual(
+      expect.objectContaining({
+        code: "WORKSPACE_SCHEMA_INVALID",
+        path: "workspace.resources[0].role",
+      }),
+    );
+    expect(await repo.load()).toBeUndefined();
   });
 
   it("uses the production migration and validation engine when no test engine is supplied", async () => {

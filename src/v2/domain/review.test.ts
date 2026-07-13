@@ -2440,6 +2440,12 @@ describe("persisted Review commands", () => {
 describe("portfolio-wide overdue enforcement", () => {
   it("allows capture, Project triage, and Direction drafting while blocking new commitments", async () => {
     const source = reviewCommandWorkspace();
+    const {
+      version: _directionVersion,
+      createdAt: _directionCreatedAt,
+      updatedAt: _directionUpdatedAt,
+      ...directionDraft
+    } = structuredClone(source.directionBriefs[0]);
     source.inboxItems.push(
       buildInboxItem({
         id: "new-project-inbox",
@@ -2481,7 +2487,7 @@ describe("portfolio-wide overdue enforcement", () => {
         type: "update_direction",
         projectId: "review-project",
         brief: {
-          ...structuredClone(source.directionBriefs[0]),
+          ...directionDraft,
           audienceAndProblem: "Refined during overdue review",
         },
       },

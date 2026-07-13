@@ -1,5 +1,7 @@
 import type { ISODate } from "@/domain/types";
 
+import { canonicalJson } from "../../domain/canonical";
+import { normalizeWorkspaceSnapshot } from "../../domain/projectLifecycle";
 import type { CommandContext, V2Command } from "../domain/commands";
 import { sha256Text, stableHash } from "../domain/stableHash";
 import type {
@@ -9,6 +11,9 @@ import type {
   WorkspaceV2,
 } from "../domain/types";
 import type { MigrationRecoveryState } from "../migration/recovery";
+import { migrateV1Workspace } from "../migration/migrateV1";
+import { migratedWorkspaceDescendsFromBaseline } from "../migration/restoreLineage";
+import { parseV1Export, verifyRawV1Backup } from "../migration/backup";
 import {
   openV2Database,
   requestResult,
@@ -16,6 +21,15 @@ import {
   V2_DATABASE_NAME,
   V2_OBJECT_STORES,
 } from "./indexedDb";
+import {
+  consumeAuthorizedWorkspaceRestore,
+  isAuthorizedWorkspaceRestore,
+  type AuthorizedWorkspaceRestore,
+  type WorkspaceRestoreCheckpoint,
+  type WorkspaceTransferSnapshot,
+} from "./workspaceTransfer";
+import { parseSyncEnvelopeV2, syncOperationPathV2 } from "./syncProtocol";
+import { isExactSystemCasRetryOverlap } from "./receiptOwnership";
 
 const CURRENT_WORKSPACE_KEY = "current";
 
@@ -92,8 +106,19 @@ export interface AtomicWorkspaceRepository {
   listReceipts(): Promise<CommandReceipt[]>;
 }
 
-export interface MigrationWorkspaceRepository
-  extends AtomicWorkspaceRepository {
+export type AtomicWorkspaceRestoreResult =
+  "restored" | "checkpoint_conflict" | "outbox_not_quiescent";
+
+export interface WorkspaceTransferRepository {
+  loadTransferSnapshot(): Promise<WorkspaceTransferSnapshot | undefined>;
+  loadRestoreCheckpoint(): Promise<WorkspaceRestoreCheckpoint | undefined>;
+  restoreRepositoryIdentity(): object;
+  restoreVerifiedBackup(
+    authorization: AuthorizedWorkspaceRestore,
+  ): Promise<AtomicWorkspaceRestoreResult>;
+}
+
+export interface MigrationWorkspaceRepository extends AtomicWorkspaceRepository {
   loadVerifiedBackup(id: string): Promise<VerifiedBackupRecord | undefined>;
   saveMigrationRecovery(state: MigrationRecoveryState): Promise<void>;
   loadMigrationRecovery(): Promise<MigrationRecoveryState | undefined>;
@@ -120,7 +145,8 @@ export type RepositoryTransactionOperation =
   | "prepareOutboxOperation"
   | "replacePreparedOutboxOperation"
   | "markOutboxSent"
-  | "appendRejectedReceipt";
+  | "appendRejectedReceipt"
+  | "restoreVerifiedBackup";
 
 export interface BrowserWorkspaceRepositoryOptions {
   databaseName?: string;
@@ -130,6 +156,21 @@ export interface BrowserWorkspaceRepositoryOptions {
     operation: RepositoryTransactionOperation,
     transaction: IDBTransaction,
   ) => void;
+}
+
+export class WorkspaceRestoreBoundaryError extends Error {
+  constructor(
+    readonly code:
+      | "AUTHORIZED_RESTORE_REQUIRED"
+      | "MALFORMED_OUTBOX"
+      | "BACKUP_COLLISION"
+      | "MIGRATION_SOURCE_BACKUP_REQUIRED"
+      | "MIGRATION_LINEAGE_INVALID",
+    message: string,
+  ) {
+    super(message);
+    this.name = "WorkspaceRestoreBoundaryError";
+  }
 }
 
 export interface VerifiedBackupRecord {
@@ -160,6 +201,107 @@ function migrationRecoveryMatches(
 
 function compareText(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function canonicalTimestamp(value: unknown): value is ISODate {
+  if (typeof value !== "string") return false;
+  const milliseconds = Date.parse(value);
+  return (
+    Number.isFinite(milliseconds) &&
+    new Date(milliseconds).toISOString() === value
+  );
+}
+
+function isWellFormedSentOutboxEntry(entry: SyncOutboxEntry): boolean {
+  return (
+    entry.status === "sent" &&
+    entry.preparedOperation !== undefined &&
+    typeof entry.operationHash === "string" &&
+    /^[a-f0-9]{64}$/.test(entry.operationHash) &&
+    typeof entry.preparedOperation.operationHash === "string" &&
+    entry.preparedOperation.operationHash === entry.operationHash &&
+    typeof entry.preparedOperation.path === "string" &&
+    entry.preparedOperation.path.trim().length > 0 &&
+    entry.preparedOperation.path === entry.preparedOperation.path.trim() &&
+    typeof entry.preparedOperation.envelopeJson === "string" &&
+    entry.preparedOperation.envelopeJson.trim().length > 0 &&
+    canonicalTimestamp(entry.sentAt) &&
+    entry.id === `outbox-${entry.commandId}`
+  );
+}
+
+async function isVerifiedSentOutboxEntry(
+  entry: SyncOutboxEntry,
+  workspace: Readonly<WorkspaceV2>,
+): Promise<boolean> {
+  if (!isWellFormedSentOutboxEntry(entry)) return false;
+  const receipt = workspace.commandReceipts.find(
+    ({ commandId, status }) =>
+      commandId === entry.commandId && status === "applied",
+  );
+  if (receipt === undefined || entry.preparedOperation === undefined) {
+    return false;
+  }
+  const commandType =
+    typeof entry.command === "object" &&
+    entry.command !== null &&
+    "type" in entry.command
+      ? entry.command.type
+      : undefined;
+  const { receiptHash, ...receiptBase } = receipt;
+  if (
+    entry.workspaceId !== workspace.workspaceId ||
+    entry.receiptId !== receipt.id ||
+    entry.baseRevision !== receipt.baseRevision ||
+    entry.revision !== receipt.revision ||
+    entry.payloadHash !== receipt.payloadHash ||
+    entry.createdAt !== receipt.createdAt ||
+    commandType !== receipt.commandType ||
+    canonicalJson(entry.actor) !==
+      canonicalJson({
+        actorId: receipt.actorId,
+        actorKind: receipt.actorKind,
+        origin: receipt.origin,
+        source: receipt.source,
+      }) ||
+    (await stableHash(entry.command as unknown as JsonValue)) !==
+      entry.payloadHash ||
+    (await stableHash(receiptBase as unknown as JsonValue)) !== receiptHash
+  ) {
+    return false;
+  }
+  let envelope;
+  try {
+    const parsed: unknown = JSON.parse(entry.preparedOperation.envelopeJson);
+    envelope = parseSyncEnvelopeV2(parsed);
+  } catch {
+    return false;
+  }
+  const canonicalEnvelope = canonicalJson(envelope);
+  const operationHash = await sha256Text(canonicalEnvelope);
+  let expectedPath: string;
+  try {
+    expectedPath = syncOperationPathV2(
+      envelope.workspaceId,
+      envelope.deviceId,
+      envelope.sequence,
+      operationHash,
+    );
+  } catch {
+    return false;
+  }
+  return (
+    entry.preparedOperation.envelopeJson === canonicalEnvelope &&
+    entry.preparedOperation.operationHash === operationHash &&
+    entry.operationHash === operationHash &&
+    entry.preparedOperation.path === expectedPath &&
+    envelope.workspaceId === entry.workspaceId &&
+    envelope.commandId === entry.commandId &&
+    envelope.baseRevision === entry.baseRevision &&
+    envelope.revision === entry.revision &&
+    envelope.payloadHash === entry.payloadHash &&
+    envelope.createdAt === entry.createdAt
+  );
 }
 
 function errorName(error: unknown): string | undefined {
@@ -235,7 +377,10 @@ function assertCanonicalRevision(revision: number, field: string): void {
   }
 }
 
-async function sameStableValue(left: unknown, right: unknown): Promise<boolean> {
+async function sameStableValue(
+  left: unknown,
+  right: unknown,
+): Promise<boolean> {
   return (
     (await stableHash(left as JsonValue)) ===
     (await stableHash(right as JsonValue))
@@ -254,7 +399,9 @@ async function assertAtomicCommandTuple(input: {
     workspace.workspaceId.trim().length === 0 ||
     workspace.revision !== expectedRevision + 1
   ) {
-    throw new Error("Invalid atomic command tuple: Workspace revision mismatch.");
+    throw new Error(
+      "Invalid atomic command tuple: Workspace revision mismatch.",
+    );
   }
   const identityMatches =
     outboxEntry.workspaceId === workspace.workspaceId &&
@@ -274,12 +421,15 @@ async function assertAtomicCommandTuple(input: {
   const matchingReceipts = workspace.commandReceipts.filter(
     ({ commandId }) => commandId === outboxEntry.commandId,
   );
-  const finalReceipt = workspace.commandReceipts[workspace.commandReceipts.length - 1];
+  const finalReceipt =
+    workspace.commandReceipts[workspace.commandReceipts.length - 1];
   if (
     matchingReceipts.length !== 1 ||
     finalReceipt?.commandId !== outboxEntry.commandId
   ) {
-    throw new Error("Invalid atomic command tuple: applied receipt identity mismatch.");
+    throw new Error(
+      "Invalid atomic command tuple: applied receipt identity mismatch.",
+    );
   }
   const receipt = matchingReceipts[0];
   const commandType =
@@ -304,12 +454,18 @@ async function assertAtomicCommandTuple(input: {
     receipt.createdAt !== outboxEntry.createdAt ||
     !(await sameStableValue(receipt.source, outboxEntry.actor.source))
   ) {
-    throw new Error("Invalid atomic command tuple: applied receipt fields mismatch.");
+    throw new Error(
+      "Invalid atomic command tuple: applied receipt fields mismatch.",
+    );
   }
 
-  const payloadHash = await stableHash(outboxEntry.command as unknown as JsonValue);
+  const payloadHash = await stableHash(
+    outboxEntry.command as unknown as JsonValue,
+  );
   if (payloadHash !== receipt.payloadHash) {
-    throw new Error("Invalid atomic command tuple: command payload hash mismatch.");
+    throw new Error(
+      "Invalid atomic command tuple: command payload hash mismatch.",
+    );
   }
   const { receiptHash, ...receiptBase } = receipt;
   if ((await stableHash(receiptBase as unknown as JsonValue)) !== receiptHash) {
@@ -352,12 +508,14 @@ async function migrationAlreadyCommitted(
   );
 }
 
-export class BrowserWorkspaceRepository implements AtomicWorkspaceRepository {
+export class BrowserWorkspaceRepository
+  implements AtomicWorkspaceRepository, WorkspaceTransferRepository
+{
   readonly databaseName: string;
   private readonly indexedDB: IDBFactory | undefined;
   private readonly beforeTransactionComplete:
-    | BrowserWorkspaceRepositoryOptions["beforeTransactionComplete"]
-    | undefined;
+    BrowserWorkspaceRepositoryOptions["beforeTransactionComplete"] | undefined;
+  private readonly restoreIdentity = Object.freeze({});
 
   constructor(options: BrowserWorkspaceRepositoryOptions = {}) {
     this.databaseName = options.databaseName ?? V2_DATABASE_NAME;
@@ -388,12 +546,123 @@ export class BrowserWorkspaceRepository implements AtomicWorkspaceRepository {
       );
       const completion = transactionComplete(transaction);
       const workspace = await requestResult<WorkspaceV2 | undefined>(
-        transaction.objectStore(V2_OBJECT_STORES.workspace).get(
-          CURRENT_WORKSPACE_KEY,
-        ),
+        transaction
+          .objectStore(V2_OBJECT_STORES.workspace)
+          .get(CURRENT_WORKSPACE_KEY),
       );
       await completion;
       return workspace === undefined ? undefined : structuredClone(workspace);
+    } finally {
+      database.close();
+    }
+  }
+
+  restoreRepositoryIdentity(): object {
+    return this.restoreIdentity;
+  }
+
+  async loadTransferSnapshot(): Promise<WorkspaceTransferSnapshot | undefined> {
+    const database = await this.open();
+    try {
+      const transaction = database.transaction(
+        [V2_OBJECT_STORES.workspace, V2_OBJECT_STORES.receipts],
+        "readonly",
+      );
+      const completion = transactionComplete(transaction);
+      const [workspace, rejectedReceipts] = await Promise.all([
+        requestResult<WorkspaceV2 | undefined>(
+          transaction
+            .objectStore(V2_OBJECT_STORES.workspace)
+            .get(CURRENT_WORKSPACE_KEY),
+        ),
+        requestResult<CommandReceipt[]>(
+          transaction.objectStore(V2_OBJECT_STORES.receipts).getAll(),
+        ),
+      ]);
+      await completion;
+      if (workspace === undefined) return undefined;
+      return {
+        workspace: structuredClone(workspace),
+        rejectedReceipts: structuredClone(
+          rejectedReceipts.sort(
+            (left, right) =>
+              compareText(left.createdAt, right.createdAt) ||
+              compareText(left.id, right.id),
+          ),
+        ),
+      };
+    } finally {
+      database.close();
+    }
+  }
+
+  async loadRestoreCheckpoint(): Promise<
+    WorkspaceRestoreCheckpoint | undefined
+  > {
+    const database = await this.open();
+    try {
+      const transaction = database.transaction(
+        [
+          V2_OBJECT_STORES.workspace,
+          V2_OBJECT_STORES.receipts,
+          V2_OBJECT_STORES.migrationRuns,
+          V2_OBJECT_STORES.backups,
+          V2_OBJECT_STORES.outbox,
+        ],
+        "readonly",
+      );
+      const completion = transactionComplete(transaction);
+      const [
+        workspace,
+        rejectedReceipts,
+        migrationRuns,
+        recoveryRecord,
+        outboxEntries,
+      ] = await Promise.all([
+        requestResult<WorkspaceV2 | undefined>(
+          transaction
+            .objectStore(V2_OBJECT_STORES.workspace)
+            .get(CURRENT_WORKSPACE_KEY),
+        ),
+        requestResult<CommandReceipt[]>(
+          transaction.objectStore(V2_OBJECT_STORES.receipts).getAll(),
+        ),
+        requestResult<MigrationRecord[]>(
+          transaction.objectStore(V2_OBJECT_STORES.migrationRuns).getAll(),
+        ),
+        requestResult<MigrationRecoveryRecord | undefined>(
+          transaction
+            .objectStore(V2_OBJECT_STORES.backups)
+            .get(CURRENT_MIGRATION_RECOVERY_KEY),
+        ),
+        requestResult<SyncOutboxEntry[]>(
+          transaction.objectStore(V2_OBJECT_STORES.outbox).getAll(),
+        ),
+      ]);
+      await completion;
+      if (workspace === undefined) return undefined;
+      return {
+        workspace: structuredClone(workspace),
+        rejectedReceipts: structuredClone(
+          rejectedReceipts.sort(
+            (left, right) =>
+              compareText(left.createdAt, right.createdAt) ||
+              compareText(left.id, right.id),
+          ),
+        ),
+        migrationRuns: structuredClone(
+          migrationRuns.sort((left, right) =>
+            compareText(left.sourceChecksum, right.sourceChecksum),
+          ),
+        ),
+        migrationRecoveryRecord:
+          recoveryRecord === undefined
+            ? null
+            : (structuredClone(recoveryRecord) as unknown as JsonValue),
+        outboxEntries: structuredClone(
+          outboxEntries.sort((left, right) => compareText(left.id, right.id)),
+        ) as unknown as JsonValue[],
+      };
     } finally {
       database.close();
     }
@@ -441,18 +710,40 @@ export class BrowserWorkspaceRepository implements AtomicWorkspaceRepository {
     const database = await this.open();
     try {
       const transaction = database.transaction(
-        [V2_OBJECT_STORES.workspace, V2_OBJECT_STORES.outbox],
+        [
+          V2_OBJECT_STORES.workspace,
+          V2_OBJECT_STORES.outbox,
+          V2_OBJECT_STORES.receipts,
+        ],
         "readwrite",
       );
       const completion = transactionComplete(transaction);
-      const workspaceStore = transaction.objectStore(V2_OBJECT_STORES.workspace);
-      const current = await requestResult<WorkspaceV2 | undefined>(
-        workspaceStore.get(CURRENT_WORKSPACE_KEY),
+      const workspaceStore = transaction.objectStore(
+        V2_OBJECT_STORES.workspace,
       );
+      const receiptStore = transaction.objectStore(V2_OBJECT_STORES.receipts);
+      const [current, existingRejectedReceipt] = await Promise.all([
+        requestResult<WorkspaceV2 | undefined>(
+          workspaceStore.get(CURRENT_WORKSPACE_KEY),
+        ),
+        requestResult<CommandReceipt | undefined>(
+          receiptStore.get(input.outboxEntry.commandId),
+        ),
+      ]);
+      const appliedReceipt =
+        input.workspace.commandReceipts[
+          input.workspace.commandReceipts.length - 1
+        ];
       if (
         current === undefined ||
         current.workspaceId !== input.workspace.workspaceId ||
-        current.revision !== input.expectedRevision
+        current.revision !== input.expectedRevision ||
+        appliedReceipt === undefined ||
+        (existingRejectedReceipt !== undefined &&
+          !isExactSystemCasRetryOverlap({
+            applied: appliedReceipt,
+            rejected: existingRejectedReceipt,
+          }))
       ) {
         transaction.abort();
         await completion.catch(() => undefined);
@@ -479,6 +770,310 @@ export class BrowserWorkspaceRepository implements AtomicWorkspaceRepository {
         if (isConstraintError(error) || isConstraintError(transaction.error)) {
           return "revision_conflict";
         }
+        throw error;
+      }
+    } finally {
+      database.close();
+    }
+  }
+
+  async restoreVerifiedBackup(
+    authorization: AuthorizedWorkspaceRestore,
+  ): Promise<AtomicWorkspaceRestoreResult> {
+    if (!isAuthorizedWorkspaceRestore(authorization)) {
+      throw new WorkspaceRestoreBoundaryError(
+        "AUTHORIZED_RESTORE_REQUIRED",
+        "Restore requires an opaque verified backup authorization.",
+      );
+    }
+    const targetSnapshot = structuredClone(authorization.targetSnapshot);
+    const safetyBackupRecord = structuredClone(
+      authorization.safetyBackupRecord,
+    );
+    const targetMigration = targetSnapshot.workspace.migration;
+    let verifiedMigrationSourceBackup: VerifiedBackupRecord | undefined;
+    let migrationSourcePreverificationFailed = false;
+    let migrationLineagePreverificationFailed = false;
+    if (targetMigration !== undefined) {
+      let recomputedMigrationBaseline: WorkspaceV2 | undefined;
+      try {
+        verifiedMigrationSourceBackup = await this.loadVerifiedBackup(
+          targetMigration.backupId,
+        );
+        if (
+          verifiedMigrationSourceBackup === undefined ||
+          !(await verifyRawV1Backup(verifiedMigrationSourceBackup))
+        ) {
+          migrationSourcePreverificationFailed = true;
+        } else {
+          const parsed = parseV1Export(
+            verifiedMigrationSourceBackup.rawPayload,
+          );
+          const normalizedSource = normalizeWorkspaceSnapshot(parsed.snapshot);
+          if (
+            (await stableHash(normalizedSource as unknown as JsonValue)) !==
+            targetMigration.sourceChecksum
+          ) {
+            migrationSourcePreverificationFailed = true;
+          } else {
+            const recomputed = migrateV1Workspace(normalizedSource, {
+              workspaceId: targetSnapshot.workspace.workspaceId,
+              sourceChecksum: targetMigration.sourceChecksum,
+              backupId: targetMigration.backupId,
+              backupChecksum: targetMigration.backupChecksum,
+              actorId: "migration-restore-verifier",
+              now: targetMigration.migratedAt,
+            });
+            if (
+              canonicalJson(recomputed.migration) !==
+              canonicalJson(targetMigration)
+            ) {
+              migrationSourcePreverificationFailed = true;
+            } else {
+              recomputedMigrationBaseline = recomputed.workspace;
+            }
+          }
+        }
+      } catch {
+        migrationSourcePreverificationFailed = true;
+      }
+      if (
+        !migrationSourcePreverificationFailed &&
+        recomputedMigrationBaseline !== undefined
+      ) {
+        try {
+          if (
+            !migratedWorkspaceDescendsFromBaseline(
+              recomputedMigrationBaseline,
+              targetSnapshot.workspace,
+            )
+          ) {
+            migrationLineagePreverificationFailed = true;
+          }
+        } catch {
+          migrationLineagePreverificationFailed = true;
+        }
+      } else if (!migrationSourcePreverificationFailed) {
+        migrationSourcePreverificationFailed = true;
+      }
+    }
+    const restoreCheckpointPreflight = await this.loadRestoreCheckpoint();
+    const restoreCheckpointPreflightCanonical =
+      restoreCheckpointPreflight === undefined
+        ? undefined
+        : canonicalJson(restoreCheckpointPreflight);
+    let sentOutboxPreverificationFailed =
+      restoreCheckpointPreflight === undefined;
+    if (restoreCheckpointPreflight !== undefined) {
+      for (const rawEntry of restoreCheckpointPreflight.outboxEntries) {
+        const entry = rawEntry as unknown as SyncOutboxEntry;
+        if (
+          entry.status === "sent" &&
+          !(await isVerifiedSentOutboxEntry(
+            entry,
+            restoreCheckpointPreflight.workspace,
+          ))
+        ) {
+          sentOutboxPreverificationFailed = true;
+          break;
+        }
+      }
+    }
+    const database = await this.open();
+    try {
+      const transaction = database.transaction(
+        [
+          V2_OBJECT_STORES.workspace,
+          V2_OBJECT_STORES.receipts,
+          V2_OBJECT_STORES.backups,
+          V2_OBJECT_STORES.outbox,
+          V2_OBJECT_STORES.migrationRuns,
+        ],
+        "readwrite",
+      );
+      const completion = transactionComplete(transaction);
+      const workspaceStore = transaction.objectStore(
+        V2_OBJECT_STORES.workspace,
+      );
+      const receiptStore = transaction.objectStore(V2_OBJECT_STORES.receipts);
+      const backupStore = transaction.objectStore(V2_OBJECT_STORES.backups);
+      const outboxStore = transaction.objectStore(V2_OBJECT_STORES.outbox);
+      const migrationStore = transaction.objectStore(
+        V2_OBJECT_STORES.migrationRuns,
+      );
+      const [
+        currentWorkspace,
+        currentReceipts,
+        currentBackup,
+        outboxEntries,
+        currentMigrationRuns,
+        currentRecoveryRecord,
+        targetMigrationSourceBackup,
+      ] = await Promise.all([
+        requestResult<WorkspaceV2 | undefined>(
+          workspaceStore.get(CURRENT_WORKSPACE_KEY),
+        ),
+        requestResult<CommandReceipt[]>(receiptStore.getAll()),
+        requestResult<BackupRecord | undefined>(
+          backupStore.get(safetyBackupRecord.id),
+        ),
+        requestResult<SyncOutboxEntry[]>(outboxStore.getAll()),
+        requestResult<MigrationRecord[]>(migrationStore.getAll()),
+        requestResult<MigrationRecoveryRecord | undefined>(
+          backupStore.get(CURRENT_MIGRATION_RECOVERY_KEY),
+        ),
+        targetMigration === undefined
+          ? Promise.resolve(undefined)
+          : requestResult<BackupRecord | undefined>(
+              backupStore.get(targetMigration.backupId),
+            ),
+      ]);
+      if (currentWorkspace === undefined) {
+        transaction.abort();
+        await completion.catch(() => undefined);
+        return "checkpoint_conflict";
+      }
+      const current: WorkspaceRestoreCheckpoint = {
+        workspace: structuredClone(currentWorkspace),
+        rejectedReceipts: structuredClone(
+          currentReceipts.sort(
+            (left, right) =>
+              compareText(left.createdAt, right.createdAt) ||
+              compareText(left.id, right.id),
+          ),
+        ),
+        migrationRuns: structuredClone(
+          currentMigrationRuns.sort((left, right) =>
+            compareText(left.sourceChecksum, right.sourceChecksum),
+          ),
+        ),
+        migrationRecoveryRecord:
+          currentRecoveryRecord === undefined
+            ? null
+            : (structuredClone(currentRecoveryRecord) as unknown as JsonValue),
+        outboxEntries: structuredClone(
+          outboxEntries.sort((left, right) => compareText(left.id, right.id)),
+        ) as unknown as JsonValue[],
+      };
+      if (
+        !consumeAuthorizedWorkspaceRestore({
+          authorization,
+          repositoryIdentity: this.restoreRepositoryIdentity(),
+          current,
+        })
+      ) {
+        transaction.abort();
+        await completion.catch(() => undefined);
+        return "checkpoint_conflict";
+      }
+      if (
+        restoreCheckpointPreflightCanonical === undefined ||
+        restoreCheckpointPreflightCanonical !== canonicalJson(current)
+      ) {
+        transaction.abort();
+        await completion.catch(() => undefined);
+        return "checkpoint_conflict";
+      }
+      if (outboxEntries.some(({ status }) => status === "pending")) {
+        transaction.abort();
+        await completion.catch(() => undefined);
+        return "outbox_not_quiescent";
+      }
+      if (
+        sentOutboxPreverificationFailed ||
+        !outboxEntries.every(isWellFormedSentOutboxEntry)
+      ) {
+        transaction.abort();
+        await completion.catch(() => undefined);
+        throw new WorkspaceRestoreBoundaryError(
+          "MALFORMED_OUTBOX",
+          "Restore refuses malformed non-pending outbox state.",
+        );
+      }
+      if (
+        currentWorkspace.workspaceId !== targetSnapshot.workspace.workspaceId
+      ) {
+        transaction.abort();
+        await completion.catch(() => undefined);
+        return "checkpoint_conflict";
+      }
+      if (
+        currentBackup !== undefined &&
+        canonicalJson(currentBackup) !== canonicalJson(safetyBackupRecord)
+      ) {
+        transaction.abort();
+        await completion.catch(() => undefined);
+        throw new WorkspaceRestoreBoundaryError(
+          "BACKUP_COLLISION",
+          `Safety backup ${safetyBackupRecord.id} already contains different bytes.`,
+        );
+      }
+      if (
+        targetMigration !== undefined &&
+        (migrationSourcePreverificationFailed ||
+          verifiedMigrationSourceBackup === undefined ||
+          verifiedMigrationSourceBackup.id !== targetMigration.backupId ||
+          verifiedMigrationSourceBackup.checksum !==
+            targetMigration.backupChecksum ||
+          targetMigrationSourceBackup === undefined ||
+          targetMigrationSourceBackup.id !== targetMigration.backupId ||
+          targetMigrationSourceBackup.rawPayload !==
+            verifiedMigrationSourceBackup.rawPayload ||
+          targetMigrationSourceBackup.checksum !==
+            verifiedMigrationSourceBackup.checksum)
+      ) {
+        transaction.abort();
+        await completion.catch(() => undefined);
+        throw new WorkspaceRestoreBoundaryError(
+          "MIGRATION_SOURCE_BACKUP_REQUIRED",
+          `Restore requires verified migration source backup ${targetMigration.backupId}.`,
+        );
+      }
+      if (
+        targetMigration !== undefined &&
+        migrationLineagePreverificationFailed
+      ) {
+        transaction.abort();
+        await completion.catch(() => undefined);
+        throw new WorkspaceRestoreBoundaryError(
+          "MIGRATION_LINEAGE_INVALID",
+          "The migrated Workspace does not descend from its exact V1 projection and applied receipt ledger.",
+        );
+      }
+
+      const requests: IDBRequest[] = [
+        workspaceStore.put(targetSnapshot.workspace, CURRENT_WORKSPACE_KEY),
+        receiptStore.clear(),
+        outboxStore.clear(),
+        migrationStore.clear(),
+        backupStore.delete(CURRENT_MIGRATION_RECOVERY_KEY),
+      ];
+      if (targetSnapshot.workspace.migration !== undefined) {
+        requests.push(migrationStore.add(targetSnapshot.workspace.migration));
+      }
+      if (currentBackup === undefined) {
+        requests.push(backupStore.add(safetyBackupRecord));
+      }
+      for (const receipt of targetSnapshot.rejectedReceipts) {
+        requests.push(receiptStore.add(receipt));
+      }
+      try {
+        this.inject("restoreVerifiedBackup", transaction);
+      } catch (error) {
+        try {
+          transaction.abort();
+        } catch {
+          // The injected fault may already have aborted the transaction.
+        }
+        await completion.catch(() => undefined);
+        throw error;
+      }
+      try {
+        await Promise.all(requests.map((request) => requestResult(request)));
+        await completion;
+        return "restored";
+      } catch (error) {
+        await completion.catch(() => undefined);
         throw error;
       }
     } finally {
@@ -515,25 +1110,28 @@ export class BrowserWorkspaceRepository implements AtomicWorkspaceRepository {
         "readwrite",
       );
       const completion = transactionComplete(transaction);
-      const workspaceStore = transaction.objectStore(V2_OBJECT_STORES.workspace);
+      const workspaceStore = transaction.objectStore(
+        V2_OBJECT_STORES.workspace,
+      );
       const migrationStore = transaction.objectStore(
         V2_OBJECT_STORES.migrationRuns,
       );
       const backupStore = transaction.objectStore(V2_OBJECT_STORES.backups);
-      const [current, existingMigration, storedBackup, recoveryRecord] = await Promise.all([
-        requestResult<WorkspaceV2 | undefined>(
-          workspaceStore.get(CURRENT_WORKSPACE_KEY),
-        ),
-        requestResult<MigrationRecord | undefined>(
-          migrationStore.get(input.sourceChecksum),
-        ),
-        requestResult<BackupRecord | undefined>(
-          backupStore.get(input.migrationRecord.backupId),
-        ),
-        requestResult<MigrationRecoveryRecord | undefined>(
-          backupStore.get(CURRENT_MIGRATION_RECOVERY_KEY),
-        ),
-      ]);
+      const [current, existingMigration, storedBackup, recoveryRecord] =
+        await Promise.all([
+          requestResult<WorkspaceV2 | undefined>(
+            workspaceStore.get(CURRENT_WORKSPACE_KEY),
+          ),
+          requestResult<MigrationRecord | undefined>(
+            migrationStore.get(input.sourceChecksum),
+          ),
+          requestResult<BackupRecord | undefined>(
+            backupStore.get(input.migrationRecord.backupId),
+          ),
+          requestResult<MigrationRecoveryRecord | undefined>(
+            backupStore.get(CURRENT_MIGRATION_RECOVERY_KEY),
+          ),
+        ]);
 
       if (
         storedBackup === undefined ||
@@ -551,11 +1149,11 @@ export class BrowserWorkspaceRepository implements AtomicWorkspaceRepository {
       if (existingMigration !== undefined) {
         transaction.abort();
         await completion.catch(() => undefined);
-        return await migrationAlreadyCommitted(
+        return (await migrationAlreadyCommitted(
           current,
           existingMigration,
           input,
-        )
+        ))
           ? "already_migrated"
           : "revision_conflict";
       }
@@ -593,11 +1191,11 @@ export class BrowserWorkspaceRepository implements AtomicWorkspaceRepository {
             this.load(),
             this.loadMigration(input.sourceChecksum),
           ]);
-          return await migrationAlreadyCommitted(
+          return (await migrationAlreadyCommitted(
             currentAfterRace,
             storedAfterRace,
             input,
-          )
+          ))
             ? "already_migrated"
             : "revision_conflict";
         }
@@ -614,6 +1212,11 @@ export class BrowserWorkspaceRepository implements AtomicWorkspaceRepository {
     checksum: string;
   }): Promise<void> {
     const input = structuredClone(inputValue);
+    if (input.id === CURRENT_MIGRATION_RECOVERY_KEY) {
+      throw new Error(
+        `${CURRENT_MIGRATION_RECOVERY_KEY} is a reserved mutable marker.`,
+      );
+    }
     if (
       input.id.trim().length === 0 ||
       input.checksum.trim().length === 0 ||
@@ -622,7 +1225,9 @@ export class BrowserWorkspaceRepository implements AtomicWorkspaceRepository {
       throw new Error("Backup identity, bytes, and checksum are required.");
     }
     if ((await sha256Text(input.rawPayload)) !== input.checksum) {
-      throw new Error(`Backup ${input.id} checksum does not match its raw bytes.`);
+      throw new Error(
+        `Backup ${input.id} checksum does not match its raw bytes.`,
+      );
     }
     const database = await this.open();
     try {
@@ -642,7 +1247,9 @@ export class BrowserWorkspaceRepository implements AtomicWorkspaceRepository {
         ) {
           transaction.abort();
           await completion.catch(() => undefined);
-          throw new Error(`Backup ${input.id} is immutable and does not match.`);
+          throw new Error(
+            `Backup ${input.id} is immutable and does not match.`,
+          );
         }
         await completion;
         return;
@@ -678,6 +1285,11 @@ export class BrowserWorkspaceRepository implements AtomicWorkspaceRepository {
     idValue: string,
   ): Promise<VerifiedBackupRecord | undefined> {
     const id = structuredClone(idValue);
+    if (id === CURRENT_MIGRATION_RECOVERY_KEY) {
+      throw new Error(
+        `${CURRENT_MIGRATION_RECOVERY_KEY} is a reserved mutable marker.`,
+      );
+    }
     if (id.trim().length === 0) {
       throw new Error("Backup identity is required.");
     }
@@ -713,7 +1325,8 @@ export class BrowserWorkspaceRepository implements AtomicWorkspaceRepository {
     const state = structuredClone(stateValue);
     const occurredAtMilliseconds = Date.parse(state.occurredAt);
     if (
-      (state.sourceChecksum !== null && state.sourceChecksum.trim().length === 0) ||
+      (state.sourceChecksum !== null &&
+        state.sourceChecksum.trim().length === 0) ||
       state.backupId.trim().length === 0 ||
       state.backupChecksum.trim().length === 0 ||
       state.code.trim().length === 0 ||
@@ -925,7 +1538,9 @@ export class BrowserWorkspaceRepository implements AtomicWorkspaceRepository {
       );
       const completion = transactionComplete(transaction);
       const store = transaction.objectStore(V2_OBJECT_STORES.outbox);
-      const entry = await requestResult<SyncOutboxEntry | undefined>(store.get(id));
+      const entry = await requestResult<SyncOutboxEntry | undefined>(
+        store.get(id),
+      );
       if (entry === undefined) {
         transaction.abort();
         await completion.catch(() => undefined);
@@ -947,7 +1562,9 @@ export class BrowserWorkspaceRepository implements AtomicWorkspaceRepository {
         }
         transaction.abort();
         await completion.catch(() => undefined);
-        throw new Error(`Outbox entry ${id} has a different prepared operation.`);
+        throw new Error(
+          `Outbox entry ${id} has a different prepared operation.`,
+        );
       }
 
       const preparedEntry = {
@@ -996,7 +1613,9 @@ export class BrowserWorkspaceRepository implements AtomicWorkspaceRepository {
     try {
       JSON.parse(operation.envelopeJson);
     } catch {
-      throw new Error("Replacement sync operation envelope must be valid JSON.");
+      throw new Error(
+        "Replacement sync operation envelope must be valid JSON.",
+      );
     }
 
     const database = await this.open();
@@ -1007,7 +1626,9 @@ export class BrowserWorkspaceRepository implements AtomicWorkspaceRepository {
       );
       const completion = transactionComplete(transaction);
       const store = transaction.objectStore(V2_OBJECT_STORES.outbox);
-      const entry = await requestResult<SyncOutboxEntry | undefined>(store.get(id));
+      const entry = await requestResult<SyncOutboxEntry | undefined>(
+        store.get(id),
+      );
       if (entry === undefined) {
         transaction.abort();
         await completion.catch(() => undefined);
@@ -1079,7 +1700,9 @@ export class BrowserWorkspaceRepository implements AtomicWorkspaceRepository {
       );
       const completion = transactionComplete(transaction);
       const store = transaction.objectStore(V2_OBJECT_STORES.outbox);
-      const entry = await requestResult<SyncOutboxEntry | undefined>(store.get(id));
+      const entry = await requestResult<SyncOutboxEntry | undefined>(
+        store.get(id),
+      );
       if (entry === undefined) {
         transaction.abort();
         await completion.catch(() => undefined);
@@ -1121,22 +1744,43 @@ export class BrowserWorkspaceRepository implements AtomicWorkspaceRepository {
       throw new Error("Only rejected command receipts may be appended.");
     }
     const { receiptHash, ...receiptBase } = receipt;
-    if ((await stableHash(receiptBase as unknown as JsonValue)) !== receiptHash) {
+    if (
+      (await stableHash(receiptBase as unknown as JsonValue)) !== receiptHash
+    ) {
       throw new Error("Rejected command receipt hash is invalid.");
     }
     const database = await this.open();
     try {
       const transaction = database.transaction(
-        V2_OBJECT_STORES.receipts,
+        [V2_OBJECT_STORES.workspace, V2_OBJECT_STORES.receipts],
         "readwrite",
       );
       const completion = transactionComplete(transaction);
       const store = transaction.objectStore(V2_OBJECT_STORES.receipts);
-      const existing = await requestResult<CommandReceipt | undefined>(
-        store.get(receipt.id),
+      const [existing, currentWorkspace] = await Promise.all([
+        requestResult<CommandReceipt | undefined>(store.get(receipt.id)),
+        requestResult<WorkspaceV2 | undefined>(
+          transaction
+            .objectStore(V2_OBJECT_STORES.workspace)
+            .get(CURRENT_WORKSPACE_KEY),
+        ),
+      ]);
+      const appliedOwner = currentWorkspace?.commandReceipts.find(
+        ({ commandId, status }) =>
+          commandId === receipt.commandId && status === "applied",
       );
+      if (
+        appliedOwner !== undefined &&
+        !isExactSystemCasRetryOverlap({
+          applied: appliedOwner,
+          rejected: receipt,
+        })
+      ) {
+        await completion;
+        return;
+      }
       if (existing !== undefined) {
-        if (await sameStableValue(existing, receipt)) {
+        if (canonicalJson(existing) === canonicalJson(receipt)) {
           await completion;
           return;
         }
@@ -1159,14 +1803,26 @@ export class BrowserWorkspaceRepository implements AtomicWorkspaceRepository {
     const database = await this.open();
     try {
       const transaction = database.transaction(
-        V2_OBJECT_STORES.receipts,
+        [V2_OBJECT_STORES.workspace, V2_OBJECT_STORES.receipts],
         "readonly",
       );
       const completion = transactionComplete(transaction);
-      const receipt = await requestResult<CommandReceipt | undefined>(
-        transaction.objectStore(V2_OBJECT_STORES.receipts).get(commandId),
-      );
+      const [workspace, rejectedReceipt] = await Promise.all([
+        requestResult<WorkspaceV2 | undefined>(
+          transaction
+            .objectStore(V2_OBJECT_STORES.workspace)
+            .get(CURRENT_WORKSPACE_KEY),
+        ),
+        requestResult<CommandReceipt | undefined>(
+          transaction.objectStore(V2_OBJECT_STORES.receipts).get(commandId),
+        ),
+      ]);
       await completion;
+      const appliedReceipt = workspace?.commandReceipts.find(
+        (receipt) =>
+          receipt.commandId === commandId && receipt.status === "applied",
+      );
+      const receipt = appliedReceipt ?? rejectedReceipt;
       return receipt === undefined ? undefined : structuredClone(receipt);
     } finally {
       database.close();

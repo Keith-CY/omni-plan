@@ -549,6 +549,18 @@ Migration runs against a copy and commits atomically. If validation or persisten
 - the recovery screen displays the error and backup checksum;
 - the user may download or restore the backup and retry.
 
+### 15.4 Explicit Workspace transfer
+
+Workspace transfer exposes three separate operations. Export creates a schema-2 backup containing the Workspace and the external rejected-receipt ledger. Portable import accepts a strictly parsed command list and sends its bounded, non-commitment commands through the same `CommandService`; it never replaces a snapshot. Verified restore is an explicit user-authorized recovery operation and is not an import shortcut.
+
+Before restore, OmniPlan validates the canonical envelope, Workspace and receipt-ledger hashes, every receipt hash and provenance link, and all Workspace invariants. It then performs one compare-and-swap transaction across Workspace, rejected receipts, safety backups, sync outbox, and the migration idempotence index derived from the embedded Workspace migration record. Any pending or prepared sync operation blocks restore. On success, the prior complete state is retained as a verified safety backup, stale sent outbox entries are removed, and only the superseded mutable migration-recovery marker is cleared; immutable backup records remain available.
+
+A migrated Workspace backup references, but does not duplicate, the original V1 recovery bytes. Restoring it therefore requires the target repository to already contain the exact immutable V1 source backup named by the embedded migration record and matching its checksum. Missing or mismatched source provenance fails before any store changes. The restore authorization also compare-and-swaps the current migration index and recovery marker so a newer recovery checkpoint from another tab cannot be erased.
+
+For a migrated Workspace with later receipts, restore replays the complete contiguous applied-receipt diff ledger from the deterministic V1 projection and requires every intermediate revision to remain schema-valid. Collections untouched by a create retain exact array order; when the ledger creates entities, their otherwise-unrecorded insertion positions may differ, but the complete entity multiset and the relative order of all pre-existing survivors must match. This diff-lineage proof establishes state consistency only. It does not prove that a receipt's claimed command was semantically authentic, nor does it supply a cryptographic signature.
+
+The backup checksum detects corruption and inconsistent edits; it is not a digital signature. An attacker able to rewrite the complete backup and recompute all unkeyed hashes cannot be distinguished from a newly assembled file without a signing identity or external trusted checkpoint. Restore authority therefore comes from the user's explicit recovery action plus opaque current-state authorization and domain provenance validation, not from possession of a checksum alone.
+
 ## 16. Sync conflict behavior
 
 Lifecycle records and commitments are not last-write-wins data.
@@ -562,6 +574,10 @@ Independent resolutions of the same conflict are also never collapsed by last-wr
 ### 16.1 Sync security boundary
 
 Remote transport and storage are untrusted. V2 verifies namespace and manifest paths, authenticated encryption, immutable operation hashes, parent links, receipt and command fields, authority roots, and the exact receipt-to-conflict-bundle projection before replaying protected human decisions. Every non-payload operation header, including device, sequence, operation identity, and parent hash, is duplicated into the AES-GCM-authenticated plaintext binding; an outer path or unkeyed hash alone never supplies ancestry authority.
+
+Historical Bet and Daily Commitment bundles that create primary records must form one connected, acyclic, non-branching `supersedesId` graph with unique created IDs and exactly one leaf. The conflict wrapper names that leaf. Following predecessors from it must visit every created primary record and terminate at one external predecessor ID or at no predecessor; primary scalar cells may name only an ID on that created chain or its external predecessor. Without a primary create, every primary scalar cell names the wrapper record, and a bundle may contain no primary cell only when every Bet operation is `record_bet_boundary` or every Daily Commitment operation is `propose_replan`. Review and Exception bundles have exactly one primary identity matching the wrapper and may be scalar-only; Close bundles have exactly one primary identity matching the wrapper and exactly one CloseDecision create across the complete bundle.
+
+Two created Bet or Daily Commitment branches conflict only when their external predecessor roots are equal. A created branch may pair with an existing branch only for Bet or Daily Commitment, and its external predecessor must equal the existing wrapper ID. Two existing branches must use the same wrapper ID and reverse exactly to the same canonical ancestor. Persisted `affectedProjectIds` are the exact sorted unique union derived from both effect bundles and both immutable local/remote primary snapshots, filtered to Project IDs present in the current Workspace; conflict planning and persisted conflict validation use this same derivation.
 
 A device that possesses the Workspace shared AES key is a trusted Workspace device. The symmetric key proves that an operation came from a key holder; it cannot distinguish an honest device from a compromised or malicious key holder that fabricates a self-consistent history. Byzantine protection between key-holding devices would require per-device signing identities, trusted-device admission, and key revocation or rotation, which are outside this solo-operator V2 scope.
 

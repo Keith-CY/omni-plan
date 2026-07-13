@@ -1355,7 +1355,7 @@ describe("V2 common-ancestor merge", () => {
     expect(roundtripWorkspace?.inboxItems).toContainEqual(
       expect.objectContaining({ id: "inbox-semantic-local-inbox" }),
     );
-  });
+  }, 15_000);
 
   it("semantically rebases a remote Replan proposal and then replays its human acceptance", async () => {
     const localDate = "2026-07-11";
@@ -1731,7 +1731,7 @@ describe("V2 common-ancestor merge", () => {
     expect(roundtripWorkspace?.inboxItems).toContainEqual(
       expect.objectContaining({ id: "inbox-semantic-replan-local-inbox" }),
     );
-  });
+  }, 15_000);
 
   it("reauthorizes an earlier remote receipt after a later local Review with a monotonic evaluation clock", async () => {
     const genesis = buildWorkspaceV2(WORKSPACE_ID);

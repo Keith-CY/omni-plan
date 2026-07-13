@@ -22,6 +22,7 @@ import {
 import legacyArchivedStatusFixture from "../tests/fixtures/v1/legacy-archived-status.json";
 import malformedOptionalFieldsFixture from "../tests/fixtures/v1/malformed-optional-fields.json";
 import shapeUpBetFixture from "../tests/fixtures/v1/shape-up-bet.json";
+import { buildWorkspaceBackupV2 } from "../repositories/workspaceTransfer";
 import {
   MigrationSourceError,
   migrateV1Workspace,
@@ -530,6 +531,32 @@ describe("migrateV1Workspace", () => {
       ),
     ).toEqual([]);
   });
+
+  it.each(v1FixtureNames)(
+    "%s produces a strict export-safe schema-2 Workspace",
+    async (name) => {
+      const source = fixtures[name].snapshot;
+      const candidate = migrateV1Workspace(source, options);
+
+      expect(
+        validateMigratedWorkspace(
+          source,
+          candidate.workspace,
+          candidate.migration,
+          validationExpectations,
+        ),
+      ).toEqual([]);
+      await expect(
+        buildWorkspaceBackupV2({
+          snapshot: {
+            workspace: candidate.workspace,
+            rejectedReceipts: [],
+          },
+          exportedAt: NOW,
+        }),
+      ).resolves.toMatchObject({ schemaVersion: 2 });
+    },
+  );
 });
 
 describe("migration source reference validation", () => {

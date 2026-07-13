@@ -807,6 +807,23 @@ describe("BrowserWorkspaceRepository", () => {
     expect(await repo.loadVerifiedBackup(backup.id)).toEqual(backup);
   });
 
+  it("reserves the mutable migration recovery key from immutable backup APIs", async () => {
+    const repo = repository("backup-reserved-recovery-key");
+    const rawPayload = '{"schemaVersion":1,"snapshot":{}}';
+    const checksum = await checksumText(rawPayload);
+
+    await expect(
+      repo.writeAndVerifyBackup({
+        id: "migration-recovery:current",
+        rawPayload,
+        checksum,
+      }),
+    ).rejects.toThrow(/reserved|recovery/i);
+    await expect(
+      repo.loadVerifiedBackup("migration-recovery:current"),
+    ).rejects.toThrow(/reserved|recovery/i);
+  });
+
   it("persists one clone-isolated migration recovery marker and clears it explicitly", async () => {
     const repo = repository("migration-recovery-marker");
     const rawPayload = '{"schemaVersion":1,"snapshot":{}}';

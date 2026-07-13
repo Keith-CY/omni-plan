@@ -18,7 +18,7 @@ import {
   combineProtectedEffectBundles,
   isKnownUnprotectedLifecycleWriter,
   projectProtectedEffectBundle,
-  protectedEffectBundleAffectedProjectIds,
+  protectedEffectBundlePairAffectedProjectIds,
   protectedEffectBundleTouchedEntityIds,
   type ProtectedEffectBundle,
 } from "./syncConflictBundles";
@@ -1407,10 +1407,13 @@ export class SyncMergeV2 {
           ...protectedEffectBundleTouchedEntityIds(localChange.bundle),
           ...protectedEffectBundleTouchedEntityIds(remoteChange.bundle),
         ])].sort(compareText);
-        const affectedProjectIds = [...new Set([
-          ...protectedEffectBundleAffectedProjectIds(localChange.bundle),
-          ...protectedEffectBundleAffectedProjectIds(remoteChange.bundle),
-        ])].sort(compareText);
+        const affectedProjectIds = protectedEffectBundlePairAffectedProjectIds({
+          recordType: localRecord.recordType,
+          localValue: localRecord.value,
+          remoteValue: remoteRecord.value,
+          localBundle: localChange.bundle,
+          remoteBundle: remoteChange.bundle,
+        });
         divergences.push({
           logicalKey,
           recordType: localRecord.recordType,

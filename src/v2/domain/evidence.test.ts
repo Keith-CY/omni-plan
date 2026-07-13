@@ -461,7 +461,7 @@ describe("controlled evidence exceptions", () => {
     });
   });
 
-  it("whitelists persisted Exception fields instead of accepting injected authority", async () => {
+  it("rejects injected Exception authority fields at the exact command boundary", async () => {
     const workspace = projectWorkspace({
       kind: "milestone",
       evidenceRequired: true,
@@ -490,27 +490,14 @@ describe("controlled evidence exceptions", () => {
       context(workspace.revision, { commandId: "approve-injected" }),
     );
 
-    expect(result.ok).toBe(true);
-    if (!result.ok) throw new Error("Expected sanitized Exception approval");
-    expect(result.workspace.exceptions[0]).toEqual({
-      id: "exception-injected",
-      projectId: "project-1",
-      requirementId: "work-item-1",
-      rationale: "Bounded temporary allowance",
-      knownConsequence: "Validation may need revision",
-      reviewAt: "2026-07-11T17:00:00.000Z",
-      expiresAt: EXPIRES_AT,
-      approvedBy: "human-1",
-      createdAt: CREATED_AT,
-      history: [
-        {
-          action: "created",
-          actorId: "human-1",
-          at: CREATED_AT,
-          note: "Bounded temporary allowance",
-        },
-      ],
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("Expected injected authority rejection");
+    expect(result.rejection).toMatchObject({
+      code: "INVALID_COMMAND",
+      gate: "command_payload:approve_evidence_exception",
     });
+    expect(result.workspace).toBe(workspace);
+    expect(workspace.exceptions).toEqual([]);
   });
 
   it("rejects an Exception without rationale and known consequence", async () => {
