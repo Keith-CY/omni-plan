@@ -6,4 +6,6 @@ test-results/
 .env
 .env.*
 !.env.example
+!.env.v1
+!.env.v2
 .superpowers/

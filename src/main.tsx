@@ -1,9 +1,8 @@
-import React from "react";
-import ReactDOM from "react-dom/client";
-import { HashRouter } from "react-router-dom";
-import { AgentApp, isAgentPath } from "./AgentApp";
-import { App } from "./App";
-import "./styles.css";
+import {
+  SOURCE_DEFAULT_APP_GENERATION,
+  loadGeneration,
+  resolveAppGeneration,
+} from "./appEntry";
 
 if ("serviceWorker" in navigator && import.meta.env.PROD) {
   window.addEventListener("load", () => {
@@ -19,14 +18,13 @@ if ("serviceWorker" in navigator && import.meta.env.PROD) {
   });
 }
 
-ReactDOM.createRoot(document.getElementById("root")!).render(
-  <React.StrictMode>
-    {isAgentPath() ? (
-      <AgentApp />
-    ) : (
-      <HashRouter>
-        <App />
-      </HashRouter>
-    )}
-  </React.StrictMode>
+const rootElement = document.getElementById("root");
+if (rootElement === null) throw new Error("OmniPlan root element is missing.");
+
+const generation = resolveAppGeneration(
+  import.meta.env.VITE_OMNIPLAN_GENERATION,
+  SOURCE_DEFAULT_APP_GENERATION,
 );
+void loadGeneration(generation).then(({ renderApp }) => {
+  renderApp(rootElement);
+});
