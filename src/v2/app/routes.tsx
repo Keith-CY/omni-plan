@@ -1,6 +1,7 @@
 import { Navigate, Route, Routes, useParams } from "react-router-dom";
 
 import type { WorkspaceV2 } from "../domain/types";
+import { InboxPage } from "./inbox/InboxPage";
 import { CapacitySetupPage } from "./setup/CapacitySetupPage";
 import { AppShell } from "./shell/AppShell";
 import { useV2Workspace } from "./state/V2WorkspaceProvider";
@@ -77,31 +78,6 @@ function RevisionMetric({ workspace }: { workspace: WorkspaceV2 }) {
       value={workspace.revision}
       detail="All later writes must target this exact revision."
     />
-  );
-}
-
-function InboxRoute() {
-  const state = useV2Workspace();
-  if (state.status !== "ready") return null;
-  const untriaged = state.workspace.inboxItems.filter(
-    ({ triageStatus }) => triageStatus === "untriaged",
-  ).length;
-  return (
-    <ReadOnlyRoutePage
-      eyebrow="Capture · Clarify · Commit later"
-      title="Inbox"
-      summary="Capture first. Nothing becomes a project until you explicitly classify it."
-    >
-      <dl className="v2-metric-grid">
-        <Metric
-          label="Awaiting triage"
-          value={untriaged}
-          detail="Items remain inert until a human confirms Action or Project."
-        />
-        <Metric label="Total captures" value={state.workspace.inboxItems.length} />
-        <RevisionMetric workspace={state.workspace} />
-      </dl>
-    </ReadOnlyRoutePage>
   );
 }
 
@@ -370,7 +346,7 @@ function ReadyRoutes() {
     <Routes>
       <Route element={<AppShell />}>
         <Route index element={<Navigate to="/today" replace />} />
-        <Route path="/inbox" element={<InboxRoute />} />
+        <Route path="/inbox" element={<InboxPage />} />
         <Route path="/inbox/actions" element={<ActionsRoute />} />
         <Route path="/today" element={<TodayRoute />} />
         <Route path="/today/calendar" element={<CalendarRoute />} />

@@ -660,6 +660,382 @@ button {
   border: 1px dashed var(--v2-rule);
 }
 
+.v2-inbox-page {
+  gap: clamp(36px, 6vw, 72px);
+}
+
+.v2-capture-panel {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(220px, 0.75fr) minmax(320px, 1.25fr);
+  gap: clamp(24px, 5vw, 60px);
+  padding: clamp(24px, 5vw, 46px);
+  background: var(--v2-dark);
+  color: #f8f3e7;
+  box-shadow: 10px 10px 0 rgba(20, 37, 34, 0.14);
+}
+
+.v2-capture-panel::before {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 6px;
+  content: "";
+  background: var(--v2-signal);
+}
+
+.v2-capture-panel__intro h2,
+.v2-inbox-queue__header h2 {
+  margin: 0;
+  font-family: "Iowan Old Style", Charter, Georgia, serif;
+  font-size: clamp(29px, 4vw, 42px);
+  font-weight: 500;
+  line-height: 1.05;
+}
+
+.v2-capture-panel__intro > p:last-child {
+  max-width: 42ch;
+  margin: 16px 0 0;
+  color: #c8d0cb;
+  line-height: 1.55;
+}
+
+.v2-capture-form {
+  display: grid;
+  align-content: end;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+}
+
+.v2-capture-form label {
+  display: grid;
+  min-width: 0;
+  gap: 8px;
+  color: #c8d0cb;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.v2-capture-form input,
+.v2-triage-field input,
+.v2-triage-field select {
+  width: 100%;
+  min-width: 0;
+  padding: 9px 12px;
+  color: var(--v2-ink);
+  background: var(--v2-sheet);
+  border: 1px solid var(--v2-rule);
+  border-radius: 0;
+}
+
+.v2-capture-form button,
+.v2-triage-card button,
+.v2-confirmation-dialog button {
+  padding: 9px 17px;
+  color: var(--v2-ink);
+  background: var(--v2-sheet);
+  border: 1px solid currentColor;
+  border-radius: 0;
+}
+
+.v2-capture-form .v2-button--primary,
+.v2-triage-card .v2-button--primary,
+.v2-confirmation-dialog .v2-button--primary {
+  color: white;
+  background: var(--v2-signal-text);
+  border-color: var(--v2-signal-text);
+}
+
+.v2-capture-form button:hover:not(:disabled),
+.v2-triage-card button:hover:not(:disabled),
+.v2-confirmation-dialog button:hover:not(:disabled) {
+  color: white;
+  background: var(--v2-focus);
+  border-color: var(--v2-focus);
+}
+
+.v2-capture-form button:disabled,
+.v2-triage-card button:disabled,
+.v2-confirmation-dialog button:disabled {
+  cursor: wait;
+  opacity: 0.62;
+}
+
+.v2-capture-panel > .v2-command-rejection {
+  grid-column: 1 / -1;
+  color: var(--v2-ink);
+}
+
+.v2-inbox-queue {
+  display: grid;
+  gap: 26px;
+}
+
+.v2-inbox-queue__header {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 24px;
+  padding-bottom: 18px;
+  border-bottom: 1px solid var(--v2-rule);
+}
+
+.v2-inbox-queue__header > p {
+  margin: 0;
+  color: var(--v2-muted);
+}
+
+.v2-inbox-queue__header > p strong {
+  color: var(--v2-ink);
+  font-family: "Iowan Old Style", Charter, Georgia, serif;
+  font-size: 28px;
+  font-weight: 500;
+}
+
+.v2-triage-list {
+  display: grid;
+  gap: 24px;
+}
+
+.v2-triage-card {
+  display: grid;
+  min-width: 0;
+  gap: 24px;
+  padding: clamp(22px, 4vw, 36px);
+  background: var(--v2-sheet);
+  border: 1px solid var(--v2-rule);
+  box-shadow: 7px 7px 0 rgba(20, 37, 34, 0.08);
+}
+
+.v2-triage-card__header {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.v2-triage-card__header h3,
+.v2-classified-record h3 {
+  margin: 0;
+  font-family: "Iowan Old Style", Charter, Georgia, serif;
+  font-size: clamp(25px, 3vw, 34px);
+  font-weight: 500;
+}
+
+.v2-triage-card__header > span {
+  color: var(--v2-muted);
+  font-family: ui-monospace, "SFMono-Regular", monospace;
+  font-size: 11px;
+}
+
+.v2-triage-facts {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+  margin: 0;
+  padding: 20px;
+  background: rgba(243, 239, 229, 0.58);
+  border: 1px solid var(--v2-rule);
+}
+
+.v2-triage-facts legend {
+  padding: 0 10px 0 0;
+  font-weight: 700;
+}
+
+.v2-triage-field,
+.v2-triage-check {
+  display: grid;
+  min-width: 0;
+  gap: 7px;
+  color: var(--v2-muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.v2-triage-check {
+  display: flex;
+  min-height: 44px;
+  align-items: center;
+  gap: 10px;
+  color: var(--v2-ink);
+}
+
+.v2-triage-check input {
+  width: 22px;
+  min-block-size: 22px;
+  height: 22px;
+  margin: 0;
+}
+
+.v2-classification-explanation {
+  display: grid;
+  gap: 14px;
+}
+
+.v2-classification-explanation__summary {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: baseline;
+  gap: 5px 16px;
+  padding: 17px 20px;
+  background: var(--v2-signal-soft);
+  border-left: 5px solid var(--v2-signal);
+}
+
+.v2-classification-explanation__summary > span {
+  color: var(--v2-muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.v2-classification-explanation__summary > strong {
+  font-family: "Iowan Old Style", Charter, Georgia, serif;
+  font-size: 24px;
+  font-weight: 500;
+}
+
+.v2-classification-explanation__summary > p {
+  grid-column: 2;
+  margin: 0;
+  color: var(--v2-muted);
+  line-height: 1.45;
+}
+
+.v2-rule-list {
+  display: grid;
+  gap: 1px;
+  margin: 0;
+  padding: 1px;
+  list-style: none;
+  background: var(--v2-rule);
+}
+
+.v2-rule-item {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(150px, 0.8fr) minmax(140px, 0.8fr) minmax(220px, 1.5fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 13px 15px;
+  background: var(--v2-sheet);
+  border-left: 4px solid var(--v2-focus);
+}
+
+.v2-rule-item[data-status="project"] {
+  border-left-color: var(--v2-signal);
+}
+
+.v2-rule-item code {
+  overflow-wrap: anywhere;
+  color: var(--v2-muted);
+  font-size: 11px;
+}
+
+.v2-rule-item > span {
+  color: var(--v2-muted);
+  line-height: 1.4;
+}
+
+.v2-rule-item > small {
+  color: var(--v2-focus);
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.v2-rule-item[data-status="project"] > small {
+  color: var(--v2-signal-text);
+}
+
+.v2-triage-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding-top: 20px;
+  border-top: 1px solid var(--v2-rule);
+}
+
+.v2-triage-actions > p {
+  max-width: 58ch;
+  margin: 0;
+  color: var(--v2-muted);
+  line-height: 1.5;
+}
+
+.v2-triage-actions > div {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 10px;
+}
+
+.v2-classified-record {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.8fr) minmax(260px, 1fr);
+  align-items: center;
+  gap: 28px;
+  padding: 23px 27px;
+  background: rgba(251, 248, 240, 0.72);
+  border: 1px solid var(--v2-rule);
+  border-left: 5px solid var(--v2-focus);
+}
+
+.v2-classified-record > p {
+  margin: 0;
+  color: var(--v2-muted);
+  line-height: 1.5;
+}
+
+.v2-dialog-backdrop {
+  position: fixed;
+  z-index: 80;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(7, 17, 15, 0.7);
+}
+
+.v2-confirmation-dialog {
+  width: min(100%, 600px);
+  padding: clamp(26px, 6vw, 48px);
+  background: var(--v2-sheet);
+  border: 1px solid var(--v2-rule);
+  box-shadow: 12px 12px 0 rgba(7, 17, 15, 0.28);
+}
+
+.v2-confirmation-dialog h2 {
+  margin: 0;
+  font-family: "Iowan Old Style", Charter, Georgia, serif;
+  font-size: clamp(31px, 5vw, 45px);
+  font-weight: 500;
+  line-height: 1.05;
+}
+
+.v2-confirmation-dialog > p:not(.v2-eyebrow) {
+  color: var(--v2-muted);
+  line-height: 1.55;
+}
+
+.v2-confirmation-dialog__item {
+  padding: 14px 16px;
+  color: var(--v2-ink) !important;
+  background: var(--v2-signal-soft);
+  border-left: 4px solid var(--v2-signal);
+  font-family: "Iowan Old Style", Charter, Georgia, serif;
+  font-size: 21px;
+}
+
+.v2-confirmation-dialog__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 28px;
+}
+
 @media (max-width: 760px) {
   .v2-app-shell {
     display: block;
@@ -779,6 +1155,50 @@ button {
   }
 
   .v2-form-actions button {
+    width: 100%;
+  }
+
+  .v2-capture-panel,
+  .v2-classified-record {
+    grid-template-columns: 1fr;
+  }
+
+  .v2-capture-form {
+    grid-template-columns: 1fr;
+  }
+
+  .v2-capture-form button {
+    width: 100%;
+  }
+
+  .v2-inbox-queue__header,
+  .v2-triage-card__header,
+  .v2-triage-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .v2-triage-facts {
+    grid-template-columns: 1fr;
+  }
+
+  .v2-classification-explanation__summary,
+  .v2-rule-item {
+    grid-template-columns: 1fr;
+  }
+
+  .v2-classification-explanation__summary > p {
+    grid-column: 1;
+  }
+
+  .v2-triage-actions > div,
+  .v2-confirmation-dialog__actions {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  .v2-triage-actions button,
+  .v2-confirmation-dialog button {
     width: 100%;
   }
 
