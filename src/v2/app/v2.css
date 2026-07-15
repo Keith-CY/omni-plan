@@ -983,10 +983,33 @@ button {
   border-left: 5px solid var(--v2-focus);
 }
 
-.v2-classified-record > p {
+.v2-classified-record__next > p {
   margin: 0;
   color: var(--v2-muted);
   line-height: 1.5;
+}
+
+.v2-classified-record__next {
+  display: grid;
+  justify-items: start;
+  gap: 12px;
+}
+
+.v2-classified-record__next a {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  padding: 0 14px;
+  color: white;
+  background: var(--v2-dark);
+  border: 1px solid var(--v2-dark);
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.v2-classified-record__next a:hover {
+  background: var(--v2-signal-text);
+  border-color: var(--v2-signal-text);
 }
 
 .v2-dialog-backdrop {
@@ -996,6 +1019,7 @@ button {
   display: grid;
   place-items: center;
   padding: 20px;
+  overflow-y: auto;
   background: rgba(7, 17, 15, 0.7);
 }
 
@@ -1034,6 +1058,249 @@ button {
   justify-content: flex-end;
   gap: 10px;
   margin-top: 28px;
+}
+
+.v2-actions-page {
+  gap: clamp(36px, 7vw, 76px);
+}
+
+.v2-actions-section {
+  display: grid;
+  gap: 18px;
+}
+
+.v2-actions-section__header,
+.v2-action-card__header,
+.v2-action-card__controls,
+.v2-dialog-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.v2-actions-section__header {
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--v2-rule);
+}
+
+.v2-actions-section__header h2,
+.v2-actions-section__header p {
+  margin: 0;
+}
+
+.v2-actions-section__header h2 {
+  font-family: "Iowan Old Style", Charter, Georgia, serif;
+  font-size: 29px;
+  font-weight: 500;
+}
+
+.v2-actions-section__header p {
+  color: var(--v2-muted);
+  line-height: 1.45;
+}
+
+.v2-action-list {
+  display: grid;
+  gap: 14px;
+}
+
+.v2-action-card {
+  display: grid;
+  gap: 20px;
+  padding: 22px 24px;
+  background: var(--v2-sheet);
+  border: 1px solid var(--v2-rule);
+  border-left: 5px solid var(--v2-focus);
+}
+
+.v2-action-card[data-status="completed"] {
+  border-left-color: var(--v2-muted);
+}
+
+.v2-action-card[data-status="promoted"] {
+  border-left-color: var(--v2-signal);
+}
+
+.v2-action-card__header {
+  align-items: flex-start;
+}
+
+.v2-action-card__header h3 {
+  margin: 0;
+  font-family: "Iowan Old Style", Charter, Georgia, serif;
+  font-size: clamp(24px, 3vw, 31px);
+  font-weight: 500;
+}
+
+.v2-action-card__status {
+  flex: 0 0 auto;
+  padding: 6px 9px;
+  color: var(--v2-muted);
+  background: var(--v2-paper);
+  border: 1px solid var(--v2-rule);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.v2-action-facts {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1px;
+  margin: 0;
+  padding: 1px;
+  background: var(--v2-rule);
+}
+
+.v2-action-facts > div {
+  min-width: 0;
+  padding: 12px 14px;
+  background: var(--v2-paper);
+}
+
+.v2-action-facts dt {
+  color: var(--v2-muted);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.v2-action-facts dd {
+  margin: 6px 0 0;
+  overflow-wrap: anywhere;
+  font-weight: 700;
+}
+
+.v2-action-outcome {
+  margin: 0;
+  padding: 12px 14px;
+  color: var(--v2-muted);
+  background: rgba(243, 239, 229, 0.58);
+  border-left: 4px solid var(--v2-rule);
+  line-height: 1.5;
+}
+
+.v2-action-card__controls {
+  justify-content: flex-end;
+  padding-top: 2px;
+}
+
+.v2-action-card__controls button,
+.v2-dialog-actions button {
+  padding: 9px 16px;
+  color: var(--v2-ink);
+  background: var(--v2-sheet);
+  border: 1px solid var(--v2-ink);
+}
+
+.v2-action-card__controls .v2-button--primary,
+.v2-dialog-actions .v2-button--primary {
+  color: white;
+  background: var(--v2-dark);
+  border-color: var(--v2-dark);
+}
+
+.v2-action-card__controls button:hover:not(:disabled),
+.v2-dialog-actions button:hover:not(:disabled) {
+  color: white;
+  background: var(--v2-signal-text);
+  border-color: var(--v2-signal-text);
+}
+
+.v2-action-card__controls button:disabled,
+.v2-dialog-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.56;
+}
+
+.v2-action-sheet,
+.v2-promotion-dialog {
+  width: min(100%, 760px);
+  max-height: calc(100dvh - 40px);
+  padding: clamp(24px, 5vw, 42px);
+  overflow-y: auto;
+  background: var(--v2-sheet);
+  border: 1px solid var(--v2-rule);
+  box-shadow: 12px 12px 0 rgba(7, 17, 15, 0.28);
+}
+
+.v2-action-sheet--compact,
+.v2-promotion-dialog {
+  width: min(100%, 600px);
+}
+
+.v2-action-sheet > h2 {
+  margin: 0;
+  font-family: "Iowan Old Style", Charter, Georgia, serif;
+  font-size: clamp(31px, 5vw, 45px);
+  font-weight: 500;
+  line-height: 1.05;
+}
+
+.v2-action-sheet > p:not(.v2-eyebrow) {
+  color: var(--v2-muted);
+  line-height: 1.55;
+}
+
+.v2-action-form,
+.v2-modal-fields {
+  display: grid;
+  gap: 16px;
+}
+
+.v2-modal-fields {
+  min-inline-size: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.v2-action-form textarea,
+.v2-action-form select {
+  width: 100%;
+  min-width: 0;
+  padding: 9px 11px;
+  color: var(--v2-ink);
+  background: var(--v2-sheet);
+  border: 1px solid var(--v2-rule);
+  border-radius: 0;
+}
+
+.v2-action-form textarea {
+  resize: vertical;
+}
+
+.v2-action-boundary-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  margin: 4px 0 0;
+  padding: 20px;
+  background: rgba(243, 239, 229, 0.52);
+  border: 1px solid var(--v2-rule);
+}
+
+.v2-action-boundary-fields > legend {
+  padding: 0 8px;
+  color: var(--v2-ink);
+  font-family: "Iowan Old Style", Charter, Georgia, serif;
+  font-size: 21px;
+}
+
+.v2-form-hint {
+  margin: 0;
+  color: var(--v2-muted);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.v2-dialog-actions {
+  justify-content: flex-end;
+  padding-top: 18px;
+  border-top: 1px solid var(--v2-rule);
 }
 
 @media (max-width: 760px) {
@@ -1200,6 +1467,31 @@ button {
   .v2-triage-actions button,
   .v2-confirmation-dialog button {
     width: 100%;
+  }
+
+  .v2-actions-section__header,
+  .v2-action-card__header,
+  .v2-action-card__controls,
+  .v2-dialog-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .v2-action-facts,
+  .v2-action-boundary-fields {
+    grid-template-columns: 1fr;
+  }
+
+  .v2-action-card__controls button,
+  .v2-dialog-actions button {
+    width: 100%;
+  }
+
+  .v2-action-sheet,
+  .v2-promotion-dialog {
+    max-height: calc(100dvh - 20px);
+    padding: 24px 20px;
+    box-shadow: 6px 6px 0 rgba(7, 17, 15, 0.22);
   }
 
   .v2-mobile-nav {

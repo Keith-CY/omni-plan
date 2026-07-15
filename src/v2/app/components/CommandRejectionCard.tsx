@@ -5,11 +5,13 @@ import type { CommandResult } from "../../domain/commands";
 export interface CommandRejectionCardProps {
   result?: CommandResult;
   onResolve(command: string): void;
+  resolveLabel?: string;
 }
 
 export function CommandRejectionCard({
   result,
   onResolve,
+  resolveLabel,
 }: CommandRejectionCardProps) {
   const headingRef = useRef<HTMLHeadingElement>(null);
 
@@ -40,11 +42,16 @@ export function CommandRejectionCard({
           <strong>Gate:</strong> <code>{rejection.gate}</code>
         </p>
       )}
+      <p>
+        <strong>Permitted next command:</strong>{" "}
+        <code>{rejection.permittedNextCommand}</code>
+      </p>
       <button
         type="button"
         onClick={() => onResolve(rejection.permittedNextCommand)}
       >
-        Resolve: {rejection.permittedNextCommand.replace(/_/g, " ")}
+        {resolveLabel ??
+          `Resolve: ${rejection.permittedNextCommand.replace(/_/g, " ")}`}
       </button>
     </section>
   );

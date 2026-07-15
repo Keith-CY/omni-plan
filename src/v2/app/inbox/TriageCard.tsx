@@ -1,4 +1,5 @@
 import { useCallback, useRef, useState } from "react";
+import { Link } from "react-router-dom";
 
 import { evaluateActionEligibility } from "../../domain/actionPolicy";
 import type {
@@ -164,6 +165,12 @@ export function TriageCard({
 
   if (item.triageStatus !== "untriaged") {
     const kind = item.triageStatus === "action" ? "Action" : "Project";
+    const destination =
+      kind === "Action"
+        ? "/inbox/actions"
+        : item.projectId === undefined
+          ? "/projects"
+          : `/projects/${item.projectId}/direction`;
     return (
       <article
         className="v2-classified-record"
@@ -175,10 +182,13 @@ export function TriageCard({
           <p className="v2-eyebrow">Classified as {kind}</p>
           <h3>{item.originalText}</h3>
         </div>
-        <p>
-          The capture remains here as history. Continue work in the {kind}
-          record.
-        </p>
+        <div className="v2-classified-record__next">
+          <p>
+            The capture remains here as history. Continue work in the {kind}
+            record.
+          </p>
+          <Link to={destination}>Open {kind}</Link>
+        </div>
       </article>
     );
   }

@@ -53,6 +53,28 @@ describe("V2 route bootstrap contract", () => {
     );
   });
 
+  it("serves the interactive Actions utility at /inbox/actions", async () => {
+    const workspace = buildWorkspaceV2("personal", {
+      capacityProfile: buildCapacityProfile({
+        updatedAt: NOW,
+        updatedBy: "human-1",
+      }),
+    });
+    renderV2(<V2Routes />, {
+      initialPath: "/inbox/actions",
+      runtime: runtime({ status: "ready", workspace }),
+    });
+
+    expect(
+      await screen.findByRole("heading", { name: "Actions", level: 1 }),
+    ).toBeVisible();
+    expect(
+      screen.getByText("Inbox utility · not a fifth destination"),
+    ).toBeVisible();
+    expect(screen.getByText("No open Actions")).toBeVisible();
+    expect(screen.queryByText(/Read-only shell view/)).toBeNull();
+  });
+
   it("routes an unconfigured Workspace only to setup", async () => {
     const workspace = buildWorkspaceV2("personal");
     renderV2(<V2Routes />, {

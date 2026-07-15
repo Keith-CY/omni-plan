@@ -1,6 +1,7 @@
 import { Navigate, Route, Routes, useParams } from "react-router-dom";
 
 import type { WorkspaceV2 } from "../domain/types";
+import { ActionsPage } from "./actions/ActionsPage";
 import { InboxPage } from "./inbox/InboxPage";
 import { CapacitySetupPage } from "./setup/CapacitySetupPage";
 import { AppShell } from "./shell/AppShell";
@@ -78,31 +79,6 @@ function RevisionMetric({ workspace }: { workspace: WorkspaceV2 }) {
       value={workspace.revision}
       detail="All later writes must target this exact revision."
     />
-  );
-}
-
-function ActionsRoute() {
-  const state = useV2Workspace();
-  if (state.status !== "ready") return null;
-  const open = state.workspace.actions.filter(({ status }) => status === "open").length;
-  const completed = state.workspace.actions.filter(
-    ({ status }) => status === "completed",
-  ).length;
-  return (
-    <ReadOnlyRoutePage
-      eyebrow="Inbox utility"
-      title="Actions"
-      summary="Small, certain, single-session work stays lightweight and visible here."
-    >
-      <dl className="v2-metric-grid">
-        <Metric label="Open actions" value={open} />
-        <Metric label="Completed actions" value={completed} />
-        <Metric
-          label="Promoted to projects"
-          value={state.workspace.actions.filter(({ status }) => status === "promoted").length}
-        />
-      </dl>
-    </ReadOnlyRoutePage>
   );
 }
 
@@ -347,7 +323,7 @@ function ReadyRoutes() {
       <Route element={<AppShell />}>
         <Route index element={<Navigate to="/today" replace />} />
         <Route path="/inbox" element={<InboxPage />} />
-        <Route path="/inbox/actions" element={<ActionsRoute />} />
+        <Route path="/inbox/actions" element={<ActionsPage />} />
         <Route path="/today" element={<TodayRoute />} />
         <Route path="/today/calendar" element={<CalendarRoute />} />
         <Route path="/projects" element={<ProjectsRoute />} />

@@ -404,6 +404,9 @@ describe("InboxPage", () => {
       name: "Action: Prepare launch notes",
     });
     await waitFor(() => expect(actionRecord).toHaveFocus());
+    expect(
+      within(actionRecord).getByRole("link", { name: "Open Action" }),
+    ).toHaveAttribute("href", "/inbox/actions");
     const stored = await repository.load();
     expect(stored?.actions).toHaveLength(1);
     expect(stored?.actions[0]).toMatchObject({
@@ -450,5 +453,11 @@ describe("InboxPage", () => {
       triageStatus: "project",
       projectId: stored?.projects[0]?.id,
     });
+    expect(
+      within(projectRecord).getByRole("link", { name: "Open Project" }),
+    ).toHaveAttribute(
+      "href",
+      `/projects/${stored?.projects[0]?.id}/direction`,
+    );
   });
 });
