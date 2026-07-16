@@ -298,6 +298,8 @@ describe("V2WorkspaceProvider", () => {
     });
 
     expect(dispatch).toHaveBeenCalledTimes(2);
+    expect(dispatch.mock.calls[0]?.[0]).toBe(first);
+    expect(dispatch.mock.calls[1]?.[0]).toBe(second);
     const contexts = dispatch.mock.calls.map(([, context]) => context);
     const firstContext = contexts[0];
     const secondContext = contexts[1];
@@ -315,6 +317,103 @@ describe("V2WorkspaceProvider", () => {
       throw new Error("Expected two command contexts");
     }
     expect(firstContext.commandId).not.toBe(secondContext.commandId);
+  });
+
+  it("binds a Bet start and its command context to one authoritative time", async () => {
+    const workspace = buildWorkspaceV2("personal", {
+      revision: 7,
+      capacityProfile: buildCapacityProfile({ updatedAt: NOW, updatedBy: "human-1" }),
+    });
+    const pending = deferred<CommandResult>();
+    const dispatch = vi.fn(
+      (_command: V2Command, _context: CommandContext) => pending.promise,
+    );
+    const now = vi.fn(() => NOW);
+    const runtime = runtimeFor(
+      { status: "ready", workspace },
+      { commands: { dispatch }, now },
+    );
+    let latest: V2WorkspaceContextValue | undefined;
+    render(
+      <V2WorkspaceProvider runtime={runtime}>
+        <StateProbe onValue={(value) => { latest = value; }} />
+      </V2WorkspaceProvider>,
+    );
+    await waitFor(() => expect(latest?.status).toBe("ready"));
+    await waitFor(() =>
+      expect(runtime.systemEvents.nextScheduledWakeAt).toHaveBeenCalled(),
+    );
+    if (!latest || !isOperationalV2WorkspaceState(latest)) {
+      throw new Error("Expected ready state");
+    }
+
+    const authoritativeNow = "2026-07-14T04:00:00.000Z" as ISODate;
+    const laterNow = "2026-07-14T05:00:00.000Z" as ISODate;
+    now.mockClear();
+    now.mockReturnValueOnce(authoritativeNow).mockReturnValue(laterNow);
+    const input: V2Command = {
+      type: "place_bet",
+      projectId: "project-1",
+      betId: "bet-1",
+      start: "2026-07-01T00:00:00.000Z" as ISODate,
+    };
+
+    const operation = latest.dispatch(input);
+
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    const call = dispatch.mock.calls[0];
+    if (call === undefined) throw new Error("Expected Bet command dispatch");
+    const [command, context] = call;
+    expect(now).toHaveBeenCalledTimes(1);
+    expect(command).toEqual({ ...input, start: authoritativeNow });
+    expect(command).not.toBe(input);
+    expect(input.start).toBe("2026-07-01T00:00:00.000Z");
+    expect(command.type).toBe("place_bet");
+    if (command.type !== "place_bet") throw new Error("Expected Bet command");
+    expect(command.start).toBe(context.now);
+
+    await act(async () => {
+      pending.resolve(rejected(workspace));
+      await operation;
+    });
+  });
+
+  it("exposes the injected read clock and preserves it across Workspace replacement", async () => {
+    const initial = buildWorkspaceV2("personal", {
+      capacityProfile: buildCapacityProfile({ updatedAt: NOW, updatedBy: "human-1" }),
+    });
+    const accepted = buildWorkspaceV2("personal", {
+      revision: 1,
+      capacityProfile: buildCapacityProfile({ updatedAt: NOW, updatedBy: "human-1" }),
+    });
+    const now = vi.fn(() => NOW);
+    const dispatch = vi.fn(async () => applied(accepted));
+    let latest: V2WorkspaceContextValue | undefined;
+    render(
+      <V2WorkspaceProvider runtime={runtimeFor(
+        { status: "ready", workspace: initial },
+        { now, commands: { dispatch } },
+      )}>
+        <StateProbe onValue={(value) => { latest = value; }} />
+      </V2WorkspaceProvider>,
+    );
+    await waitFor(() => expect(latest?.status).toBe("ready"));
+    if (!latest || !isOperationalV2WorkspaceState(latest)) {
+      throw new Error("Expected ready state");
+    }
+    const operational = latest;
+    expect(operational.readCurrentTime()).toBe(NOW);
+
+    const later = "2026-07-14T04:00:00.000Z" as ISODate;
+    now.mockReturnValue(later);
+    await act(async () => {
+      await operational.dispatch({ type: "capture_inbox", id: "inbox-clock", text: "Clock" });
+    });
+    if (!latest || !isOperationalV2WorkspaceState(latest)) {
+      throw new Error("Expected updated ready state");
+    }
+    expect(latest.workspace.revision).toBe(1);
+    expect(latest.readCurrentTime()).toBe(later);
   });
 
   it("advances the authoritative revision before a sequential dispatch resolves", async () => {

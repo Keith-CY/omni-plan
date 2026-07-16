@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
 
 import type { JsonValue } from "./types";
-import { sha256Text, stableHash } from "./stableHash";
+import {
+  sha256Text,
+  sha256TextSync,
+  stableHash,
+  stableHashSync,
+} from "./stableHash";
 import { createEmptyWorkspaceV2 } from "./workspace";
 import { buildInboxItem, buildWorkspaceV2 } from "../tests/builders";
 
@@ -45,6 +50,16 @@ describe("stableHash", () => {
     expect(await sha256Text("abc")).toBe(
       "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
     );
+    expect(sha256TextSync("abc")).toBe(await sha256Text("abc"));
+  });
+
+  it.each([
+    "",
+    "OmniPlan",
+    "人が決める境界",
+    "a".repeat(1_000),
+  ])("keeps synchronous SHA-256 byte-identical for %s", async (value) => {
+    expect(sha256TextSync(value)).toBe(await sha256Text(value));
   });
 
   it("ignores object insertion order", async () => {
@@ -103,6 +118,9 @@ describe("stableHash", () => {
   it("matches the known SHA-256 vector for canonical JSON", async () => {
     expect(await stableHash({ b: 2, a: 1 })).toBe(
       "43258cff783fe7036d8a43033f830adfc60ec037382473548ac742b888292777",
+    );
+    expect(stableHashSync({ b: 2, a: 1 })).toBe(
+      await stableHash({ b: 2, a: 1 }),
     );
   });
 });

@@ -15,9 +15,11 @@ import {
 } from "./commands";
 import { validateWorkspaceInvariants } from "./invariants";
 import { evaluateBetBoundary } from "./lifecycle";
+import { stableHashSync } from "./stableHash";
 import type {
   BetVersion,
   DirectionBrief,
+  JsonValue,
   LifecycleStage,
   ProjectWorkItem,
   WorkspaceV2,
@@ -55,7 +57,6 @@ const BET = buildBetVersion({
   projectId: "project-1",
   version: 1,
   briefId: BRIEF.id,
-  briefHash: "approved-brief-hash",
   briefSnapshot: structuredClone(BRIEF),
   committedScope: structuredClone(BRIEF.firstScope),
   appetiteStart: APPROVED_AT,
@@ -198,6 +199,7 @@ function twoExpiredProjectsWorkspace(): WorkspaceV2 {
     id: "bet-2",
     projectId: "project-2",
     briefId: secondBrief.id,
+    briefHash: stableHashSync(secondBrief as unknown as JsonValue),
     briefSnapshot: structuredClone(secondBrief),
     committedScope: structuredClone(secondBrief.firstScope),
   };
@@ -297,6 +299,55 @@ function rebetWorkspace(stage: LifecycleStage): WorkspaceV2 {
     directionBriefs: [structuredClone(BRIEF), nextBrief],
     bets: [invalidatedBet],
   });
+}
+
+async function completeExpiryRebetReview(
+  workspace: WorkspaceV2,
+  projectId: string,
+  betId: string,
+  at: string,
+): Promise<WorkspaceV2> {
+  const reviewId = `review:${betId}:expired`;
+  const created = applied(
+    await executeCommand(
+      workspace,
+      {
+        type: "create_review",
+        review: {
+          id: reviewId,
+          kind: "event",
+          triggerKey: `${betId}:expired`,
+          triggerType: "bet_expired",
+          affectedProjectIds: [projectId],
+          affectedRecordIds: [betId],
+          dueAt: at,
+        },
+      },
+      systemContext(at, {
+        commandId: `create-${reviewId}`,
+        expectedRevision: workspace.revision,
+      }),
+    ),
+  );
+  return applied(
+    await executeCommand(
+      created.workspace,
+      {
+        type: "complete_review",
+        reviewId,
+        conclusion: {
+          summary: "The expired Bet requires a fresh bounded commitment.",
+          decisionCodes: ["rebet"],
+          followUpCommandIds: [],
+        },
+      },
+      context({
+        commandId: `complete-${reviewId}`,
+        expectedRevision: created.workspace.revision,
+        now: at,
+      }),
+    ),
+  ).workspace;
 }
 
 describe("material Direction edits", () => {
@@ -1313,9 +1364,15 @@ describe("Bet appetite boundary", () => {
     );
     expect(expired.workspace.bets[0].appetiteEnd).toBe(originalEnd);
 
+    const reviewed = await completeExpiryRebetReview(
+      expired.workspace,
+      "project-1",
+      BET.id,
+      APPETITE_END,
+    );
     const replaced = applied(
       await executeCommand(
-        expired.workspace,
+        reviewed,
         {
           type: "place_bet",
           projectId: "project-1",
@@ -1324,7 +1381,7 @@ describe("Bet appetite boundary", () => {
         },
         context({
           commandId: "rebet-after-expiry",
-          expectedRevision: expired.workspace.revision,
+          expectedRevision: reviewed.revision,
           now: APPETITE_END,
         }),
       ),

@@ -158,6 +158,10 @@ export interface DirectionBrief {
   updatedAt: ISODate;
 }
 
+export type BetReplacementReason =
+  | "material_direction_change"
+  | "appetite_expiry";
+
 export interface BetVersion {
   id: Id;
   projectId: Id;
@@ -171,6 +175,7 @@ export interface BetVersion {
   actorId: Id;
   approvedAt: ISODate;
   supersedesId?: Id;
+  replacementReason?: BetReplacementReason;
   sourceReviewId?: Id;
   invalidatedAt?: ISODate;
   invalidationReason?: string;

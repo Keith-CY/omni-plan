@@ -84,27 +84,31 @@ function projectBundle(
   brief: DirectionBrief;
   bet: BetVersion;
 } {
+  const appetiteStart = overrides.bet?.appetiteStart ?? BET_START;
+  const appetiteEnd = overrides.bet?.appetiteEnd ?? BET_END;
+  const approvedAt = overrides.bet?.approvedAt ?? appetiteStart;
   const brief = buildDirectionBrief({
     id: `brief-${id}`,
     projectId: id,
     firstScope: [
       { id: `scope-${id}`, title: "Scope", description: "Bounded scope" },
     ],
-    appetiteSeconds: 691_200,
-    createdAt: BET_START,
-    updatedAt: BET_START,
+    appetiteSeconds:
+      (Date.parse(appetiteEnd) - Date.parse(appetiteStart)) / 1_000,
+    createdAt: appetiteStart,
+    updatedAt: appetiteStart,
   });
   const bet = buildBetVersion({
     id: `bet-${id}`,
     projectId: id,
     briefId: brief.id,
+    actorId: "human-1",
+    ...overrides.bet,
     briefSnapshot: structuredClone(brief),
     committedScope: structuredClone(brief.firstScope),
-    appetiteStart: BET_START,
-    appetiteEnd: BET_END,
-    actorId: "human-1",
-    approvedAt: BET_START,
-    ...overrides.bet,
+    appetiteStart,
+    appetiteEnd,
+    approvedAt,
   });
   const project = buildProjectV2({
     id,

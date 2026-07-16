@@ -1,6 +1,7 @@
 import type { Id, ISODate } from "@/domain/types";
 
 import { scheduleV2Project } from "../projections/schedulerAdapter";
+import { betIntegrityIssue } from "./betIntegrity";
 import type { RejectionCode } from "./errors";
 import { transitionLifecycle } from "./lifecycle";
 import { stableHash } from "./stableHash";
@@ -485,6 +486,16 @@ export function resolvePlanningContext(
       reason: `Project ${project.id} has no single valid current Bet.`,
       gate: `project:${project.id}:current_bet`,
       permittedNextCommand: "place_bet",
+    };
+  }
+  const integrityIssue = betIntegrityIssue(bet, now);
+  if (integrityIssue !== undefined) {
+    return {
+      ok: false,
+      code: "BET_REQUIRED",
+      reason: integrityIssue,
+      gate: `bet:${bet.id}:integrity`,
+      permittedNextCommand: "resolve_sync_conflict",
     };
   }
 

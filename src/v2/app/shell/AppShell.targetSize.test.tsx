@@ -105,13 +105,22 @@ describe("V2 target sizing", () => {
             <div className="v2-hold-list"><details><summary>Hold record</summary></details></div>
             <div className="v2-project-next-action"><details><summary>Gate detail</summary></details></div>
             <div className="v2-lifecycle-step"><details><summary>Unlock command</summary></details></div>
+            <section className="v2-bet-stage">
+              <button className="v2-button--primary" type="button">Review Bet</button>
+            </section>
+            <article className="v2-bet-history-entry">
+              <details><summary>Immutable Bet snapshot</summary></details>
+            </article>
+            <details className="v2-plan-stage-summary__details">
+              <summary>Plan diagnostics</summary>
+            </details>
           </article>
         </>
       </MemoryRouter>,
     );
 
-    const targets = [...container.querySelectorAll<HTMLElement>("a, summary")];
-    expect(targets).toHaveLength(6);
+    const targets = [...container.querySelectorAll<HTMLElement>("a, button, summary")];
+    expect(targets).toHaveLength(9);
     for (const target of targets) {
       expect(minimumTargetSize(target), target.outerHTML).toBeGreaterThanOrEqual(44);
     }

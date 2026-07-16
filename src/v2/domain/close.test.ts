@@ -16,9 +16,11 @@ import {
   returnedInboxItemId,
   unfinishedProjectWorkItems,
 } from "./close";
+import { stableHashSync } from "./stableHash";
 import type {
   Action,
   InboxItem,
+  JsonValue,
   ProjectDependency,
   ProjectWorkItem,
   WorkspaceV2,
@@ -226,8 +228,21 @@ function appetiteBoundaryWorkspace(
       },
     ],
   };
-  workspace.bets[0] = { ...workspace.bets[0], appetiteEnd: NOW };
+  setCurrentBetAppetiteEnd(workspace, NOW);
   return { ...workspace, ...overrides };
+}
+
+function setCurrentBetAppetiteEnd(
+  workspace: WorkspaceV2,
+  appetiteEnd: string,
+): void {
+  const bet = workspace.bets[0];
+  bet.appetiteEnd = appetiteEnd;
+  bet.briefSnapshot.appetiteSeconds =
+    (Date.parse(appetiteEnd) - Date.parse(bet.appetiteStart)) / 1_000;
+  bet.briefHash = stableHashSync(
+    bet.briefSnapshot as unknown as JsonValue,
+  );
 }
 
 describe("structured Close", () => {
@@ -1231,7 +1246,7 @@ describe("appetite-boundary Close and Abandon", () => {
     {
       name: "a future appetite boundary",
       mutate: (workspace: WorkspaceV2) => {
-        workspace.bets[0] = { ...workspace.bets[0], appetiteEnd: APPETITE_END };
+        setCurrentBetAppetiteEnd(workspace, APPETITE_END);
       },
     },
     {

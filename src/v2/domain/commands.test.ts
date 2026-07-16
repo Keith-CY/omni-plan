@@ -30,6 +30,7 @@ import type {
   JsonValue,
   LifecycleStage,
   ProjectHold,
+  ProjectHoldState,
   ProjectWorkItem,
   WorkspaceV2,
 } from "./types";
@@ -4034,6 +4035,95 @@ describe("executeCommand Direction and Bet", () => {
     return draft;
   }
 
+  function buildReplacementDirectionWorkspace(
+    holds: ProjectHoldState[],
+  ): WorkspaceV2 {
+    const replacementBrief = {
+      ...structuredClone(COMPLETE_DIRECTION),
+      createdAt: "2026-07-10T09:00:00.000Z",
+      updatedAt: "2026-07-10T09:00:00.000Z",
+    };
+    const predecessorBrief = {
+      ...structuredClone(COMPLETE_DIRECTION),
+      id: "brief-before-material-change",
+      version: COMPLETE_DIRECTION.version - 1,
+      audienceAndProblem: "Operators previously needed a different flow.",
+      createdAt: "2026-07-10T07:00:00.000Z",
+      updatedAt: "2026-07-10T07:30:00.000Z",
+    };
+    const currentBet = buildBetVersion({
+      id: "bet-current",
+      projectId: "project-1",
+      briefId: predecessorBrief.id,
+      briefSnapshot: predecessorBrief,
+      committedScope: structuredClone(predecessorBrief.firstScope),
+      appetiteStart: "2026-07-10T08:00:00.000Z",
+      appetiteEnd: "2026-07-10T10:00:00.000Z",
+      actorId: "human-old",
+      approvedAt: "2026-07-10T08:00:00.000Z",
+      invalidatedAt: replacementBrief.updatedAt,
+      invalidationReason: "Material Direction change requires Re-bet.",
+    });
+    const workspace = buildDirectionWorkspace("planning", replacementBrief);
+    workspace.directionBriefs.unshift(predecessorBrief);
+    workspace.projects[0] = {
+      ...workspace.projects[0],
+      activeBetId: currentBet.id,
+      holds,
+    };
+    workspace.bets = [currentBet];
+    return workspace;
+  }
+
+  function buildExpiredReplacementDirectionWorkspace(
+    reviewState: "completed" | "missing" | "open" | "wrong_decision" = "completed",
+  ): WorkspaceV2 {
+    const workspace = buildReplacementDirectionWorkspace([
+      {
+        type: "rebet_required",
+        sourceId: "bet-current",
+        affectedRecordIds: ["project-1", "bet-current"],
+        createdAt: NOW,
+      },
+    ]);
+    workspace.bets[0] = {
+      ...workspace.bets[0],
+      appetiteStart: "2026-07-11T07:00:00.000Z",
+      appetiteEnd: NOW,
+      approvedAt: "2026-07-11T07:00:00.000Z",
+    };
+    delete workspace.bets[0].invalidatedAt;
+    delete workspace.bets[0].invalidationReason;
+    if (reviewState === "missing") return workspace;
+    workspace.reviews = [
+      {
+        id: "review:bet-current:expired",
+        kind: "event",
+        triggerKey: "bet-current:expired",
+        triggerType: "bet_expired",
+        status: reviewState === "open" ? "open" : "completed",
+        affectedProjectIds: ["project-1"],
+        affectedRecordIds: ["bet-current"],
+        dueAt: NOW,
+        createdAt: NOW,
+        ...(reviewState === "open"
+          ? {}
+          : {
+              conclusion: {
+                summary: "Choose an explicit boundary after the appetite ended.",
+                decisionCodes: reviewState === "wrong_decision"
+                  ? ["close"]
+                  : ["rebet"],
+                followUpCommandIds: [],
+                actorId: "human-reviewer",
+                completedAt: NOW,
+              },
+            }),
+      },
+    ];
+    return workspace;
+  }
+
   it("saves an incomplete active brief as an editable Direction draft", async () => {
     const workspace = deepFreeze(buildDirectionWorkspace("awaiting_bet"));
     const original = structuredClone(workspace);
@@ -4230,6 +4320,345 @@ describe("executeCommand Direction and Bet", () => {
     );
     expect(workspace.projects[0].stage).toBe("awaiting_bet");
     expect(workspace.bets).toEqual([]);
+  });
+
+  it("uses the first human Bet to clear the guided migration review hold", async () => {
+    const workspace = buildDirectionWorkspace("awaiting_bet");
+    workspace.projects[0] = {
+      ...workspace.projects[0],
+      holds: [
+        {
+          type: "migration_review",
+          sourceId: "migration-backup-1",
+          affectedRecordIds: ["project-1", COMPLETE_DIRECTION.id],
+          createdAt: NOW,
+        },
+      ],
+    };
+    workspace.legacyAuditRecords = [
+      {
+        id: "migration-backup-1",
+        projectId: "project-1",
+        recordType: "audit_gate",
+        sourcePayload: { reason: "guided migration review" },
+        sourceChecksum: "migration-source-checksum",
+      },
+    ];
+    const original = structuredClone(workspace);
+
+    const result = await executeCommand(
+      workspace,
+      {
+        type: "place_bet",
+        projectId: "project-1",
+        betId: "bet-after-migration-review",
+        start: NOW,
+      },
+      buildContext(),
+    );
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("Expected migration review Bet to apply");
+    expect(result.workspace.projects[0]).toMatchObject({
+      stage: "planning",
+      activeBetId: "bet-after-migration-review",
+      holds: [],
+    });
+    expect(result.workspace.legacyAuditRecords).toEqual(
+      original.legacyAuditRecords,
+    );
+    expect(result.workspace.bets[0]).toMatchObject({
+      id: "bet-after-migration-review",
+      actorId: "human-1",
+      approvedAt: NOW,
+    });
+    expect(workspace).toEqual(original);
+  });
+
+  it("rejects a first Bet when migration review holds are not unique", async () => {
+    const workspace = buildDirectionWorkspace("awaiting_bet");
+    workspace.projects[0] = {
+      ...workspace.projects[0],
+      holds: ["migration-backup-1", "migration-backup-2"].map((sourceId) => ({
+        type: "migration_review" as const,
+        sourceId,
+        affectedRecordIds: ["project-1", COMPLETE_DIRECTION.id],
+        createdAt: NOW,
+      })),
+    };
+    workspace.legacyAuditRecords = ["migration-backup-1", "migration-backup-2"].map(
+      (id) => ({
+        id,
+        projectId: "project-1",
+        recordType: "audit_gate" as const,
+        sourcePayload: { reason: "guided migration review" },
+        sourceChecksum: `${id}:checksum`,
+      }),
+    );
+    const original = structuredClone(workspace);
+
+    const result = rejected(await executeCommand(
+      workspace,
+      {
+        type: "place_bet",
+        projectId: "project-1",
+        betId: "bet-ambiguous-migration",
+        start: NOW,
+      },
+      buildContext(),
+    ));
+
+    expect(result.rejection).toMatchObject({
+      code: "HOLD_BLOCKS_COMMAND",
+      gate: "project:project-1:bet_holds",
+      permittedNextCommand: "resolve_sync_conflict",
+    });
+    expect(result.workspace).toBe(workspace);
+    expect(workspace).toEqual(original);
+  });
+
+  it("rejects a migration review hold that omits the Project or active Direction", async () => {
+    const workspace = buildDirectionWorkspace("awaiting_bet");
+    workspace.projects[0] = {
+      ...workspace.projects[0],
+      holds: [{
+        type: "migration_review",
+        sourceId: "migration-backup-1",
+        affectedRecordIds: ["project-1"],
+        createdAt: NOW,
+      }],
+    };
+    workspace.legacyAuditRecords = [{
+      id: "migration-backup-1",
+      projectId: "project-1",
+      recordType: "audit_gate",
+      sourcePayload: { reason: "guided migration review" },
+      sourceChecksum: "migration-source-checksum",
+    }];
+    const original = structuredClone(workspace);
+
+    const result = rejected(await executeCommand(
+      workspace,
+      {
+        type: "place_bet",
+        projectId: "project-1",
+        betId: "bet-incomplete-migration-review",
+        start: NOW,
+      },
+      buildContext(),
+    ));
+
+    expect(result.rejection).toMatchObject({
+      code: "HOLD_BLOCKS_COMMAND",
+      gate: "project:project-1:bet_holds",
+      permittedNextCommand: "resolve_sync_conflict",
+    });
+    expect(result.workspace).toBe(workspace);
+    expect(workspace).toEqual(original);
+  });
+
+  it("rejects a replacement Bet unless one matching Re-bet hold is the only hold", async () => {
+    const workspace = buildReplacementDirectionWorkspace([
+      {
+        type: "rebet_required",
+        sourceId: "bet-current",
+        affectedRecordIds: ["project-1", "bet-current"],
+        createdAt: NOW,
+      },
+      {
+        type: "migration_review",
+        sourceId: "migration-backup-1",
+        affectedRecordIds: ["project-1", COMPLETE_DIRECTION.id],
+        createdAt: NOW,
+      },
+    ]);
+    workspace.legacyAuditRecords = [{
+      id: "migration-backup-1",
+      projectId: "project-1",
+      recordType: "audit_gate",
+      sourcePayload: { reason: "guided migration review" },
+      sourceChecksum: "migration-source-checksum",
+    }];
+    const original = structuredClone(workspace);
+
+    const result = rejected(await executeCommand(
+      workspace,
+      {
+        type: "place_bet",
+        projectId: "project-1",
+        betId: "bet-illegal-replacement",
+        start: NOW,
+      },
+      buildContext(),
+    ));
+
+    expect(result.rejection).toMatchObject({
+      code: "HOLD_BLOCKS_COMMAND",
+      gate: "project:project-1:bet_holds",
+      permittedNextCommand: "resolve_sync_conflict",
+    });
+    expect(result.workspace).toBe(workspace);
+    expect(workspace).toEqual(original);
+  });
+
+  it.each([
+    {
+      name: "no Re-bet hold",
+      holds: [],
+    },
+    {
+      name: "a future-dated Re-bet hold",
+      holds: [
+        {
+          type: "rebet_required" as const,
+          sourceId: "bet-current",
+          affectedRecordIds: ["project-1", "bet-current"],
+          createdAt: LATER,
+        },
+      ],
+    },
+    {
+      name: "ambiguous affected record IDs",
+      holds: [
+        {
+          type: "rebet_required" as const,
+          sourceId: "bet-current",
+          affectedRecordIds: ["project-1", "project-1"],
+          createdAt: NOW,
+        },
+      ],
+    },
+    {
+      name: "a Re-bet hold missing the active Bet from affected records",
+      holds: [
+        {
+          type: "rebet_required" as const,
+          sourceId: "bet-current",
+          affectedRecordIds: ["project-1"],
+          createdAt: NOW,
+        },
+      ],
+    },
+  ])("rejects a replacement Bet with $name", async ({ holds }) => {
+    const workspace = buildReplacementDirectionWorkspace(holds);
+    const original = structuredClone(workspace);
+
+    const result = rejected(await executeCommand(
+      workspace,
+      {
+        type: "place_bet",
+        projectId: "project-1",
+        betId: "bet-illegal-replacement",
+        start: NOW,
+      },
+      buildContext(),
+    ));
+
+    expect(result.rejection).toMatchObject({
+      code: "HOLD_BLOCKS_COMMAND",
+      gate: "project:project-1:bet_holds",
+      permittedNextCommand: "resolve_sync_conflict",
+    });
+    expect(result.workspace).toBe(workspace);
+    expect(workspace).toEqual(original);
+  });
+
+  it("links an expiry Re-bet to its unique completed Review", async () => {
+    const workspace = buildExpiredReplacementDirectionWorkspace();
+    const originalReview = structuredClone(workspace.reviews[0]);
+
+    const result = await executeCommand(
+      workspace,
+      {
+        type: "place_bet",
+        projectId: "project-1",
+        betId: "bet-after-expiry-review",
+        start: NOW,
+      },
+      buildContext(),
+    );
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("Expected expiry Re-bet to apply");
+    expect(result.workspace.bets[1]).toMatchObject({
+      id: "bet-after-expiry-review",
+      supersedesId: "bet-current",
+      replacementReason: "appetite_expiry",
+      sourceReviewId: "review:bet-current:expired",
+    });
+    expect(result.workspace.bets[0]).toMatchObject({
+      id: "bet-current",
+      invalidatedAt: NOW,
+    });
+    expect(result.workspace.reviews).toEqual([originalReview]);
+    expect(result.workspace.projects[0].holds).toEqual([]);
+  });
+
+  it.each([
+    "missing",
+    "open",
+    "wrong_decision",
+  ] as const)(
+    "rejects an expiry Re-bet atomically when its Review is %s",
+    async (reviewState) => {
+      const workspace = buildExpiredReplacementDirectionWorkspace(reviewState);
+      const original = structuredClone(workspace);
+
+      const result = rejected(await executeCommand(
+        workspace,
+        {
+          type: "place_bet",
+          projectId: "project-1",
+          betId: "bet-without-approved-expiry-review",
+          start: NOW,
+        },
+        buildContext(),
+      ));
+
+      expect(result.rejection).toMatchObject({
+        code: "HOLD_BLOCKS_COMMAND",
+        gate: reviewState === "open"
+          ? "project_hold:review_overdue"
+          : "project:project-1:expiry_review",
+        permittedNextCommand: "complete_review",
+      });
+      if (reviewState !== "open") {
+        expect(result.rejection.reason).toMatch(/completed expiry Review/i);
+      }
+      expect(result.workspace).toBe(workspace);
+      expect(workspace).toEqual(original);
+    },
+  );
+
+  it("does not invent Review provenance for a material-change Re-bet", async () => {
+    const workspace = buildReplacementDirectionWorkspace([
+      {
+        type: "rebet_required",
+        sourceId: "bet-current",
+        affectedRecordIds: ["project-1", "bet-current"],
+        createdAt: NOW,
+      },
+    ]);
+
+    const result = await executeCommand(
+      workspace,
+      {
+        type: "place_bet",
+        projectId: "project-1",
+        betId: "bet-after-direction-change",
+        start: NOW,
+      },
+      buildContext(),
+    );
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("Expected material-change Re-bet to apply");
+    expect(result.workspace.bets[1]).toMatchObject({
+      id: "bet-after-direction-change",
+      supersedesId: "bet-current",
+      replacementReason: "material_direction_change",
+    });
+    expect(result.workspace.bets[1].sourceReviewId).toBeUndefined();
   });
 
   it("applies the same Bet policy result for human UI and verified sync replay", async () => {

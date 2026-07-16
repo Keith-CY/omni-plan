@@ -7,11 +7,13 @@ import type {
   DirectionBrief,
   ExceptionRecord,
   InboxItem,
+  JsonValue,
   ProjectWorkItem,
   ProjectV2,
   WorkspaceV2,
 } from "../domain/types";
 import type { CommandContext } from "../domain/commands";
+import { stableHashSync } from "../domain/stableHash";
 import { createEmptyWorkspaceV2 } from "../domain/workspace";
 
 type BuilderInput<T, RequiredKeys extends keyof T> = Pick<T, RequiredKeys> &
@@ -98,7 +100,7 @@ export function buildBetVersion(
 ): BetVersion {
   return {
     version: 1,
-    briefHash: "brief-hash",
+    briefHash: stableHashSync(input.briefSnapshot as unknown as JsonValue),
     committedScope: [],
     ...withoutUndefined(input),
   };

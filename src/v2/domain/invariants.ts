@@ -2,6 +2,11 @@ import type { Id, ISODate } from "@/domain/types";
 
 import type { CommandRejection, RejectionCode } from "./errors";
 import {
+  betReplacementProvenanceIssue,
+  betStaticIntegrityIssue,
+  betTemporalIntegrityIssue,
+} from "./betIntegrity";
+import {
   overlappingWeeklyReviewCoverage,
   storedReviewSemanticsAreValid,
 } from "./review";
@@ -277,14 +282,19 @@ type AddViolation = ReturnType<typeof createCollector>["add"];
 function findValidCurrentBet(
   project: ProjectV2,
   betsById: ReadonlyMap<Id, BetVersion>,
+  staticBetIssues: ReadonlyMap<BetVersion, string | undefined>,
+  evaluatedAt?: ISODate,
 ): BetVersion | undefined {
   if (project.activeBetId === undefined) {
     return undefined;
   }
   const bet = betsById.get(project.activeBetId);
   return bet !== undefined &&
+    staticBetIssues.has(bet) &&
+    staticBetIssues.get(bet) === undefined &&
     bet.projectId === project.id &&
-    bet.invalidatedAt === undefined
+    bet.invalidatedAt === undefined &&
+    betTemporalIntegrityIssue(bet, evaluatedAt) === undefined
     ? bet
     : undefined;
 }
@@ -572,6 +582,7 @@ function validateBetRules(
   evaluationNow: ISODate,
   previousWorkspace: WorkspaceV2 | undefined,
   eventNow: ISODate,
+  staticBetIssues: ReadonlyMap<BetVersion, string | undefined>,
   add: AddViolation,
 ): void {
   const betsById = indexById(workspace.bets);
@@ -613,7 +624,12 @@ function validateBetRules(
       );
     }
 
-    const validActiveBet = findValidCurrentBet(project, betsById);
+    const validActiveBet = findValidCurrentBet(
+      project,
+      betsById,
+      staticBetIssues,
+      evaluationNow,
+    );
     const rebetPaused = isIntentionallyPausedForRebet(
       workspace,
       previousWorkspace,
@@ -692,7 +708,12 @@ function validateBetRules(
     if (
       workItem !== undefined &&
       project !== undefined &&
-      findValidCurrentBet(project, betsById) === undefined
+      findValidCurrentBet(
+        project,
+        betsById,
+        staticBetIssues,
+        evaluationNow,
+      ) === undefined
     ) {
       const previousActual = previousActualsById.get(actual.id);
       if (
@@ -727,7 +748,12 @@ function validateBetRules(
       if (
         workItem !== undefined &&
         project !== undefined &&
-        findValidCurrentBet(project, betsById) === undefined
+        findValidCurrentBet(
+          project,
+          betsById,
+          staticBetIssues,
+          evaluationNow,
+        ) === undefined
       ) {
         const previousCommitment = previousCommitmentsById.get(commitment.id);
         const previousSlot = indexById(previousCommitment?.slots ?? []).get(
@@ -1417,6 +1443,7 @@ interface ReferenceTarget {
 
 function validateReferenceRules(
   workspace: WorkspaceV2,
+  staticBetIssues: ReadonlyMap<BetVersion, string | undefined>,
   add: AddViolation,
 ): void {
   const projectsById = indexById(workspace.projects);
@@ -1762,6 +1789,19 @@ function validateReferenceRules(
         "ReviewRecord",
         bet.sourceReviewId,
         reviewsById.get(bet.sourceReviewId),
+      );
+    }
+    const provenanceIssue = betReplacementProvenanceIssue(
+      workspace,
+      bet,
+      staticBetIssues,
+    );
+    if (provenanceIssue !== undefined) {
+      add(
+        "SYNC_CONFLICT",
+        provenanceIssue,
+        `bet:${bet.id}:replacement_provenance`,
+        "resolve_sync_conflict",
       );
     }
   }
@@ -2333,12 +2373,22 @@ export function validateWorkspaceInvariants(
 ): InvariantViolation[] {
   const collector = createCollector();
   const evaluationNow = options.evaluationNow ?? eventNow;
+  // This map exists only for this fully synchronous, read-only validation
+  // cycle. It prevents repeated canonical SHA-256 work for the same Bet when
+  // Actuals, slots, Plan references, and provenance all consult it.
+  const staticBetIssues = new Map<BetVersion, string | undefined>();
+  for (const bet of workspace.bets) {
+    if (!staticBetIssues.has(bet)) {
+      staticBetIssues.set(bet, betStaticIntegrityIssue(bet));
+    }
+  }
 
   validateBetRules(
     workspace,
     evaluationNow,
     previousWorkspace,
     eventNow,
+    staticBetIssues,
     collector.add,
   );
   validateCapacityRules(workspace, collector.add);
@@ -2349,7 +2399,7 @@ export function validateWorkspaceInvariants(
     eventNow,
     collector.add,
   );
-  validateReferenceRules(workspace, collector.add);
+  validateReferenceRules(workspace, staticBetIssues, collector.add);
   validateReviewRules(
     workspace,
     evaluationNow,

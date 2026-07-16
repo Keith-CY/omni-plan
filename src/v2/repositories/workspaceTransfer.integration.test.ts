@@ -2375,6 +2375,12 @@ describe("V2 Workspace transfer boundaries", () => {
     );
     if (!continued.ok) throw new Error("Expected Re-bet continuation");
     expect(
+      continued.workspace.bets.find(({ id }) => id === "transfer-bet-2"),
+    ).toMatchObject({
+      supersedesId: "transfer-bet",
+      replacementReason: "material_direction_change",
+    });
+    expect(
       continued.workspace.projects[0]?.holds.some(
         ({ type, sourceId }) =>
           type === "rebet_required" && sourceId === "transfer-bet",
@@ -2394,6 +2400,68 @@ describe("V2 Workspace transfer boundaries", () => {
         validationNow: rebetAt,
       }),
     ).resolves.toMatchObject({ status: "restored" });
+
+    const replacementCreation = continuedBackup.workspace.commandReceipts
+      .find(({ commandId }) => commandId === "protected-place-rebet")
+      ?.diff.find(
+        ({ entity, entityId, field }) =>
+          entity === "BetVersion" &&
+          entityId === "transfer-bet-2" &&
+          field === "created",
+      );
+    expect(replacementCreation?.after).toMatchObject({
+      supersedesId: "transfer-bet",
+      replacementReason: "material_direction_change",
+    });
+
+    const forgedReplacementReason = await resignBackup(
+      continuedBackup,
+      (draft) => {
+        const replacement = draft.workspace.bets.find(
+          ({ id }) => id === "transfer-bet-2",
+        );
+        if (replacement === undefined) throw new Error("Expected replacement Bet");
+        replacement.replacementReason = "appetite_expiry";
+      },
+    );
+    const forgedSourceReview = await resignBackup(
+      continuedBackup,
+      (draft) => {
+        const replacement = draft.workspace.bets.find(
+          ({ id }) => id === "transfer-bet-2",
+        );
+        if (replacement === undefined) throw new Error("Expected replacement Bet");
+        replacement.sourceReviewId = "forged-expiry-review";
+      },
+    );
+    const forgedPredecessorTombstone = await resignBackup(
+      continuedBackup,
+      (draft) => {
+        const predecessor = draft.workspace.bets.find(
+          ({ id }) => id === "transfer-bet",
+        );
+        if (predecessor === undefined) throw new Error("Expected predecessor Bet");
+        predecessor.invalidatedAt = "2026-07-12T08:11:00.000Z";
+        predecessor.invalidationReason =
+          "Superseded by Re-bet transfer-bet-2.";
+      },
+    );
+    for (const [name, candidate] of [
+      ["replacement reason", forgedReplacementReason],
+      ["source Review", forgedSourceReview],
+      ["predecessor tombstone", forgedPredecessorTombstone],
+    ] as const) {
+      const target = await initializedRepository(
+        `protected-rebet-lineage-${name}`,
+      );
+      await expect(
+        restoreVerifiedBackup({
+          repository: target,
+          backup: candidate,
+          validationNow: rebetAt,
+        }),
+      ).rejects.toMatchObject({ code: "BACKUP_INVALID" });
+    }
 
     const corruptedLiveWorkspace = structuredClone(placed.workspace);
     corruptedLiveWorkspace.bets[0]!.actorId = "forged-live-actor";

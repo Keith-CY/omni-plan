@@ -60,6 +60,7 @@ describe("Direction completeness", () => {
     ["success evidence", { successEvidence: "" }],
     ["positive appetite", { appetiteSeconds: 0 }],
     ["finite appetite", { appetiteSeconds: Number.POSITIVE_INFINITY }],
+    ["whole-second appetite", { appetiteSeconds: 1.23456 }],
     ["validation method", { validationMethod: "\n" }],
     ["first scope", { firstScope: [] }],
     [
@@ -162,6 +163,7 @@ describe("buildBetVersion", () => {
       actorId: "human-1",
       approvedAt: APPROVED_AT,
       supersedesId: "bet-old",
+      sourceReviewId: "review:bet-old:expired",
     };
     const approvedInput = structuredClone(approval);
 
@@ -185,6 +187,7 @@ describe("buildBetVersion", () => {
       actorId: approvedInput.actorId,
       approvedAt: approvedInput.approvedAt,
       supersedesId: approvedInput.supersedesId,
+      sourceReviewId: approvedInput.sourceReviewId,
       appetiteStart: approvedInput.approvedAt,
     });
   });

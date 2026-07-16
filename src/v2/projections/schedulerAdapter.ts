@@ -14,6 +14,7 @@ import type {
   ProjectWorkItem,
   WorkspaceV2,
 } from "../domain/types";
+import { betIsInternallyConsistent } from "../domain/betIntegrity";
 import { localDateAt } from "../domain/localTime";
 
 function isValidIso(value: string): boolean {
@@ -23,6 +24,7 @@ function isValidIso(value: string): boolean {
 function activeBet(
   workspace: WorkspaceV2,
   project: ProjectV2,
+  evaluatedAt?: string,
 ): BetVersion | undefined {
   if (project.activeBetId === undefined) return undefined;
   const currentBets = workspace.bets.filter(
@@ -30,6 +32,7 @@ function activeBet(
       candidate.projectId === project.id && candidate.invalidatedAt === undefined,
   );
   return currentBets.length === 1 && currentBets[0].id === project.activeBetId
+    && betIsInternallyConsistent(currentBets[0], evaluatedAt)
     ? currentBets[0]
     : undefined;
 }
@@ -37,8 +40,9 @@ function activeBet(
 export function projectToSchedulerInput(
   workspace: WorkspaceV2,
   project: ProjectV2,
+  evaluatedAt?: string,
 ): Project | undefined {
-  const bet = activeBet(workspace, project);
+  const bet = activeBet(workspace, project, evaluatedAt);
   const brief = workspace.directionBriefs.find(
     (candidate) =>
       candidate.id === project.activeDirectionBriefId &&
@@ -333,8 +337,8 @@ function executableSchedulerProjection(
   project: ProjectV2,
   now: string,
 ): ExecutableSchedulerProjection | undefined {
-  const bet = activeBet(workspace, project);
-  const projectedProject = projectToSchedulerInput(workspace, project);
+  const bet = activeBet(workspace, project, now);
+  const projectedProject = projectToSchedulerInput(workspace, project, now);
   if (
     bet === undefined ||
     projectedProject === undefined ||

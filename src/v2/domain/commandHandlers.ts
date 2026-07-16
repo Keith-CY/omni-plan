@@ -27,6 +27,12 @@ import {
   isMaterialDirectionChange,
 } from "./direction";
 import {
+  betIntegrityIssue,
+  betReplacementProvenanceIssue,
+  directionSnapshotIntegrityIssue,
+  selectCompletedExpiryRebetReview,
+} from "./betIntegrity";
+import {
   hasActualEffort,
   isConcreteEvidenceRequirement,
   requirementStatus,
@@ -68,6 +74,7 @@ import type {
   InboxItem,
   JsonValue,
   ProjectV2,
+  ProjectHoldState,
   ReplanProposal,
   ReviewRecord,
   WorkspaceV2,
@@ -239,7 +246,7 @@ function projectArtifactsCollision(
   return undefined;
 }
 
-function entityIdOwners(
+function entityIdOwnerOccurrences(
   workspace: WorkspaceV2,
   id: string,
   reservedIds: readonly { entity: string; id: string }[] = [],
@@ -304,8 +311,19 @@ function entityIdOwners(
   ];
 
   for (const [entity, records] of collections) {
-    if (records.some((record) => record.id === id)) owners.push(entity);
+    for (const record of records) {
+      if (record.id === id) owners.push(entity);
+    }
   }
+  return owners;
+}
+
+function entityIdOwners(
+  workspace: WorkspaceV2,
+  id: string,
+  reservedIds: readonly { entity: string; id: string }[] = [],
+): string[] {
+  const owners = entityIdOwnerOccurrences(workspace, id, reservedIds);
   return [...new Set(owners)];
 }
 
@@ -322,6 +340,22 @@ function isCanonicalIsoTimestamp(value: string): boolean {
   return (
     Number.isFinite(milliseconds) &&
     new Date(milliseconds).toISOString() === value
+  );
+}
+
+function projectHoldRecordSetIsCanonical(
+  workspace: WorkspaceV2,
+  hold: ProjectHoldState,
+  now: string,
+): boolean {
+  return (
+    isCanonicalIsoTimestamp(hold.createdAt) &&
+    Date.parse(hold.createdAt) <= Date.parse(now) &&
+    hold.affectedRecordIds.length > 0 &&
+    new Set(hold.affectedRecordIds).size === hold.affectedRecordIds.length &&
+    hold.affectedRecordIds.every(
+      (id) => entityIdOwnerOccurrences(workspace, id).length === 1,
+    )
   );
 }
 
@@ -1846,6 +1880,53 @@ export async function applyCommandHandler(
         ({ projectId }) => projectId === project.id,
       );
       const placingFirstBet = project.activeBetId === undefined;
+      const migrationHolds = project.holds.filter(
+        ({ type }) => type === "migration_review",
+      );
+      const rebetHolds = project.holds.filter(
+        ({ type }) => type === "rebet_required",
+      );
+      const migrationHold = migrationHolds[0];
+      const rebetHold = rebetHolds[0];
+      const migrationSourceCount = migrationHold === undefined
+        ? 0
+        : workspace.legacyAuditRecords.filter(
+            ({ id, projectId }) =>
+              id === migrationHold.sourceId && projectId === project.id,
+          ).length + (workspace.migration?.backupId === migrationHold.sourceId ? 1 : 0);
+      const rebetSourceCount = rebetHold === undefined
+        ? 0
+        : workspace.bets.filter(
+            ({ id, projectId }) =>
+              id === rebetHold.sourceId && projectId === project.id,
+          ).length;
+      const canonicalMigrationHold =
+        project.holds.length === 1 &&
+        migrationHolds.length === 1 &&
+        migrationSourceCount === 1 &&
+        migrationHold!.affectedRecordIds.includes(project.id) &&
+        migrationHold!.affectedRecordIds.includes(project.activeDirectionBriefId) &&
+        projectHoldRecordSetIsCanonical(workspace, migrationHold!, context.now);
+      const canonicalRebetHold =
+        project.holds.length === 1 &&
+        rebetHolds.length === 1 &&
+        rebetSourceCount === 1 &&
+        rebetHold!.sourceId === project.activeBetId &&
+        rebetHold!.affectedRecordIds.includes(project.id) &&
+        rebetHold!.affectedRecordIds.includes(project.activeBetId!) &&
+        projectHoldRecordSetIsCanonical(workspace, rebetHold!, context.now);
+      const holdsPermitBet = placingFirstBet
+        ? project.holds.length === 0 || canonicalMigrationHold
+        : canonicalRebetHold;
+      if (!holdsPermitBet) {
+        return rejection(workspace, context, "HOLD_BLOCKS_COMMAND", {
+          reason: placingFirstBet
+            ? `Project ${project.id} requires no hold or one canonical migration review before its first Bet.`
+            : `Project ${project.id} requires exactly one matching Re-bet hold before replacing its Bet.`,
+          gate: `project:${project.id}:bet_holds`,
+          permittedNextCommand: "resolve_sync_conflict",
+        });
+      }
       const transition = transitionLifecycle(
         project,
         placingFirstBet ? "bet_placed" : "bet_replaced",
@@ -1885,6 +1966,17 @@ export async function applyCommandHandler(
         return rejection(workspace, context, "BRIEF_INCOMPLETE", {
           reason: `Project ${project.id} requires all six Direction decisions before a Bet.`,
           gate: `project:${project.id}:direction_complete`,
+          permittedNextCommand: "update_direction",
+        });
+      }
+      const directionIntegrityIssue = directionSnapshotIntegrityIssue(
+        brief,
+        context.now,
+      );
+      if (directionIntegrityIssue !== undefined) {
+        return rejection(workspace, context, "INVALID_COMMAND", {
+          reason: directionIntegrityIssue,
+          gate: `project:${project.id}:direction_integrity`,
           permittedNextCommand: "update_direction",
         });
       }
@@ -1959,6 +2051,40 @@ export async function applyCommandHandler(
           "place_bet",
         );
       }
+      let sourceReviewId: string | undefined;
+      let replacementReason:
+        | "material_direction_change"
+        | "appetite_expiry"
+        | undefined;
+      if (!placingFirstBet && supersededBet !== undefined) {
+        const integrityIssue = betIntegrityIssue(supersededBet, context.now);
+        if (integrityIssue !== undefined) {
+          return rejection(workspace, context, "SYNC_CONFLICT", {
+            reason: integrityIssue,
+            gate: `project:${project.id}:current_bet_integrity`,
+            permittedNextCommand: "resolve_sync_conflict",
+          });
+        }
+        if (supersededBet.invalidatedAt === undefined) {
+          replacementReason = "appetite_expiry";
+          const reviewSelection = selectCompletedExpiryRebetReview(
+            workspace,
+            project,
+            supersededBet,
+            context.now,
+          );
+          if (!reviewSelection.ok) {
+            return rejection(workspace, context, "HOLD_BLOCKS_COMMAND", {
+              reason: reviewSelection.reason,
+              gate: `project:${project.id}:expiry_review`,
+              permittedNextCommand: "complete_review",
+            });
+          }
+          sourceReviewId = reviewSelection.review.id;
+        } else {
+          replacementReason = "material_direction_change";
+        }
+      }
       const bet = await buildBetVersion(brief, {
         id: command.betId,
         version: placingFirstBet
@@ -1969,6 +2095,8 @@ export async function applyCommandHandler(
         ...(placingFirstBet
           ? {}
           : { supersedesId: project.activeBetId! }),
+        ...(replacementReason === undefined ? {} : { replacementReason }),
+        ...(sourceReviewId === undefined ? {} : { sourceReviewId }),
       });
       const projects = [...workspace.projects];
       const transitionedProject = { ...transition.project };
@@ -1977,11 +2105,7 @@ export async function applyCommandHandler(
       }
       projects[projectIndex] = {
         ...transitionedProject,
-        holds: placingFirstBet
-          ? transition.project.holds
-          : transition.project.holds.filter(
-              ({ type }) => type !== "rebet_required",
-            ),
+        holds: [],
         activeBetId: bet.id,
         updatedAt: context.now,
       };
@@ -1996,6 +2120,19 @@ export async function applyCommandHandler(
           invalidatedAt: context.now,
           invalidationReason: `Superseded by Re-bet ${bet.id}.`,
         };
+      }
+      const replacementProvenanceIssue = placingFirstBet
+        ? undefined
+        : betReplacementProvenanceIssue(
+            { ...workspace, bets: [...bets, bet] },
+            bet,
+          );
+      if (replacementProvenanceIssue !== undefined) {
+        return rejection(workspace, context, "SYNC_CONFLICT", {
+          reason: replacementProvenanceIssue,
+          gate: `bet:${bet.id}:replacement_provenance`,
+          permittedNextCommand: "resolve_sync_conflict",
+        });
       }
 
       return {

@@ -1756,6 +1756,169 @@ button {
   background: var(--v2-paper);
 }
 
+.v2-bet-stage,
+.v2-bet-history,
+.v2-plan-stage-summary {
+  display: grid;
+  gap: 24px;
+}
+
+.v2-bet-stage > header,
+.v2-bet-history > header,
+.v2-plan-stage-summary > header {
+  padding-bottom: 20px;
+  border-bottom: 1px solid var(--v2-rule);
+}
+
+.v2-bet-stage h2,
+.v2-bet-history h2,
+.v2-plan-stage-summary h2 {
+  margin: 0;
+  font-family: "Iowan Old Style", Charter, Georgia, serif;
+  font-size: clamp(32px, 5vw, 48px);
+  font-weight: 500;
+}
+
+.v2-bet-stage > header > p:not(.v2-eyebrow),
+.v2-bet-history > header > p:not(.v2-eyebrow),
+.v2-plan-stage-summary > header > p:not(.v2-eyebrow) {
+  max-width: 64ch;
+  color: var(--v2-muted);
+  line-height: 1.6;
+}
+
+.v2-bet-stage > section,
+.v2-bet-history-entry,
+.v2-plan-stage-summary > section,
+.v2-plan-stage-summary__details {
+  padding: clamp(22px, 4vw, 32px);
+  background: var(--v2-sheet);
+  border: 1px solid var(--v2-rule);
+  box-shadow: 6px 6px 0 rgba(20, 37, 34, 0.08);
+}
+
+.v2-bet-stage > .v2-button--primary {
+  display: inline-flex;
+  width: fit-content;
+  min-height: 44px;
+  align-items: center;
+  justify-content: center;
+  padding: 9px 18px;
+  color: white;
+  background: var(--v2-signal-text);
+  border: 1px solid var(--v2-signal-text);
+}
+
+.v2-bet-direction-boundary,
+.v2-bet-history-list {
+  display: grid;
+  gap: 18px;
+}
+
+.v2-bet-direction-boundary dl,
+.v2-bet-history-facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  margin: 0;
+  padding: 1px;
+  background: var(--v2-rule);
+}
+
+.v2-bet-direction-boundary dl > div,
+.v2-bet-history-facts > div {
+  min-width: 0;
+  padding: 15px;
+  background: var(--v2-paper);
+}
+
+.v2-bet-direction-boundary dt,
+.v2-bet-history-facts dt {
+  color: var(--v2-muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.v2-bet-direction-boundary dd,
+.v2-bet-history-facts dd {
+  margin: 7px 0 0;
+  overflow-wrap: anywhere;
+  line-height: 1.5;
+}
+
+.v2-bet-direction-boundary ul,
+.v2-bet-history-entry ul,
+.v2-plan-stage-summary ul {
+  display: grid;
+  gap: 10px;
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.v2-bet-direction-boundary li,
+.v2-bet-history-entry li,
+.v2-plan-stage-summary li {
+  display: grid;
+  gap: 4px;
+  padding: 13px 15px;
+  background: var(--v2-paper);
+  border-left: 4px solid var(--v2-focus);
+}
+
+.v2-bet-history-entry > header {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.v2-bet-history-entry h3,
+.v2-plan-stage-summary h3 {
+  margin: 0;
+  font-family: "Iowan Old Style", Charter, Georgia, serif;
+  font-size: 26px;
+  font-weight: 500;
+}
+
+.v2-bet-history-entry > details,
+.v2-plan-stage-summary__details {
+  color: var(--v2-muted);
+}
+
+.v2-bet-history-entry > details > summary,
+.v2-plan-stage-summary__details > summary {
+  display: flex;
+  min-height: 44px;
+  align-items: center;
+  cursor: pointer;
+  color: var(--v2-ink);
+  font-weight: 700;
+  text-decoration: underline;
+  text-underline-offset: 4px;
+}
+
+.v2-bet-history-entry > details dl {
+  display: grid;
+  gap: 10px;
+  margin: 12px 0 0;
+}
+
+.v2-bet-history-entry > details dd {
+  margin: 3px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.v2-plan-stage-summary > p {
+  margin: 0;
+  padding: 17px 19px;
+  color: white;
+  background: var(--v2-dark);
+  border-left: 5px solid var(--v2-signal);
+}
+
 @media (max-width: 760px) {
   .v2-app-shell {
     display: block;
@@ -1954,8 +2117,14 @@ button {
 
   .v2-project-header__identity,
   .v2-project-bet-readout,
-  .v2-locked-stage dl {
+  .v2-locked-stage dl,
+  .v2-bet-direction-boundary dl,
+  .v2-bet-history-facts {
     grid-template-columns: 1fr;
+  }
+
+  .v2-bet-history-entry > header {
+    flex-direction: column;
   }
 
   .v2-current-stage {

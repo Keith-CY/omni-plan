@@ -16,9 +16,11 @@ import {
   type V2Command,
 } from "../../../domain/commands";
 import { isDirectionComplete } from "../../../domain/direction";
+import { stableHashSync } from "../../../domain/stableHash";
 import type {
   BetVersion,
   DirectionBrief,
+  JsonValue,
   WorkspaceV2,
 } from "../../../domain/types";
 import {
@@ -105,10 +107,10 @@ function executingWorkspace(): WorkspaceV2 {
     briefId: brief.id,
     briefSnapshot: structuredClone(brief),
     committedScope: structuredClone(brief.firstScope),
-    appetiteStart: "2026-07-15T03:00:00.000Z",
-    appetiteEnd: "2026-07-20T03:00:00.000Z",
+    appetiteStart: "2026-07-16T00:00:00.000Z",
+    appetiteEnd: "2026-07-16T04:00:00.000Z",
     actorId: "human-ui",
-    approvedAt: "2026-07-15T03:00:00.000Z",
+    approvedAt: "2026-07-16T00:00:00.000Z",
   });
   return buildWorkspaceV2("personal", {
     capacityProfile: buildCapacityProfile({ updatedAt: NOW, updatedBy: "human-ui" }),
@@ -531,9 +533,13 @@ describe("DirectionStage", () => {
     );
     await user.click(screen.getByRole("button", { name: "Save advanced notes" }));
 
-    await waitFor(() => expect(harness.commands).toHaveLength(1));
+    await waitFor(() => {
+      expect(harness.commands).toHaveLength(1);
+      expect(harness.current().projects[0].activeDirectionBriefId).not.toBe(
+        BRIEF_ID,
+      );
+    });
     const nextBriefId = harness.current().projects[0].activeDirectionBriefId;
-    expect(nextBriefId).not.toBe(BRIEF_ID);
     expect(harness.current().bets[0].invalidatedAt).toBeUndefined();
 
     await user.click(screen.getByRole("button", { name: "Success evidence" }));
@@ -559,6 +565,9 @@ describe("DirectionStage", () => {
     const audience = "  Busy founders cannot see the next bounded decision.  ";
     source.directionBriefs[0].audienceAndProblem = audience;
     source.bets[0].briefSnapshot.audienceAndProblem = audience;
+    source.bets[0].briefHash = stableHashSync(
+      source.bets[0].briefSnapshot as unknown as JsonValue,
+    );
     const harness = renderDirection(directionRuntime(source));
 
     await screen.findByText("6 of 6 decisions complete");

@@ -1400,8 +1400,14 @@ describe("explicit lifecycle invariant properties", () => {
               sourceChecksum: `checksum:${seed}`,
             });
           } else if (hold.type === "rebet_required") {
-            hold.sourceId = mutable.bets[0].id;
-            mutable.projects[0].holds[0].sourceId = mutable.bets[0].id;
+            const activeBet = mutable.bets[0];
+            hold.sourceId = activeBet.id;
+            hold.affectedRecordIds = [projectId, activeBet.id];
+            mutable.projects[0].holds[0].sourceId = activeBet.id;
+            mutable.projects[0].holds[0].affectedRecordIds = [
+              projectId,
+              activeBet.id,
+            ];
           } else if (hold.type === "review_overdue") {
             mutable.reviews.push({
               id: sourceId,
@@ -1508,8 +1514,26 @@ describe("explicit lifecycle invariant properties", () => {
               "2026-07-11T01:00:00.000Z",
             );
           } else if (hold.type === "rebet_required") {
+            const recoveryWorkspace = structuredClone(workspace);
+            const invalidatedAt = "2026-07-11T00:00:00.000Z";
+            recoveryWorkspace.bets[0].invalidatedAt = invalidatedAt;
+            recoveryWorkspace.bets[0].invalidationReason =
+              "Material Direction change requires Re-bet.";
+            const previousBrief = recoveryWorkspace.directionBriefs[0];
+            const replacementBrief = {
+              ...structuredClone(previousBrief),
+              id: `${projectId}:material-direction`,
+              version: previousBrief.version + 1,
+              audienceAndProblem: `${previousBrief.audienceAndProblem} revised`,
+              createdAt: invalidatedAt,
+              updatedAt: invalidatedAt,
+            };
+            recoveryWorkspace.directionBriefs.push(replacementBrief);
+            recoveryWorkspace.projects[0].activeDirectionBriefId =
+              replacementBrief.id;
+            recoveryWorkspace.projects[0].updatedAt = invalidatedAt;
             const legal = await executeCommand(
-              workspace,
+              recoveryWorkspace,
               {
                 type: "place_bet",
                 projectId,
@@ -1518,7 +1542,7 @@ describe("explicit lifecycle invariant properties", () => {
               },
               buildCommandContext({
                 commandId: `rebet-hold-control:${seed}`,
-                expectedRevision: workspace.revision,
+                expectedRevision: recoveryWorkspace.revision,
                 now: "2026-07-11T01:00:00.000Z",
               }),
             );
@@ -1528,7 +1552,7 @@ describe("explicit lifecycle invariant properties", () => {
             ).toBe(true);
             expectValidAppliedState(
               legal,
-              workspace,
+              recoveryWorkspace,
               "2026-07-11T01:00:00.000Z",
             );
           } else if (hold.type === "review_overdue") {

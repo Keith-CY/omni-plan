@@ -56,6 +56,7 @@ export interface OperationalV2WorkspaceState {
   status: "setup_required" | "ready";
   workspace: WorkspaceV2;
   lastCommandResult?: CommandResult;
+  readCurrentTime(): ISODate;
   dispatch(command: V2Command): Promise<CommandResult>;
 }
 
@@ -177,6 +178,7 @@ function operationalCompletion(
     status: operationalStatus(workspace),
     workspace,
     lastCommandResult: lastCommandResult ?? latest.lastCommandResult,
+    readCurrentTime: latest.readCurrentTime,
     dispatch: latest.dispatch,
   };
 }
@@ -206,6 +208,7 @@ export function V2WorkspaceProvider({
     stateRef.current = next;
     setState(next);
   }, []);
+  const readCurrentTime = useCallback(() => runtime.now(), [runtime]);
 
   const dispatch = useCallback(
     async (command: V2Command): Promise<CommandResult> => {
@@ -226,6 +229,9 @@ export function V2WorkspaceProvider({
           "Capacity setup must be completed before other commands.",
         );
       }
+      const now = runtime.now();
+      const boundCommand: V2Command =
+        command.type === "place_bet" ? { ...command, start: now } : command;
       const context: CommandContext = {
         commandId: runtime.createCommandId(),
         expectedRevision: current.workspace.revision,
@@ -237,9 +243,9 @@ export function V2WorkspaceProvider({
           verified: true,
           capabilities: ["human_decision"],
         },
-        now: runtime.now(),
+        now,
       };
-      const result = await runtime.commands.dispatch(command, context);
+      const result = await runtime.commands.dispatch(boundCommand, context);
       const next = operationalCompletion(
         stateRef.current,
         result.ok ? result.workspace : undefined,
@@ -274,6 +280,7 @@ export function V2WorkspaceProvider({
         publishState({
           status: operationalStatus(workspace),
           workspace,
+          readCurrentTime,
           dispatch,
         });
       } catch {
@@ -283,7 +290,7 @@ export function V2WorkspaceProvider({
     return () => {
       active = false;
     };
-  }, [dispatch, publishState, runtime]);
+  }, [dispatch, publishState, readCurrentTime, runtime]);
 
   useEffect(() => {
     if (state.status !== "ready") return;

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { screen, within } from "@testing-library/react";
+import { cleanup, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Route, Routes } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
@@ -55,6 +55,11 @@ function rebetWorkspace(): WorkspaceV2 {
     id: BRIEF_ID,
     projectId: PROJECT_ID,
     appetiteSeconds: 3_661,
+    firstScope: [{
+      id: "scope:guided-shell",
+      title: "Guided project lifecycle",
+      description: "Lead one bounded result through Direction and Bet.",
+    }],
     createdAt: "2026-07-14T03:00:00.000Z",
     updatedAt: "2026-07-15T03:00:00.000Z",
   });
@@ -67,7 +72,7 @@ function rebetWorkspace(): WorkspaceV2 {
     holds: [{
       type: "rebet_required",
       sourceId: BET_ID,
-      affectedRecordIds: [BET_ID],
+      affectedRecordIds: [PROJECT_ID, BET_ID],
       createdAt: "2026-07-15T03:00:00.000Z",
     }],
     createdAt: "2026-07-14T03:00:00.000Z",
@@ -82,14 +87,37 @@ function rebetWorkspace(): WorkspaceV2 {
       projectId: PROJECT_ID,
       briefId: BRIEF_ID,
       briefSnapshot: structuredClone(brief),
-      appetiteStart: "2026-07-14T03:00:00.000Z",
-      appetiteEnd: "2026-07-20T03:00:00.000Z",
+      committedScope: structuredClone(brief.firstScope),
+      appetiteStart: "2026-07-15T03:00:00.000Z",
+      appetiteEnd: "2026-07-15T04:01:01.000Z",
       actorId: "human-ui",
-      approvedAt: "2026-07-14T03:00:00.000Z",
+      approvedAt: "2026-07-15T03:00:00.000Z",
       invalidatedAt: "2026-07-15T03:00:00.000Z",
       invalidationReason: "Direction changed materially.",
     })],
   });
+}
+
+function planningWorkspace(): WorkspaceV2 {
+  const source = workspace("awaiting_bet");
+  const brief = source.directionBriefs[0];
+  source.projects[0] = {
+    ...source.projects[0],
+    stage: "planning",
+    activeBetId: BET_ID,
+  };
+  source.bets = [buildBetVersion({
+    id: BET_ID,
+    projectId: PROJECT_ID,
+    briefId: brief.id,
+    briefSnapshot: structuredClone(brief),
+    committedScope: structuredClone(brief.firstScope),
+    appetiteStart: "2026-07-16T02:00:00.000Z",
+    appetiteEnd: "2026-07-16T06:00:00.000Z",
+    actorId: "human-ui",
+    approvedAt: "2026-07-16T02:00:00.000Z",
+  })];
+  return source;
 }
 
 function crossOwnerBetWorkspace(): WorkspaceV2 {
@@ -196,6 +224,8 @@ describe("ProjectWorkspacePage", () => {
       "aria-current",
       "step",
     );
+    expect(await screen.findByRole("region", { name: "Bet decision" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Review Bet" })).toBeVisible();
   });
 
   it("renders completed-stage history links as immutable history with an explicit revision path", async () => {
@@ -226,14 +256,35 @@ describe("ProjectWorkspacePage", () => {
   it("opens the Bet decision surface for a required Re-bet instead of swallowing it as history", async () => {
     renderWorkspace(`/projects/${PROJECT_ID}/bet`, rebetWorkspace());
 
-    expect(await screen.findByRole("heading", { name: "Bet workspace" })).toBeVisible();
-    expect(screen.queryByRole("region", { name: "Bet immutable history" })).toBeNull();
-    expect(screen.getByText("1 hour 1 minute 1 second")).toBeVisible();
-    expect(screen.queryByText("62 minutes")).toBeNull();
-    expect(screen.getByRole("link", { name: "Open Bet" })).toHaveAttribute(
-      "href",
-      `/projects/${PROJECT_ID}/bet`,
-    );
+    const rebet = await screen.findByRole("region", { name: "Re-bet decision" });
+    expect(rebet).toBeVisible();
+    expect(screen.getByRole("region", { name: "Bet immutable history" })).toBeVisible();
+    expect(within(rebet).getByText("1 hour 1 minute 1 second")).toBeVisible();
+    expect(within(rebet).queryByText("62 minutes")).toBeNull();
+    expect(screen.getByRole("button", { name: "Review Re-bet" })).toBeVisible();
+  });
+
+  it("shows detailed Bet history for completed Bet routes and explicit history requests", async () => {
+    renderWorkspace(`/projects/${PROJECT_ID}/bet`, planningWorkspace());
+
+    expect(await screen.findByRole("region", { name: "Bet immutable history" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Bet v1" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: /review re-bet/i })).toBeNull();
+
+    cleanup();
+    renderWorkspace(`/projects/${PROJECT_ID}/bet?view=history`, rebetWorkspace());
+    expect(await screen.findByRole("region", { name: "Bet immutable history" })).toBeVisible();
+    expect(screen.queryByRole("region", { name: "Re-bet decision" })).toBeNull();
+  });
+
+  it("renders the unlocked Plan route as a read-only deterministic summary", async () => {
+    renderWorkspace(`/projects/${PROJECT_ID}/plan`, planningWorkspace());
+
+    const summary = await screen.findByRole("region", { name: "Plan summary" });
+    expect(within(summary).getByText("Guided project lifecycle")).toBeVisible();
+    expect(within(summary).getByText("0 work items in the active Bet")).toBeVisible();
+    expect(within(summary).queryByRole("button")).toBeNull();
+    expect(within(summary).queryByRole("textbox")).toBeNull();
   });
 
   it("fails closed before rendering project facts when the active Bet belongs to another Project", async () => {

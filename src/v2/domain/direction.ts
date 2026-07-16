@@ -2,7 +2,12 @@ import type { Id, ISODate } from "@/domain/types";
 
 import type { DirectionBriefDraft } from "./commands";
 import { stableHash } from "./stableHash";
-import type { BetVersion, DirectionBrief, JsonValue } from "./types";
+import type {
+  BetReplacementReason,
+  BetVersion,
+  DirectionBrief,
+  JsonValue,
+} from "./types";
 
 const materialDirectionFields = [
   "audienceAndProblem",
@@ -18,7 +23,7 @@ export function directionCompleteness(brief: DirectionBriefDraft) {
     audienceAndProblem: brief.audienceAndProblem.trim().length > 0,
     successEvidence: brief.successEvidence.trim().length > 0,
     appetite:
-      Number.isFinite(brief.appetiteSeconds) && brief.appetiteSeconds > 0,
+      Number.isSafeInteger(brief.appetiteSeconds) && brief.appetiteSeconds > 0,
     validationMethod: brief.validationMethod.trim().length > 0,
     firstScope:
       brief.firstScope.length > 0 &&
@@ -57,6 +62,8 @@ export async function buildBetVersion(
     actorId: Id;
     approvedAt: ISODate;
     supersedesId?: Id;
+    replacementReason?: BetReplacementReason;
+    sourceReviewId?: Id;
   },
 ): Promise<BetVersion> {
   const briefSnapshot = structuredClone(brief);
@@ -84,5 +91,11 @@ export async function buildBetVersion(
     ...(inputSnapshot.supersedesId === undefined
       ? {}
       : { supersedesId: inputSnapshot.supersedesId }),
+    ...(inputSnapshot.replacementReason === undefined
+      ? {}
+      : { replacementReason: inputSnapshot.replacementReason }),
+    ...(inputSnapshot.sourceReviewId === undefined
+      ? {}
+      : { sourceReviewId: inputSnapshot.sourceReviewId }),
   } satisfies BetVersion;
 }

@@ -205,6 +205,7 @@ function betValue(value: unknown): boolean {
       ],
       [
         "supersedesId",
+        "replacementReason",
         "sourceReviewId",
         "invalidatedAt",
         "invalidationReason",
@@ -230,6 +231,9 @@ function betValue(value: unknown): boolean {
     canonicalTimestamp(value.approvedAt) &&
     Date.parse(value.approvedAt) <= Date.parse(value.appetiteEnd) &&
     optionalId(value.supersedesId) &&
+    (value.replacementReason === undefined ||
+      value.replacementReason === "material_direction_change" ||
+      value.replacementReason === "appetite_expiry") &&
     optionalId(value.sourceReviewId) &&
     optionalTimestamp(value.invalidatedAt) &&
     optionalString(value.invalidationReason) &&

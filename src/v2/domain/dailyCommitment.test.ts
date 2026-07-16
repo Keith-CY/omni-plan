@@ -20,10 +20,12 @@ import {
   TODAY_PROPOSAL_MAX_AGE_SECONDS,
   type TodayProposal,
 } from "./today";
+import { stableHashSync } from "./stableHash";
 import type {
   ActualV2,
   CapacityProfile,
   DailyCommitment,
+  JsonValue,
   ProjectDependency,
   ProjectWorkItem,
   WorkspaceV2,
@@ -146,6 +148,19 @@ function projectWorkspace(
     dependencies: [structuredClone(DEPENDENCY)],
     ...overrides,
   });
+}
+
+function setCurrentBetAppetiteEnd(
+  workspace: WorkspaceV2,
+  appetiteEnd: string,
+): void {
+  const bet = workspace.bets[0];
+  bet.appetiteEnd = appetiteEnd;
+  bet.briefSnapshot.appetiteSeconds =
+    (Date.parse(appetiteEnd) - Date.parse(bet.appetiteStart)) / 1_000;
+  bet.briefHash = stableHashSync(
+    bet.briefSnapshot as unknown as JsonValue,
+  );
 }
 
 function addSecondPlanningProject(source: WorkspaceV2): WorkspaceV2 {
@@ -490,7 +505,7 @@ describe("human Daily Commitment", () => {
 
   it("preserves the Bet-boundary recovery action when a fresh proposal expires before commit", async () => {
     const source = projectWorkspace();
-    source.bets[0].appetiteEnd = "2026-07-13T00:01:00.000Z";
+    setCurrentBetAppetiteEnd(source, "2026-07-13T00:01:00.000Z");
     source.workItems = [
       {
         ...structuredClone(WORK_ITEM_1),
@@ -1431,25 +1446,36 @@ describe("versioned Replan acceptance", () => {
     rebet.bets[0] = {
       ...rebet.bets[0],
       invalidatedAt: GENERATED_AT,
-      invalidationReason: "Superseded by Re-bet bet-rebet.",
+      invalidationReason: "Material Direction change requires Re-bet.",
     };
+    const rebetBrief = {
+      ...structuredClone(rebet.directionBriefs[0]),
+      id: "brief-after-material-change",
+      version: rebet.directionBriefs[0].version + 1,
+      audienceAndProblem: "A materially changed audience now needs this plan.",
+      createdAt: GENERATED_AT,
+      updatedAt: GENERATED_AT,
+    };
+    rebet.directionBriefs.push(rebetBrief);
     const nextBet = buildBetVersion({
       id: "bet-rebet",
       projectId: "project-1",
       version: 2,
-      briefId: rebet.directionBriefs[0].id,
-      briefSnapshot: structuredClone(rebet.directionBriefs[0]),
-      committedScope: structuredClone(rebet.directionBriefs[0].firstScope),
-      appetiteStart: BET_START,
-      appetiteEnd: BET_END,
+      briefId: rebetBrief.id,
+      briefSnapshot: structuredClone(rebetBrief),
+      committedScope: structuredClone(rebetBrief.firstScope),
+      appetiteStart: GENERATED_AT,
+      appetiteEnd: "2026-07-21T00:00:00.000Z",
       actorId: "human-1",
       approvedAt: GENERATED_AT,
       supersedesId: "bet-1",
+      replacementReason: "material_direction_change",
     });
     rebet.bets.push(nextBet);
     rebet.projects[0] = {
       ...rebet.projects[0],
       stage: "planning",
+      activeDirectionBriefId: rebetBrief.id,
       activeBetId: nextBet.id,
     };
     delete rebet.projects[0].activePlanVersionId;
@@ -1557,8 +1583,8 @@ describe("versioned Replan acceptance", () => {
       briefId: wrongBet.directionBriefs[0].id,
       briefSnapshot: structuredClone(wrongBet.directionBriefs[0]),
       committedScope: structuredClone(wrongBet.directionBriefs[0].firstScope),
-      appetiteStart: BET_START,
-      appetiteEnd: BET_END,
+      appetiteStart: GENERATED_AT,
+      appetiteEnd: "2026-07-21T00:00:00.000Z",
       actorId: "human-1",
       approvedAt: GENERATED_AT,
       supersedesId: "bet-1",

@@ -69,7 +69,6 @@ const BET = buildBetVersion({
   projectId: "project-1",
   version: 1,
   briefId: BRIEF.id,
-  briefHash: "brief-hash",
   briefSnapshot: structuredClone(BRIEF),
   committedScope: structuredClone(BRIEF.firstScope),
   appetiteStart: START,
@@ -409,6 +408,38 @@ describe("executable projection policy", () => {
     const source = workspace({
       bets: [structuredClone(BET), duplicateCurrentBet],
     });
+
+    expect(projectToSchedulerInput(source, source.projects[0])).toBeUndefined();
+    expect(scheduleV2Project(source, PROJECT.id, MIDPOINT)).toBeUndefined();
+    expect(scheduleExecutablePortfolio(source, MIDPOINT)).toEqual([]);
+  });
+
+  it.each([
+    ["extended appetite", (bet: BetVersion) => {
+      bet.appetiteEnd = "2026-07-11T14:00:00.000Z";
+    }],
+    ["approval/start mismatch", (bet: BetVersion) => {
+      bet.appetiteStart = "2026-07-11T08:00:00.000Z";
+    }],
+    ["committed scope drift", (bet: BetVersion) => {
+      bet.committedScope = [{
+        id: "scope-forged",
+        title: "Forged",
+        description: "Not present in the immutable snapshot.",
+      }];
+    }],
+    ["snapshot hash drift", (bet: BetVersion) => {
+      const forgedScope = [{
+        id: "scope-forged",
+        title: "Forged expansion",
+        description: "Changed in both duplicated fields after approval.",
+      }];
+      bet.briefSnapshot.firstScope = structuredClone(forgedScope);
+      bet.committedScope = structuredClone(forgedScope);
+    }],
+  ])("fails closed for internally inconsistent Bet %s", (_failure, mutate) => {
+    const source = workspace();
+    mutate(source.bets[0]);
 
     expect(projectToSchedulerInput(source, source.projects[0])).toBeUndefined();
     expect(scheduleV2Project(source, PROJECT.id, MIDPOINT)).toBeUndefined();

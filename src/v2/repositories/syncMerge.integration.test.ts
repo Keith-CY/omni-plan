@@ -2606,8 +2606,54 @@ describe("V2 common-ancestor merge", () => {
       },
       previousOperationHash: ancestor.created.operationHash,
     });
-    const localRebet = await commandOperation({
+    const expiryReviewId = `review:${bet.id}:expired`;
+    const createdExpiryReview = await commandOperation({
       workspace: boundary.workspace,
+      command: {
+        type: "create_review",
+        review: {
+          id: expiryReviewId,
+          kind: "event",
+          triggerKey: `${bet.id}:expired`,
+          triggerType: "bet_expired",
+          affectedProjectIds: ["material-race-project"],
+          affectedRecordIds: [bet.id],
+          dueAt: appetiteEnd,
+        },
+      },
+      commandId: "material-race-create-expiry-review",
+      deviceId: "desktop",
+      sequence: 2,
+      now: appetiteEnd,
+      actorId: "system-clock",
+      actorKind: "system",
+      origin: "agent",
+      source: {
+        sourceId: "verified-system-clock",
+        verified: true,
+        capabilities: ["system_time"],
+      },
+      previousOperationHash: boundary.created.operationHash,
+    });
+    const completedExpiryReview = await commandOperation({
+      workspace: createdExpiryReview.workspace,
+      command: {
+        type: "complete_review",
+        reviewId: expiryReviewId,
+        conclusion: {
+          summary: "The expired Bet requires a fresh bounded commitment.",
+          decisionCodes: ["rebet"],
+          followUpCommandIds: [],
+        },
+      },
+      commandId: "material-race-complete-expiry-review",
+      deviceId: "desktop",
+      sequence: 3,
+      now: "2026-07-12T11:00:30.000Z",
+      previousOperationHash: createdExpiryReview.created.operationHash,
+    });
+    const localRebet = await commandOperation({
+      workspace: completedExpiryReview.workspace,
       command: {
         type: "place_bet",
         projectId: "material-race-project",
@@ -2616,9 +2662,9 @@ describe("V2 common-ancestor merge", () => {
       },
       commandId: "material-race-rebet",
       deviceId: "desktop",
-      sequence: 2,
+      sequence: 4,
       now: "2026-07-12T11:01:00.000Z",
-      previousOperationHash: boundary.created.operationHash,
+      previousOperationHash: completedExpiryReview.created.operationHash,
     });
     const remoteDirection = await commandOperation({
       workspace: ancestor.workspace,
@@ -2653,7 +2699,7 @@ describe("V2 common-ancestor merge", () => {
           updatedAt: ancestor.receipt.createdAt,
         },
         desktop: {
-          sequence: 2,
+          sequence: 4,
           operationHash: localRebet.created.operationHash,
           revision: localRebet.receipt.revision,
           updatedAt: localRebet.receipt.createdAt,
@@ -2669,7 +2715,14 @@ describe("V2 common-ancestor merge", () => {
     });
     const remote = new MemoryHistoryRemote();
     remote.put(syncManifestPathV2(WORKSPACE_ID), manifest);
-    for (const operation of [ancestor, boundary, localRebet, remoteDirection]) {
+    for (const operation of [
+      ancestor,
+      boundary,
+      createdExpiryReview,
+      completedExpiryReview,
+      localRebet,
+      remoteDirection,
+    ]) {
       remote.put(operation.created.path, operation.created.envelope);
     }
     const databaseName = "omni-plan-v2-sync-merge-material-direction-rebet";
@@ -2715,6 +2768,8 @@ describe("V2 common-ancestor merge", () => {
       ancestor.context.now,
     );
     await persistAsSent(repository, boundary);
+    await persistAsSent(repository, createdExpiryReview);
+    await persistAsSent(repository, completedExpiryReview);
     await persistAsSent(repository, localRebet);
 
     const result = await new SyncMergeV2({

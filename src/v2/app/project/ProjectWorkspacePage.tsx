@@ -8,9 +8,12 @@ import {
   type UserLifecycleStage,
 } from "../../domain/selectors";
 import { useV2Workspace } from "../state/V2WorkspaceProvider";
+import { BetHistory } from "./bet/BetHistory";
+import { BetStage } from "./bet/BetStage";
 import { DirectionStage } from "./direction/DirectionStage";
 import { LifecycleNav, USER_LIFECYCLE_STAGES, USER_STAGE_LABELS } from "./LifecycleNav";
 import { LockedStagePanel } from "./LockedStagePanel";
+import { PlanStageSummary } from "./plan/PlanStageSummary";
 import { ProjectHeader } from "./ProjectHeader";
 
 function isLifecycleStage(value: string | undefined): value is UserLifecycleStage {
@@ -135,13 +138,22 @@ export function ProjectWorkspacePage() {
   const betDecisionRequired =
     stage === "bet" &&
     searchParams.get("view") !== "history" &&
-    recommended?.projectId === projectId &&
-    recommended.permittedNextCommand === "place_bet";
+    (step.status === "current" || (
+      recommended?.projectId === projectId &&
+      recommended.permittedNextCommand === "place_bet"
+    ));
   const directionHistoryRequested =
     stage === "direction" &&
     step.status === "completed" &&
     searchParams.get("view") === "history";
   const showDirectionEditor = stage === "direction" && !directionHistoryRequested;
+  const betHistoryRequested =
+    stage === "bet" && searchParams.get("view") === "history";
+  const showBetDecision = betDecisionRequired && !betHistoryRequested;
+  const showBetHistory =
+    stage === "bet" &&
+    (betHistoryRequested || (!betDecisionRequired && step.status === "completed"));
+  const showPlanSummary = stage === "plan" && step.status === "current";
 
   return (
     <article className="v2-project-workspace v2-route-page">
@@ -156,8 +168,12 @@ export function ProjectWorkspacePage() {
           />
         ) : showDirectionEditor ? (
           <DirectionStage projectId={projectId} />
-        ) : betDecisionRequired ? (
-          <CurrentStageShell stage="bet" />
+        ) : showBetDecision ? (
+          <BetStage projectId={projectId} />
+        ) : showBetHistory ? (
+          <BetHistory projectId={projectId} />
+        ) : showPlanSummary ? (
+          <PlanStageSummary projectId={projectId} />
         ) : step.status === "completed" ? (
           <StageHistory
             step={step}

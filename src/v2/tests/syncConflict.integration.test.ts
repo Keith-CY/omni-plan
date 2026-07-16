@@ -786,7 +786,7 @@ describe("sync conflict commands", () => {
     const unrelatedHistoricalBet: BetVersion = {
       ...structuredClone(localBet),
       id: "bet-unrelated",
-      version: 0,
+      version: 2,
       invalidatedAt: NOW,
       invalidationReason: "Historical branch",
     };

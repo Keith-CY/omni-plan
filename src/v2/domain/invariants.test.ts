@@ -13,6 +13,7 @@ import {
   validateWorkspaceInvariants,
   type InvariantViolation,
 } from "./invariants";
+import { stableHashSync } from "./stableHash";
 import type {
   Action,
   CloseDecision,
@@ -24,6 +25,7 @@ import type {
   ProjectDependency,
   ProjectV2,
   ProjectWorkItem,
+  JsonValue,
   WorkspaceV2,
 } from "./types";
 
@@ -71,7 +73,7 @@ function buildValidWorkspace(): WorkspaceV2 {
   const brief = buildDirectionBrief({
     id: "brief-1",
     projectId: "project-1",
-    appetiteSeconds: 86_400,
+    appetiteSeconds: 100_800,
     firstScope: [
       { id: "scope-1", title: "Scope one", description: "Committed scope" },
     ],
@@ -107,6 +109,19 @@ function buildValidWorkspace(): WorkspaceV2 {
     planVersions: [buildPlan()],
     workItems: [buildWorkItem()],
   });
+}
+
+function setCurrentBetAppetiteEnd(
+  workspace: WorkspaceV2,
+  appetiteEnd: ISODate,
+): void {
+  const bet = workspace.bets[0];
+  bet.appetiteEnd = appetiteEnd;
+  bet.briefSnapshot.appetiteSeconds =
+    (Date.parse(appetiteEnd) - Date.parse(bet.appetiteStart)) / 1_000;
+  bet.briefHash = stableHashSync(
+    bet.briefSnapshot as unknown as JsonValue,
+  );
 }
 
 function codes(violations: InvariantViolation[]): string[] {
@@ -371,8 +386,7 @@ describe("validateWorkspaceInvariants Bet rules", () => {
 
   it("expires an executing Bet at the exact appetite boundary without extending it", () => {
     const workspace = buildValidWorkspace();
-    workspace.bets[0].appetiteEnd = NOW;
-    workspace.bets[0].briefSnapshot.appetiteSeconds = 999_999;
+    setCurrentBetAppetiteEnd(workspace, NOW);
     const originalEnd = workspace.bets[0].appetiteEnd;
 
     expect(violationsWithCode(workspace, "BET_EXPIRED")).toEqual([
@@ -2500,7 +2514,7 @@ describe("validateWorkspaceInvariants determinism", () => {
     const workspace = structuredClone(previous);
     workspace.projects[0].notes = "Illegal closed mutation";
     workspace.projects[0].stage = "executing";
-    workspace.bets[0].appetiteEnd = NOW;
+    setCurrentBetAppetiteEnd(workspace, NOW);
     workspace.workItems[0].evidenceRequired = true;
     workspace.workItems[0].resultStatus = "completed";
     workspace.exceptions.push({

@@ -18,7 +18,9 @@ import { validateWorkspaceInvariants } from "./invariants";
 import { evaluateBetBoundary } from "./lifecycle";
 import { authorizeCommand, type AuthorizationContext } from "./policy";
 import { deriveReviewQueue, reviewPolicy } from "./review";
+import { stableHashSync } from "./stableHash";
 import type {
+  JsonValue,
   ProjectHold,
   ProjectWorkItem,
   ReviewRecord,
@@ -87,6 +89,7 @@ function activeProjectWorkspace(): WorkspaceV2 {
   const brief = buildDirectionBrief({
     id: "brief-1",
     projectId: "project-1",
+    appetiteSeconds: 1_209_600,
     firstScope: [
       { id: "scope-1", title: "Validate", description: "Validate it" },
     ],
@@ -476,6 +479,9 @@ function overdueScopeWorkspace(): WorkspaceV2 {
     structuredClone(secondScope),
   );
   workspace.bets[0].committedScope.push(structuredClone(secondScope));
+  workspace.bets[0].briefHash = stableHashSync(
+    workspace.bets[0].briefSnapshot as unknown as JsonValue,
+  );
   workspace.reviews = [
     {
       id: "scope-overdue",

@@ -97,7 +97,6 @@ function betBoundaryWorkspace(): WorkspaceV2 {
     projectId: "project-system",
     briefId: brief.id,
     briefSnapshot: brief,
-    briefHash: "system-brief-hash",
     committedScope: structuredClone(brief.firstScope),
     appetiteStart: "2026-07-12T00:00:00.000Z",
     appetiteEnd: "2026-07-12T04:00:00.000Z",

@@ -1,6 +1,7 @@
 import type { AttentionKind, Id, ISODate, Seconds } from "@/domain/types";
 
 import { scheduleExecutablePortfolio } from "../projections/schedulerAdapter";
+import { betIsInternallyConsistent } from "./betIntegrity";
 import {
   capacityForLocalDate,
   createCapacityLedger,
@@ -212,13 +213,16 @@ export function soleCommitmentLeafForLocalDate(
 function currentBet(
   workspace: WorkspaceV2,
   project: ProjectV2,
+  now?: ISODate,
 ): BetVersion | undefined {
   if (project.activeBetId === undefined) return undefined;
   const current = workspace.bets.filter(
     (bet) =>
       bet.projectId === project.id && bet.invalidatedAt === undefined,
   );
-  return current.length === 1 && current[0].id === project.activeBetId
+  return current.length === 1 &&
+    current[0].id === project.activeBetId &&
+    betIsInternallyConsistent(current[0], now)
     ? current[0]
     : undefined;
 }
@@ -891,7 +895,7 @@ export async function generateTodayProposal(
     ) {
       continue;
     }
-    const bet = currentBet(workspace, project);
+    const bet = currentBet(workspace, project, now);
     if (bet === undefined) continue;
     const betEnd = parsedTimestamp(bet.appetiteEnd);
     if (betEnd === undefined) continue;

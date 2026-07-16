@@ -397,6 +397,7 @@ export function selectLockedStages(
 export function selectActiveHolds(
   workspace: WorkspaceV2,
   projectId: Id,
+  now?: string,
 ): ActiveHoldsSelection {
   const projects = workspace.projects.filter(({ id }) => id === projectId);
   if (projects.length !== 1) {
@@ -413,7 +414,15 @@ export function selectActiveHolds(
     };
   }
 
-  const holdIssue = firstHoldIssue(workspace, projects[0]);
+  const evaluatedAt = now === undefined ? undefined : canonicalTimestamp(now);
+  if (now !== undefined && evaluatedAt === undefined) {
+    return {
+      ok: false,
+      reason: "Project holds require a canonical evaluation time.",
+      permittedNextCommand: "retry_with_valid_time",
+    };
+  }
+  const holdIssue = firstHoldIssue(workspace, projects[0], evaluatedAt);
   if (holdIssue !== undefined) {
     return { ok: false, ...holdIssue };
   }

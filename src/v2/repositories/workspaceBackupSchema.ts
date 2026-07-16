@@ -452,7 +452,13 @@ function betVersion(value: unknown, path: string): void {
       "actorId",
       "approvedAt",
     ],
-    ["supersedesId", "sourceReviewId", "invalidatedAt", "invalidationReason"],
+    [
+      "supersedesId",
+      "replacementReason",
+      "sourceReviewId",
+      "invalidatedAt",
+      "invalidationReason",
+    ],
   );
   stringValue(bet.id, `${path}.id`);
   stringValue(bet.projectId, `${path}.projectId`);
@@ -469,6 +475,12 @@ function betVersion(value: unknown, path: string): void {
   canonicalIso(bet.approvedAt, `${path}.approvedAt`);
   if (hasOwn(bet, "supersedesId")) {
     stringValue(bet.supersedesId, `${path}.supersedesId`);
+  }
+  if (hasOwn(bet, "replacementReason")) {
+    enumValue(bet.replacementReason, `${path}.replacementReason`, [
+      "material_direction_change",
+      "appetite_expiry",
+    ]);
   }
   if (hasOwn(bet, "sourceReviewId")) {
     stringValue(bet.sourceReviewId, `${path}.sourceReviewId`);

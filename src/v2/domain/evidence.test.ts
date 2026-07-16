@@ -96,7 +96,7 @@ function projectWorkspace(
   const brief = buildDirectionBrief({
     id: "brief-1",
     projectId: "project-1",
-    appetiteSeconds: 86_400,
+    appetiteSeconds: 864_000,
     firstScope: [
       {
         id: "scope-1",

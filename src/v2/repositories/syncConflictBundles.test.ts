@@ -3479,6 +3479,7 @@ describe("sync conflict effect bundles", () => {
       buildDirectionBrief({
         id: `brief-recursive-${index + 1}`,
         projectId: `project-recursive-${index + 1}`,
+        appetiteSeconds: 172_800,
         createdAt: "2026-07-11T00:00:00.000Z",
         updatedAt: "2026-07-11T00:00:00.000Z",
       }),
@@ -4617,6 +4618,60 @@ describe("sync conflict effect bundles", () => {
         `Expected local Bet boundary: ${JSON.stringify(boundary.rejection)}`,
       );
     }
+    const expiryReviewId = `review:${bet.id}:expired`;
+    const createdExpiryReviewCommand = {
+      type: "create_review" as const,
+      review: {
+        id: expiryReviewId,
+        kind: "event" as const,
+        triggerKey: `${bet.id}:expired`,
+        triggerType: "bet_expired" as const,
+        affectedProjectIds: ["project-agent-sibling"],
+        affectedRecordIds: [bet.id],
+        dueAt: bet.appetiteEnd,
+      },
+    };
+    const createdExpiryReview = await executeCommand(
+      boundary.workspace,
+      createdExpiryReviewCommand,
+      {
+        commandId: "local-create-expiry-review",
+        expectedRevision: boundary.workspace.revision,
+        actorId: "system-clock",
+        actorKind: "system",
+        origin: "agent",
+        source: {
+          sourceId: "verified-system-clock",
+          verified: true,
+          capabilities: ["system_time"],
+        },
+        now: "2026-07-12T00:01:01.000Z",
+      },
+    );
+    if (!createdExpiryReview.ok) {
+      throw new Error("Expected local expiry Review create");
+    }
+    const completedExpiryReviewCommand = {
+      type: "complete_review" as const,
+      reviewId: expiryReviewId,
+      conclusion: {
+        summary: "The expired Bet requires a fresh bounded commitment.",
+        decisionCodes: ["rebet"],
+        followUpCommandIds: [],
+      },
+    };
+    const completedExpiryReview = await executeCommand(
+      createdExpiryReview.workspace,
+      completedExpiryReviewCommand,
+      humanContext(
+        "local-complete-expiry-review",
+        createdExpiryReview.workspace.revision,
+        "2026-07-12T00:01:05.000Z",
+      ),
+    );
+    if (!completedExpiryReview.ok) {
+      throw new Error("Expected local expiry Review completion");
+    }
     const localRebetCommand = {
       type: "place_bet" as const,
       projectId: "project-agent-sibling",
@@ -4624,9 +4679,13 @@ describe("sync conflict effect bundles", () => {
       start: "2026-07-12T00:01:10.000Z",
     };
     const local = await executeCommand(
-      boundary.workspace,
+      completedExpiryReview.workspace,
       localRebetCommand,
-      humanContext("local-rebet", 1, localRebetCommand.start),
+      humanContext(
+        "local-rebet",
+        completedExpiryReview.workspace.revision,
+        localRebetCommand.start,
+      ),
     );
     if (!local.ok) throw new Error("Expected local Re-bet");
 
@@ -4714,12 +4773,26 @@ describe("sync conflict effect bundles", () => {
       command: boundaryCommand,
       receipt: boundary.receipt,
     });
+    const createExpiryReviewOperation = await createOperation({
+      deviceId: "local-create-expiry-review-device",
+      operationId: "operation-local-create-expiry-review",
+      command: createdExpiryReviewCommand,
+      receipt: createdExpiryReview.receipt,
+      previousOperationHash: boundaryOperation.operationHash,
+    });
+    const completeExpiryReviewOperation = await createOperation({
+      deviceId: "local-complete-expiry-review-device",
+      operationId: "operation-local-complete-expiry-review",
+      command: completedExpiryReviewCommand,
+      receipt: completedExpiryReview.receipt,
+      previousOperationHash: createExpiryReviewOperation.operationHash,
+    });
     const localOperation = await createOperation({
       deviceId: "local-rebet-device",
       operationId: "operation-local-rebet",
       command: localRebetCommand,
       receipt: local.receipt,
-      previousOperationHash: boundaryOperation.operationHash,
+      previousOperationHash: completeExpiryReviewOperation.operationHash,
     });
     const submitOperation = await createOperation({
       deviceId: "agent-submit-device",
@@ -4761,6 +4834,8 @@ describe("sync conflict effect bundles", () => {
       });
     const [
       boundaryReplay,
+      createExpiryReviewReplay,
+      completeExpiryReviewReplay,
       localReplay,
       submitReplay,
       siblingReplay,
@@ -4768,6 +4843,8 @@ describe("sync conflict effect bundles", () => {
       forgedAcceptReplay,
     ] = await Promise.all([
       boundaryOperation,
+      createExpiryReviewOperation,
+      completeExpiryReviewOperation,
       localOperation,
       submitOperation,
       siblingOperation,
@@ -4785,6 +4862,12 @@ describe("sync conflict effect bundles", () => {
         workspaceId,
         heads: {
           [boundaryReplay.deviceId]: manifestHead(boundaryReplay),
+          [createExpiryReviewReplay.deviceId]: manifestHead(
+            createExpiryReviewReplay,
+          ),
+          [completeExpiryReviewReplay.deviceId]: manifestHead(
+            completeExpiryReviewReplay,
+          ),
           [localReplay.deviceId]: manifestHead(localReplay),
           [submitReplay.deviceId]: manifestHead(submitReplay),
           [legitimateAcceptReplay.deviceId]: manifestHead(
@@ -4793,7 +4876,14 @@ describe("sync conflict effect bundles", () => {
         },
         updatedAt: local.receipt.createdAt,
       }),
-      [boundaryReplay, localReplay, submitReplay, legitimateAcceptReplay],
+      [
+        boundaryReplay,
+        createExpiryReviewReplay,
+        completeExpiryReviewReplay,
+        localReplay,
+        submitReplay,
+        legitimateAcceptReplay,
+      ],
     );
     const [localBranch, legitimateRemoteBranch] = await Promise.all([
       authorizeSyncBranchV2({
@@ -4819,7 +4909,7 @@ describe("sync conflict effect bundles", () => {
       diff: boundary.receipt.diff,
     });
     const rebetBundle = await projectProtectedEffectBundle({
-      workspace: boundary.workspace,
+      workspace: completedExpiryReview.workspace,
       command: localRebetCommand,
       commandId: local.receipt.commandId,
       authorityRootOperationHash: localReplay.operationHash,
@@ -4930,6 +5020,12 @@ describe("sync conflict effect bundles", () => {
         workspaceId,
         heads: {
           [boundaryReplay.deviceId]: manifestHead(boundaryReplay),
+          [createExpiryReviewReplay.deviceId]: manifestHead(
+            createExpiryReviewReplay,
+          ),
+          [completeExpiryReviewReplay.deviceId]: manifestHead(
+            completeExpiryReviewReplay,
+          ),
           [localReplay.deviceId]: manifestHead(localReplay),
           [submitReplay.deviceId]: manifestHead(submitReplay),
           [legitimateAcceptReplay.deviceId]: manifestHead(
@@ -4941,6 +5037,8 @@ describe("sync conflict effect bundles", () => {
       }),
       [
         boundaryReplay,
+        createExpiryReviewReplay,
+        completeExpiryReviewReplay,
         localReplay,
         submitReplay,
         legitimateAcceptReplay,
@@ -5006,6 +5104,12 @@ describe("sync conflict effect bundles", () => {
         workspaceId,
         heads: {
           [boundaryReplay.deviceId]: manifestHead(boundaryReplay),
+          [createExpiryReviewReplay.deviceId]: manifestHead(
+            createExpiryReviewReplay,
+          ),
+          [completeExpiryReviewReplay.deviceId]: manifestHead(
+            completeExpiryReviewReplay,
+          ),
           [localReplay.deviceId]: manifestHead(localReplay),
           [submitReplay.deviceId]: manifestHead(submitReplay),
           [siblingReplay.deviceId]: manifestHead(siblingReplay),
@@ -5016,6 +5120,8 @@ describe("sync conflict effect bundles", () => {
       }),
       [
         boundaryReplay,
+        createExpiryReviewReplay,
+        completeExpiryReviewReplay,
         localReplay,
         submitReplay,
         siblingReplay,
