@@ -1,8 +1,10 @@
-import { Navigate, Route, Routes, useParams } from "react-router-dom";
+import { Navigate, Route, Routes } from "react-router-dom";
 
 import type { WorkspaceV2 } from "../domain/types";
 import { ActionsPage } from "./actions/ActionsPage";
 import { InboxPage } from "./inbox/InboxPage";
+import { ProjectWorkspacePage } from "./project/ProjectWorkspacePage";
+import { ProjectsPage } from "./projects/ProjectsPage";
 import { CapacitySetupPage } from "./setup/CapacitySetupPage";
 import { AppShell } from "./shell/AppShell";
 import { useV2Workspace } from "./state/V2WorkspaceProvider";
@@ -129,65 +131,6 @@ function CalendarRoute() {
         <Metric label="Commitment versions" value={state.workspace.dailyCommitments.length} />
         <Metric label="Committed slots" value={slots} />
         <Metric label="Open replans" value={state.workspace.replanProposals.filter(({ status }) => status === "open").length} />
-      </dl>
-    </ReadOnlyRoutePage>
-  );
-}
-
-function ProjectsRoute() {
-  const state = useV2Workspace();
-  if (state.status !== "ready") return null;
-  const visible = state.workspace.projects.filter(
-    ({ id }) => !state.workspace.visibility.archivedProjectIds.includes(id),
-  );
-  return (
-    <ReadOnlyRoutePage
-      eyebrow="Direction → Bet → Plan → Execute → Evidence → Close"
-      title="Projects"
-      summary="Projects advance through explicit gates. Future stages remain visible but locked."
-    >
-      <dl className="v2-metric-grid">
-        <Metric label="Visible projects" value={visible.length} />
-        <Metric
-          label="Active holds"
-          value={visible.reduce((count, project) => count + project.holds.length, 0)}
-          detail="Hold meaning is always shown in text, never by color alone."
-        />
-        <Metric label="Closed" value={state.workspace.projects.filter(({ stage }) => stage === "closed").length} />
-      </dl>
-    </ReadOnlyRoutePage>
-  );
-}
-
-function ProjectStageRoute() {
-  const { projectId, stage } = useParams();
-  const state = useV2Workspace();
-  if (state.status !== "ready") return null;
-  const project = state.workspace.projects.find(({ id }) => id === projectId);
-  if (project === undefined) {
-    return (
-      <ReadOnlyRoutePage
-        eyebrow="Project lifecycle"
-        title="Project not found"
-        summary="This project identity is not present in the current Workspace revision."
-      >
-        <p className="v2-inline-notice">
-          Return to Projects and choose a project from the current portfolio.
-        </p>
-      </ReadOnlyRoutePage>
-    );
-  }
-
-  return (
-    <ReadOnlyRoutePage
-      eyebrow={`Project · ${project.stage.replace(/_/g, " ")}`}
-      title={project.name}
-      summary={`Viewing the ${stage ?? project.stage} stage. The stored lifecycle stage is ${project.stage.replace(/_/g, " ")}.`}
-    >
-      <dl className="v2-metric-grid">
-        <Metric label="Current stage" value={project.stage.replace(/_/g, " ")} />
-        <Metric label="Active holds" value={project.holds.length} />
-        <Metric label="Priority" value={project.priority} />
       </dl>
     </ReadOnlyRoutePage>
   );
@@ -326,8 +269,8 @@ function ReadyRoutes() {
         <Route path="/inbox/actions" element={<ActionsPage />} />
         <Route path="/today" element={<TodayRoute />} />
         <Route path="/today/calendar" element={<CalendarRoute />} />
-        <Route path="/projects" element={<ProjectsRoute />} />
-        <Route path="/projects/:projectId/:stage" element={<ProjectStageRoute />} />
+        <Route path="/projects" element={<ProjectsPage />} />
+        <Route path="/projects/:projectId/:stage" element={<ProjectWorkspacePage />} />
         <Route path="/review" element={<ReviewRoute />} />
         <Route path="/settings" element={<SettingsRoute />} />
         <Route path="/settings/automation" element={<AutomationRoute />} />

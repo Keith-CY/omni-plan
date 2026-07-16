@@ -92,4 +92,28 @@ describe("V2 target sizing", () => {
     expect(contrast(token("--v2-muted"), paper)).toBeGreaterThanOrEqual(4.5);
     expect(contrast(token("--v2-signal-text"), paper)).toBeGreaterThanOrEqual(4.5);
   });
+
+  it("keeps Project links and disclosure summaries at least 44 CSS pixels high", () => {
+    const { container } = render(
+      <MemoryRouter>
+        <>
+          <style>{V2_CSS}</style>
+          <a className="v2-project-header__back" href="/projects">Back to Projects</a>
+          <article className="v2-project-card">
+            <h2><a href="/projects/project-1/direction">Project name</a></h2>
+            <details className="v2-project-diagnostics"><summary>Project record</summary></details>
+            <div className="v2-hold-list"><details><summary>Hold record</summary></details></div>
+            <div className="v2-project-next-action"><details><summary>Gate detail</summary></details></div>
+            <div className="v2-lifecycle-step"><details><summary>Unlock command</summary></details></div>
+          </article>
+        </>
+      </MemoryRouter>,
+    );
+
+    const targets = [...container.querySelectorAll<HTMLElement>("a, summary")];
+    expect(targets).toHaveLength(6);
+    for (const target of targets) {
+      expect(minimumTargetSize(target), target.outerHTML).toBeGreaterThanOrEqual(44);
+    }
+  });
 });
