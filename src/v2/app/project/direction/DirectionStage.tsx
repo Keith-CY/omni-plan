@@ -14,6 +14,7 @@ import type {
 } from "../../../domain/commands";
 import {
   directionCompleteness,
+  isDirectionComplete,
   isMaterialDirectionChange,
 } from "../../../domain/direction";
 import { selectProjectLifecycle } from "../../../domain/selectors";
@@ -165,6 +166,24 @@ function unavailableReason(workspace: WorkspaceV2, projectId: string): string | 
   );
   if (briefs.length !== 1 || briefs[0].projectId !== project.id) {
     return `Project ${project.id} does not resolve to exactly one same-project active Direction brief.`;
+  }
+  const brief = briefs[0];
+  const beforeBet = project.stage === "direction" || project.stage === "awaiting_bet";
+  const projectBetHistory = workspace.bets.filter(
+    ({ projectId: ownerId }) => ownerId === project.id,
+  );
+  if (
+    beforeBet &&
+    (project.activeBetId !== undefined || projectBetHistory.length > 0)
+  ) {
+    return "A Project before Bet cannot retain active Bet state or Bet history.";
+  }
+  const directionComplete = isDirectionComplete(brief);
+  if (project.stage === "direction" && directionComplete) {
+    return "A complete Direction must advance to awaiting Bet before it can be revised.";
+  }
+  if (project.stage === "awaiting_bet" && !directionComplete) {
+    return "A Project awaiting Bet must retain all six complete Direction decisions.";
   }
   return undefined;
 }
@@ -373,7 +392,7 @@ function DirectionEditor({ workspace, project, brief, dispatch }: DirectionEdito
     event.preventDefault();
     if (!advancedDirty || otherDecisionDirty || busy) return;
     void prepareDirectionSave(
-      { ...persisted, advancedNotes: candidate.advancedNotes },
+      { ...toDraft(brief), advancedNotes: candidate.advancedNotes },
       advancedSaveRef.current,
     );
   }

@@ -15,6 +15,7 @@ import {
   type CommandResult,
   type V2Command,
 } from "../../../domain/commands";
+import { isDirectionComplete } from "../../../domain/direction";
 import type {
   BetVersion,
   DirectionBrief,
@@ -61,7 +62,7 @@ function directionWorkspace(brief = emptyBrief()): WorkspaceV2 {
         id: PROJECT_ID,
         name: "Make planning humane",
         activeDirectionBriefId: brief.id,
-        stage: "direction",
+        stage: isDirectionComplete(brief) ? "awaiting_bet" : "direction",
         createdAt: brief.createdAt,
         updatedAt: brief.updatedAt,
       }),
@@ -228,6 +229,20 @@ describe("DirectionStage", () => {
       await screen.findByRole("heading", { name: "Direction unavailable" }),
     ).toBeVisible();
     expect(screen.getByRole("alert")).toBeVisible();
+    expect(screen.queryByRole("textbox")).toBeNull();
+  });
+
+  it("fails closed when a pre-Bet stage still references an active Bet", async () => {
+    const source = executingWorkspace();
+    source.projects[0].stage = "awaiting_bet";
+    renderDirection(directionRuntime(source));
+
+    expect(
+      await screen.findByRole("heading", { name: "Direction unavailable" }),
+    ).toBeVisible();
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "A Project before Bet cannot retain active Bet state or Bet history.",
+    );
     expect(screen.queryByRole("textbox")).toBeNull();
   });
 
@@ -536,6 +551,31 @@ describe("DirectionStage", () => {
     const command = harness.commands[1];
     if (command.type !== "update_direction") throw new Error("Expected Direction command");
     expect(command.brief.id).toBe(nextBriefId);
+  });
+
+  it("preserves stored material whitespace when saving only advanced notes", async () => {
+    const user = userEvent.setup();
+    const source = executingWorkspace();
+    const audience = "  Busy founders cannot see the next bounded decision.  ";
+    source.directionBriefs[0].audienceAndProblem = audience;
+    source.bets[0].briefSnapshot.audienceAndProblem = audience;
+    const harness = renderDirection(directionRuntime(source));
+
+    await screen.findByText("6 of 6 decisions complete");
+    await user.click(screen.getByText("Advanced notes (optional)"));
+    await user.type(
+      screen.getByRole("textbox", { name: "Advanced notes" }),
+      "Editorial context only.",
+    );
+    await user.click(screen.getByRole("button", { name: "Save advanced notes" }));
+
+    await waitFor(() => expect(harness.commands).toHaveLength(1));
+    const command = harness.commands[0];
+    if (command.type !== "update_direction") throw new Error("Expected Direction command");
+    expect(command.brief.audienceAndProblem).toBe(audience);
+    expect(screen.queryByRole("dialog", { name: "Confirm Direction change" })).toBeNull();
+    expect(harness.current().bets[0].invalidatedAt).toBeUndefined();
+    expect(harness.current().projects[0].holds).toEqual([]);
   });
 
   it("renames the Project through metadata without warning or changing the Bet", async () => {
