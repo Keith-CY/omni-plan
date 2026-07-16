@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { Route, Routes } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
 
@@ -36,6 +37,12 @@ function workspace(stage: "direction" | "awaiting_bet" = "direction"): Workspace
       buildDirectionBrief({
         id: BRIEF_ID,
         projectId: PROJECT_ID,
+        appetiteSeconds: stage === "awaiting_bet" ? 14_400 : 0,
+        firstScope: stage === "awaiting_bet" ? [{
+          id: "scope:guided-shell",
+          title: "Guided project lifecycle",
+          description: "Lead one bounded result through Direction and Bet.",
+        }] : [],
         createdAt: project.createdAt,
         updatedAt: project.updatedAt,
       }),
@@ -154,8 +161,8 @@ describe("ProjectWorkspacePage", () => {
     expect(within(lifecycle).getByText("Commit project work to Today before execution.")).toBeVisible();
     expect(within(lifecycle).getByText("Request validation before reviewing project evidence.")).toBeVisible();
     expect(within(lifecycle).getByText("Satisfy every validation requirement before Close.")).toBeVisible();
-    expect(screen.getByRole("heading", { name: "Direction workspace" })).toBeVisible();
-    expect(screen.queryByRole("textbox")).toBeNull();
+    expect(screen.getByRole("heading", { name: "Direction", level: 2 })).toBeVisible();
+    expect(screen.getByRole("spinbutton", { name: "Appetite minutes" })).toBeVisible();
   });
 
   it.each([
@@ -191,12 +198,29 @@ describe("ProjectWorkspacePage", () => {
     );
   });
 
-  it("renders completed-stage deep links as immutable history", async () => {
-    renderWorkspace(`/projects/${PROJECT_ID}/direction`, workspace("awaiting_bet"));
+  it("renders completed-stage history links as immutable history with an explicit revision path", async () => {
+    renderWorkspace(
+      `/projects/${PROJECT_ID}/direction?view=history`,
+      workspace("awaiting_bet"),
+    );
 
     const history = await screen.findByRole("region", { name: "Direction immutable history" });
     expect(within(history).getByText(BRIEF_ID)).toBeVisible();
     expect(within(history).queryByRole("textbox")).toBeNull();
+    expect(within(history).getByRole("link", { name: "Revise Direction" })).toHaveAttribute(
+      "href",
+      `/projects/${PROJECT_ID}/direction`,
+    );
+  });
+
+  it("opens the guarded Direction editor when revising a completed Direction", async () => {
+    const user = userEvent.setup();
+    renderWorkspace(`/projects/${PROJECT_ID}/direction`, workspace("awaiting_bet"));
+
+    expect(await screen.findByRole("heading", { name: "Direction", level: 2 })).toBeVisible();
+    expect(screen.getByText("6 of 6 decisions complete")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Audience and problem" }));
+    expect(screen.getByRole("textbox", { name: "Audience and problem" })).toBeVisible();
   });
 
   it("opens the Bet decision surface for a required Re-bet instead of swallowing it as history", async () => {
@@ -244,6 +268,6 @@ describe("ProjectWorkspacePage", () => {
   it("redirects an unknown lifecycle segment to Direction", async () => {
     renderWorkspace(`/projects/${PROJECT_ID}/raw-status`);
 
-    expect(await screen.findByRole("heading", { name: "Direction workspace" })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "Direction", level: 2 })).toBeVisible();
   });
 });

@@ -8,6 +8,7 @@ import {
   type UserLifecycleStage,
 } from "../../domain/selectors";
 import { useV2Workspace } from "../state/V2WorkspaceProvider";
+import { DirectionStage } from "./direction/DirectionStage";
 import { LifecycleNav, USER_LIFECYCLE_STAGES, USER_STAGE_LABELS } from "./LifecycleNav";
 import { LockedStagePanel } from "./LockedStagePanel";
 import { ProjectHeader } from "./ProjectHeader";
@@ -29,7 +30,15 @@ function CurrentStageShell({ stage }: { stage: UserLifecycleStage }) {
   );
 }
 
-function StageHistory({ step }: { step: ProjectLifecycleStep }) {
+function StageHistory({
+  step,
+  projectId,
+  allowDirectionRevision,
+}: {
+  step: ProjectLifecycleStep;
+  projectId: string;
+  allowDirectionRevision: boolean;
+}) {
   return (
     <section
       className="v2-stage-history"
@@ -45,6 +54,14 @@ function StageHistory({ step }: { step: ProjectLifecycleStep }) {
           {step.historyRecordIds.map((recordId) => <li key={recordId}><code>{recordId}</code></li>)}
         </ul>
       )}
+      {step.stage === "direction" && allowDirectionRevision ? (
+        <Link
+          className="v2-stage-history__action"
+          to={`/projects/${projectId}/direction`}
+        >
+          Revise Direction
+        </Link>
+      ) : null}
     </section>
   );
 }
@@ -120,6 +137,11 @@ export function ProjectWorkspacePage() {
     searchParams.get("view") !== "history" &&
     recommended?.projectId === projectId &&
     recommended.permittedNextCommand === "place_bet";
+  const directionHistoryRequested =
+    stage === "direction" &&
+    step.status === "completed" &&
+    searchParams.get("view") === "history";
+  const showDirectionEditor = stage === "direction" && !directionHistoryRequested;
 
   return (
     <article className="v2-project-workspace v2-route-page">
@@ -132,10 +154,18 @@ export function ProjectWorkspacePage() {
             reason={lock.reason}
             nextCommand={lock.permittedNextCommand}
           />
+        ) : showDirectionEditor ? (
+          <DirectionStage projectId={projectId} />
         ) : betDecisionRequired ? (
           <CurrentStageShell stage="bet" />
         ) : step.status === "completed" ? (
-          <StageHistory step={step} />
+          <StageHistory
+            step={step}
+            projectId={projectId}
+            allowDirectionRevision={
+              project.stage !== "closing" && project.stage !== "closed"
+            }
+          />
         ) : (
           <CurrentStageShell stage={stage} />
         )}

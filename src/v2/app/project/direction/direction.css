@@ -1,0 +1,252 @@
+.v2-direction-stage {
+  display: grid;
+  gap: 26px;
+}
+
+.v2-direction-stage > header,
+.v2-direction-decision__actions {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 24px;
+}
+
+.v2-direction-stage h2,
+.v2-direction-unavailable h2,
+.v2-direction-readonly h2,
+.v2-direction-confirmation h2 {
+  margin: 0;
+  font-family: "Iowan Old Style", Charter, Georgia, serif;
+  font-size: clamp(32px, 5vw, 48px);
+  font-weight: 500;
+}
+
+.v2-direction-completeness {
+  display: grid;
+  justify-items: end;
+  margin: 0;
+  color: var(--v2-muted);
+  font-size: 12px;
+  text-transform: uppercase;
+}
+
+.v2-direction-completeness strong {
+  color: var(--v2-signal-text);
+  font-family: ui-monospace, "SFMono-Regular", monospace;
+  font-size: 18px;
+}
+
+.v2-direction-stepper ol {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(118px, 1fr));
+  gap: 1px;
+  margin: 0;
+  padding: 1px;
+  overflow-x: auto;
+  background: var(--v2-rule);
+  list-style: none;
+}
+
+.v2-direction-stepper button {
+  display: grid;
+  width: 100%;
+  min-height: 92px;
+  align-content: space-between;
+  justify-items: start;
+  gap: 5px;
+  padding: 14px;
+  color: var(--v2-ink);
+  background: var(--v2-sheet);
+  border: 0;
+  text-align: left;
+}
+
+.v2-direction-stepper button[aria-current="step"] {
+  color: white;
+  background: var(--v2-dark);
+  box-shadow: inset 0 5px 0 var(--v2-signal);
+}
+
+.v2-direction-stepper button[data-complete="true"]:not([aria-current="step"]) {
+  box-shadow: inset 0 5px 0 var(--v2-focus);
+}
+
+.v2-direction-stepper button:disabled {
+  color: #717975;
+  background: #e8e3d9;
+}
+
+.v2-direction-stepper button > span,
+.v2-direction-stepper button > small {
+  color: inherit;
+  font-family: ui-monospace, "SFMono-Regular", monospace;
+  font-size: 9px;
+  text-transform: uppercase;
+}
+
+.v2-direction-decision,
+.v2-direction-advanced,
+.v2-direction-metadata,
+.v2-direction-unavailable,
+.v2-direction-readonly {
+  padding: clamp(24px, 4vw, 38px);
+  background: var(--v2-sheet);
+  border: 1px solid var(--v2-rule);
+  box-shadow: 7px 7px 0 rgba(20, 37, 34, 0.08);
+}
+
+.v2-direction-decision fieldset,
+.v2-direction-advanced fieldset,
+.v2-direction-metadata fieldset {
+  display: grid;
+  min-width: 0;
+  gap: 20px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.v2-direction-decision h3 {
+  margin: 0;
+  font-family: "Iowan Old Style", Charter, Georgia, serif;
+  font-size: clamp(28px, 4vw, 40px);
+  font-weight: 500;
+}
+
+.v2-direction-field {
+  display: grid;
+  max-width: 720px;
+  gap: 8px;
+  color: var(--v2-muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.v2-direction-field--short { max-width: 430px; }
+
+.v2-direction-field input,
+.v2-direction-field textarea {
+  width: 100%;
+  min-height: 44px;
+  padding: 11px 12px;
+  color: var(--v2-ink);
+  background: var(--v2-paper);
+  border: 1px solid var(--v2-rule);
+  border-radius: 0;
+  resize: vertical;
+}
+
+.v2-direction-validation {
+  padding: 11px 13px;
+  color: #852e19;
+  background: #fff3ed;
+  border-left: 4px solid var(--v2-signal-text);
+}
+
+.v2-direction-stage button,
+.v2-direction-confirmation button {
+  min-height: 44px;
+  padding: 9px 16px;
+  color: var(--v2-ink);
+  background: var(--v2-sheet);
+  border: 1px solid currentColor;
+}
+
+.v2-stage-history__action {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  margin-top: 20px;
+  padding: 0 15px;
+  color: white;
+  background: var(--v2-signal-text);
+  border: 1px solid var(--v2-signal-text);
+  text-decoration: none;
+}
+
+.v2-direction-stage button[type="submit"],
+.v2-direction-confirmation .v2-button--primary {
+  color: white;
+  background: var(--v2-signal-text);
+  border-color: var(--v2-signal-text);
+}
+
+.v2-direction-stage button:disabled,
+.v2-direction-confirmation button:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+
+.v2-direction-decision__actions {
+  align-items: center;
+  padding-top: 18px;
+  border-top: 1px solid var(--v2-rule);
+}
+
+.v2-direction-decision__actions p { margin: 0; color: var(--v2-muted); }
+
+.v2-direction-scope-editor,
+.v2-direction-scope-editor ol {
+  display: grid;
+  gap: 14px;
+  margin: 0;
+  padding: 0;
+}
+
+.v2-direction-scope-editor ol { list-style: none; }
+
+.v2-direction-scope-editor li {
+  display: grid;
+  gap: 14px;
+  padding: 18px;
+  background: var(--v2-paper);
+  border: 1px solid var(--v2-rule);
+}
+
+.v2-direction-advanced > summary,
+.v2-direction-metadata > summary {
+  min-height: 44px;
+  cursor: pointer;
+  font-family: "Iowan Old Style", Charter, Georgia, serif;
+  font-size: 22px;
+}
+
+.v2-direction-advanced form,
+.v2-direction-metadata form { margin-top: 18px; }
+
+.v2-direction-confirmation {
+  width: min(720px, calc(100vw - 32px));
+  max-height: calc(100dvh - 48px);
+  padding: clamp(24px, 5vw, 42px);
+  overflow: auto;
+  background: var(--v2-sheet);
+  border: 1px solid var(--v2-rule);
+  box-shadow: 10px 10px 0 rgba(7, 17, 15, 0.22);
+}
+
+.v2-direction-change-list { display: grid; gap: 12px; margin: 24px 0; }
+
+.v2-direction-change-list > div {
+  display: grid;
+  grid-template-columns: 110px minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px;
+  padding: 14px;
+  background: var(--v2-paper);
+  border: 1px solid var(--v2-rule);
+}
+
+.v2-direction-change-list dd { margin: 0; overflow-wrap: anywhere; }
+.v2-direction-change-list dd span {
+  display: block;
+  color: var(--v2-muted);
+  font-size: 9px;
+  text-transform: uppercase;
+}
+
+@media (max-width: 760px) {
+  .v2-direction-stage > header,
+  .v2-direction-decision__actions { align-items: stretch; flex-direction: column; }
+  .v2-direction-completeness { justify-items: start; }
+  .v2-direction-stepper ol { grid-template-columns: repeat(6, minmax(150px, 1fr)); }
+  .v2-direction-change-list > div { grid-template-columns: 1fr; }
+}
