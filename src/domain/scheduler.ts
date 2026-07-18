@@ -10,6 +10,7 @@ import {
   type WorkItem
 } from "./types";
 import { addSeconds, maxIso, minIso, secondsBetween } from "./time";
+import { isExecutionWorkItem } from "./recurring";
 
 function isValidIso(value: unknown): value is string {
   return typeof value === "string" && Number.isFinite(new Date(value).getTime());
@@ -147,7 +148,7 @@ function dependencyBound(
 }
 
 export function scheduleProject(project: Project, allItems: WorkItem[], allDependencies: Dependency[]): ScheduleResult {
-  const items = allItems.filter((item) => item.projectId === project.id);
+  const items = allItems.filter((item) => item.projectId === project.id && isExecutionWorkItem(item));
   const dependencies = allDependencies.filter((dependency) => dependency.projectId === project.id);
   const byId = itemMap(items);
   const diagnostics: ScheduleResult["diagnostics"] = [];

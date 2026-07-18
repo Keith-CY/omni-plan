@@ -96,4 +96,48 @@ describe("scheduler", () => {
     expect(proposals.every((proposal) => proposal.beforeStart.slice(0, 10) === proposal.id.split("-").slice(-3).join("-"))).toBe(true);
     expect(proposals[0].reason).toContain("over capacity");
   });
+
+  it("keeps automatic recurring items and their assignments out of planning", () => {
+    const project = projects[0];
+    const automatic = {
+      ...workItems.find((item) => item.id === "w-domain")!,
+      id: "w-automatic-transfer",
+      projectId: project.id,
+      parentId: undefined,
+      title: "Automatic transfer",
+      assignmentIds: [{ resourceId: resources[0].id, attention: "deep" as const, effortSeconds: 100 * 3600 }],
+      repeatRule: {
+        id: "repeat-auto-transfer",
+        cadence: "monthly" as const,
+        count: 12,
+        startMode: "fixed-time" as const,
+        startAt: "2026-07-01T09:00:00.000Z",
+        executionMode: "automatic" as const,
+        endMode: "never" as const,
+        automaticDurationSeconds: 0
+      }
+    };
+    const manual = {
+      ...automatic,
+      id: "w-manual-repeat",
+      title: "Manual recurring review",
+      assignmentIds: [],
+      repeatRule: { ...automatic.repeatRule, id: "repeat-manual", executionMode: "manual" as const }
+    };
+    const autoDependency = {
+      id: "d-auto-domain",
+      projectId: project.id,
+      fromId: automatic.id,
+      toId: "w-domain",
+      type: "FS" as const,
+      lagSeconds: 0
+    };
+
+    const result = scheduleProject(project, [...workItems, automatic, manual], [...dependencies, autoDependency]);
+    const overloads = detectCrossProjectOverload([result], resources);
+
+    expect(result.items.some((item) => item.workItem.id === automatic.id)).toBe(false);
+    expect(result.items.some((item) => item.workItem.id === manual.id)).toBe(true);
+    expect(overloads.some((row) => row.plannedSeconds >= 100 * 3600)).toBe(false);
+  });
 });

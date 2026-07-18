@@ -21,12 +21,12 @@ export class BrowserWorkspaceRepository implements WorkspaceRepository {
   }
 
   exportWorkspace(snapshot: WorkspaceSnapshot): string {
-    return JSON.stringify({ schemaVersion: 1, exportedAt: new Date().toISOString(), snapshot: normalizeWorkspaceSnapshot(snapshot) }, null, 2);
+    return JSON.stringify({ schemaVersion: 2, exportedAt: new Date().toISOString(), snapshot: normalizeWorkspaceSnapshot(snapshot) }, null, 2);
   }
 
   importWorkspace(payload: string): WorkspaceSnapshot {
     const parsed = JSON.parse(payload) as { schemaVersion: number; snapshot: WorkspaceSnapshot };
-    if (parsed.schemaVersion !== 1) {
+    if (parsed.schemaVersion !== 1 && parsed.schemaVersion !== 2) {
       throw new Error(`Unsupported workspace schema version ${parsed.schemaVersion}`);
     }
     return normalizeWorkspaceSnapshot(parsed.snapshot);

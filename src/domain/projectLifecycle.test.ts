@@ -15,6 +15,32 @@ describe("project lifecycle cleanup", () => {
     expect(removeEmptyProjectFromWorkspace(workspace, "p-omni")).toBeUndefined();
   });
 
+  it("does not delete a project referenced by immutable occurrence history", () => {
+    const workspace = cloneWorkspace();
+    workspace.workItems = workspace.workItems.filter((item) => item.projectId !== "p-omni");
+    workspace.recurringOccurrences.push({
+      id: "occ-history",
+      ruleId: "repeat-history",
+      workItemId: "w-moved-away",
+      projectId: "p-omni",
+      occurrenceIndex: 1,
+      scheduledStart: "2026-07-01T00:00:00.000Z",
+      scheduledFinish: "2026-07-01T00:00:00.000Z",
+      start: "2026-07-01T00:00:00.000Z",
+      finish: "2026-07-01T00:00:00.000Z",
+      status: "occurred",
+      title: "Historical automation",
+      description: "",
+      createdAt: "2026-07-01T00:00:00.000Z",
+      updatedAt: "2026-07-01T00:00:00.000Z",
+      settledAt: "2026-07-01T00:00:00.000Z",
+      settlementSource: "on-time"
+    });
+
+    expect(canDeleteEmptyProject(workspace, "p-omni")).toBe(false);
+    expect(removeEmptyProjectFromWorkspace(workspace, "p-omni")).toBeUndefined();
+  });
+
   it("removes an empty project and its project-level records", () => {
     const workspace = cloneWorkspace();
     workspace.projects.push({

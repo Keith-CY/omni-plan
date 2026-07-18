@@ -9,6 +9,7 @@ import {
   ChevronDown,
   ChevronUp,
   CheckCircle2,
+  CircleSlash2,
   ClipboardCheck,
   FileDown,
   FileJson,
@@ -42,7 +43,24 @@ import { exportProjectMarkdown, exportScheduleCsv } from "./domain/exports";
 import { fetchPullRequestEvidence, githubPrToEvidence } from "./domain/github";
 import { runMonteCarlo } from "./domain/monteCarlo";
 import { calculateProjectHealth } from "./domain/portfolio";
-import { generateRecurringOccurrences, repeatCadenceLabel, repeatStartModeLabel } from "./domain/recurring";
+import {
+  applyAutomaticOccurrenceAction,
+  applyAutomaticRuleEditBoundary,
+  changeRecurringWorkspaceTimeZone,
+  generateRecurringOccurrences,
+  isAutomaticRecurringWorkItem,
+  nextRecurringOccurrence,
+  projectRecurringOccurrences,
+  reconcileAutomaticOccurrences,
+  repeatCadenceLabel,
+  repeatEndMode,
+  repeatExecutionMode,
+  repeatStartModeLabel,
+  selectAutomaticOccurrenceHistory,
+  selectAutomaticReminderOccurrences,
+  type AutomaticOccurrenceAction,
+  type RecurringOccurrence
+} from "./domain/recurring";
 import {
   isProjectArchived,
   projectLifecycleLabel,
@@ -117,8 +135,12 @@ import type {
   ProjectMode,
   ProjectStatus,
   RepeatCadenceKind,
+  RepeatEndMode,
+  RepeatExecutionMode,
   RepeatRule,
   RepeatStartMode,
+  RecurringOccurrenceRecord,
+  Resource,
   ScheduleResult,
   ScheduledItem,
   ShapeUpAppetiteKind,
@@ -129,7 +151,7 @@ import type {
   WorkspaceSnapshot
 } from "./domain/types";
 import { createEmptyWorkspace } from "./domain/workspace";
-import { addSeconds, secondsBetween, startOfDay } from "./domain/time";
+import { addSeconds, secondsBetween, startOfDay, zonedDateKey, zonedDateTimeToIso, zonedTimeKey } from "./domain/time";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -157,6 +179,16 @@ const projectStatuses = selectableProjectStatuses;
 const auditActions: AuditAction[] = ["Accelerate", "Continue", "Narrow", "Pivot", "Stop"];
 const evidenceKinds: EvidenceKind[] = ["note", "commit", "pr", "ci", "doc", "screenshot", "release", "feedback", "metric", "email", "calendar", "minutes", "booking"];
 const sidebarCollapsedStorageKey = "omni-plan-sidebar-collapsed";
+
+function canonicalTimeZone(value: string): string | undefined {
+  const candidate = value.trim();
+  if (!candidate) return undefined;
+  try {
+    return new Intl.DateTimeFormat("en", { timeZone: candidate }).resolvedOptions().timeZone;
+  } catch {
+    return undefined;
+  }
+}
 
 function readSidebarCollapsedPreference() {
   if (typeof window === "undefined") return false;
@@ -204,6 +236,7 @@ interface ProjectDetailsPatch {
 
 interface WorkItemCreateValues {
   title: string;
+  description: string;
   kind: WorkItemKind;
   parentId?: string;
   durationDays: number;
@@ -225,12 +258,20 @@ interface WorkItemMoveValues {
 
 interface RepeatRuleDraft {
   enabled: boolean;
+  executionMode: RepeatExecutionMode;
   cadence: RepeatCadenceKind;
   everyDays: number;
   count: number;
+  endMode: RepeatEndMode;
+  endDate: string;
   startMode: RepeatStartMode;
   startDate: string;
   startTime: string;
+  reminderEnabled: boolean;
+  reminderLeadValue: number;
+  reminderLeadUnit: "minutes" | "hours" | "days";
+  displayDurationMinutes: number;
+  description: string;
 }
 
 interface EvidenceCreateValues {
@@ -268,6 +309,9 @@ interface CalendarEvent {
   href: string;
   critical?: boolean;
   repeatLabel?: string;
+  automatic?: boolean;
+  status?: RecurringOccurrence["status"];
+  occurrence?: RecurringOccurrence;
 }
 
 interface CalendarRecurringRule {
@@ -281,6 +325,14 @@ interface CalendarRecurringRule {
   nextStart: string;
   nextFinish: string;
   href: string;
+  automatic: boolean;
+  stopped: boolean;
+}
+
+interface AutomaticOccurrenceHandlers {
+  onOccurrenceSkip: (occurrence: RecurringOccurrence) => void;
+  onOccurrenceReschedule: (occurrence: RecurringOccurrence, start: string, finish: string) => void;
+  onOccurrenceException: (occurrence: RecurringOccurrence, note: string, dueAt?: string, resourceId?: string) => void;
 }
 
 interface RouteState {
@@ -291,6 +343,14 @@ interface RouteState {
 
 function hashForRoute(route: RouteState): string {
   return `#${pathForRoute(route)}`;
+}
+
+function recurringRouteTarget(workItemId?: string): string {
+  return workItemId ? `recurring:${workItemId}` : "recurring";
+}
+
+function recurringTargetWorkItemId(target?: string): string | undefined {
+  return target?.startsWith("recurring:") ? target.slice("recurring:".length) || undefined : undefined;
 }
 
 function pathForRoute(route: RouteState): string {
@@ -404,27 +464,26 @@ function timePart(iso?: string) {
   return iso?.slice(11, 16) || "09:00";
 }
 
-function monthStartIso(iso: string) {
-  const date = new Date(iso);
-  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1)).toISOString();
+function monthStartKey(iso: string, timeZone: string) {
+  return `${zonedDateKey(iso, timeZone).slice(0, 7)}-01`;
 }
 
-function addUtcMonths(iso: string, months: number) {
-  const date = new Date(iso);
-  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + months, 1)).toISOString();
+function addCalendarMonths(dateKey: string, months: number) {
+  const date = new Date(`${dateKey}T00:00:00.000Z`);
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + months, 1)).toISOString().slice(0, 10);
 }
 
-function monthLabel(iso: string) {
-  return new Intl.DateTimeFormat("en", { month: "long", timeZone: "UTC", year: "numeric" }).format(new Date(iso));
+function monthLabel(dateKey: string) {
+  return new Intl.DateTimeFormat("en", { month: "long", timeZone: "UTC", year: "numeric" }).format(new Date(`${dateKey}T00:00:00.000Z`));
 }
 
 function buildCalendarDays(monthStart: string) {
-  const start = new Date(monthStart);
-  const gridStart = addSeconds(monthStart, -start.getUTCDay() * daySeconds);
+  const start = new Date(`${monthStart}T00:00:00.000Z`);
+  const gridStart = addSeconds(start.toISOString(), -start.getUTCDay() * daySeconds);
   return Array.from({ length: 42 }, (_, index) => addSeconds(gridStart, index * daySeconds).slice(0, 10));
 }
 
-function isSameUtcMonth(day: string, monthStart: string) {
+function isSameCalendarMonth(day: string, monthStart: string) {
   return day.slice(0, 7) === monthStart.slice(0, 7);
 }
 
@@ -443,29 +502,104 @@ function nextOutline(workItems: WorkItem[], projectId: string, parentId?: string
   return `${parent?.outline ?? "1"}.${siblings.length + 1}`;
 }
 
-function repeatRuleFromDraft(draft: RepeatRuleDraft): RepeatRule | undefined {
+function repeatRuleFromDraft(
+  draft: RepeatRuleDraft,
+  item: WorkItem | undefined,
+  timeZone: string,
+  currentTime: string
+): RepeatRule | undefined {
   if (!draft.enabled) return undefined;
-  return {
+  const executionMode = draft.executionMode;
+  const previousRule = item?.repeatRule;
+  let startAt: string;
+  let until: string | undefined;
+  try {
+    startAt = zonedDateTimeToIso(draft.startDate, draft.startTime, timeZone);
+    until = draft.endMode === "until" ? zonedDateTimeToIso(draft.endDate, "23:59", timeZone) : undefined;
+  } catch {
+    return undefined;
+  }
+  const reminderMultiplier = draft.reminderLeadUnit === "days" ? daySeconds : draft.reminderLeadUnit === "hours" ? 3600 : 60;
+  const nextRule: RepeatRule = {
+    id: previousRule?.id ?? `repeat-${item?.id ?? "work-item"}`,
     cadence: draft.cadence,
     everyDays: draft.cadence === "every-n-days" ? Math.max(1, Math.round(draft.everyDays || 1)) : undefined,
     count: Math.max(1, Math.round(draft.count || 1)),
-    startMode: draft.startMode,
-    startAt: toUtcDateTime(draft.startDate, draft.startTime)
+    startMode: executionMode === "automatic" ? "fixed-time" : draft.startMode,
+    startAt,
+    executionMode,
+    endMode: draft.endMode,
+    until,
+    reminderLeadSeconds: executionMode === "automatic" && draft.reminderEnabled
+      ? Math.max(60, Math.round(draft.reminderLeadValue || 1) * reminderMultiplier)
+      : undefined,
+    automaticDurationSeconds: executionMode === "automatic" ? Math.max(0, Math.round(draft.displayDurationMinutes || 0) * 60) : undefined,
+    stoppedAt: executionMode === "automatic" ? previousRule?.stoppedAt : undefined
   };
+  return applyAutomaticRuleEditBoundary(previousRule, nextRule, currentTime);
 }
 
-function draftFromRepeatRule(item?: WorkItem, fallbackStart = now): RepeatRuleDraft {
+function draftFromRepeatRule(item: WorkItem | undefined, fallbackStart = now, timeZone = "UTC"): RepeatRuleDraft {
   const rule = item?.repeatRule;
   const startAt = rule?.startAt ?? item?.constraint?.fixedStart ?? item?.constraint?.noEarlierThan ?? fallbackStart;
+  const executionMode = repeatExecutionMode(rule);
+  const reminderSeconds = rule?.reminderLeadSeconds ?? daySeconds;
+  const reminderLeadUnit = reminderSeconds % daySeconds === 0 ? "days" : reminderSeconds % 3600 === 0 ? "hours" : "minutes";
+  const reminderDivisor = reminderLeadUnit === "days" ? daySeconds : reminderLeadUnit === "hours" ? 3600 : 60;
   return {
     enabled: Boolean(rule),
+    executionMode,
     cadence: rule?.cadence ?? "every-n-days",
     everyDays: Math.max(1, Math.round(rule?.everyDays ?? 7)),
     count: Math.max(1, Math.round(rule?.count ?? 6)),
-    startMode: rule?.startMode ?? "fixed-time",
-    startDate: datePart(startAt),
-    startTime: timePart(startAt)
+    endMode: repeatEndMode(rule),
+    endDate: rule?.until ? zonedDateKey(rule.until, timeZone) : zonedDateKey(startAt, timeZone),
+    startMode: executionMode === "automatic" ? "fixed-time" : rule?.startMode ?? "fixed-time",
+    startDate: zonedDateKey(startAt, timeZone),
+    startTime: zonedTimeKey(startAt, timeZone),
+    reminderEnabled: Boolean(rule?.reminderLeadSeconds),
+    reminderLeadValue: Math.max(1, Math.round(reminderSeconds / reminderDivisor)),
+    reminderLeadUnit,
+    displayDurationMinutes: Math.max(0, Math.round((rule?.automaticDurationSeconds ?? 0) / 60)),
+    description: item?.description ?? ""
   };
+}
+
+function repeatRuleDraftFingerprint(draft: RepeatRuleDraft) {
+  const base = {
+    enabled: draft.enabled,
+    description: draft.description.trim()
+  };
+  if (!draft.enabled) return JSON.stringify(base);
+  return JSON.stringify({
+    ...base,
+    executionMode: draft.executionMode,
+    cadence: draft.cadence,
+    everyDays: draft.cadence === "every-n-days" ? Math.max(1, Math.round(draft.everyDays || 1)) : undefined,
+    startMode: draft.executionMode === "automatic" ? "fixed-time" : draft.startMode,
+    startDate: draft.startDate,
+    startTime: draft.startTime,
+    endMode: draft.endMode,
+    count: draft.endMode === "count" ? Math.max(1, Math.round(draft.count || 1)) : undefined,
+    endDate: draft.endMode === "until" ? draft.endDate : undefined,
+    reminderEnabled: draft.executionMode === "automatic" ? draft.reminderEnabled : false,
+    reminderLeadValue: draft.executionMode === "automatic" && draft.reminderEnabled ? Math.max(1, Math.round(draft.reminderLeadValue || 1)) : undefined,
+    reminderLeadUnit: draft.executionMode === "automatic" && draft.reminderEnabled ? draft.reminderLeadUnit : undefined,
+    displayDurationMinutes: draft.executionMode === "automatic" ? Math.max(0, Math.round(draft.displayDurationMinutes || 0)) : undefined
+  });
+}
+
+function repeatRuleDraftsEqual(left: RepeatRuleDraft, right: RepeatRuleDraft) {
+  return repeatRuleDraftFingerprint(left) === repeatRuleDraftFingerprint(right);
+}
+
+function isValidZonedDraftDateTime(date: string, time: string, timeZone: string) {
+  try {
+    zonedDateTimeToIso(date, time, timeZone);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function createChangeSet(
@@ -660,6 +794,7 @@ function RoutedApp() {
   const rememberedPassphraseVault = useMemo(() => new BrowserRememberedPassphraseVault(), []);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(readSidebarCollapsedPreference);
   const [workspace, setWorkspace] = useState<WorkspaceSnapshot>(() => createEmptyWorkspace());
+  const [clockNow, setClockNow] = useState(timestamp);
   const [appSettings, setAppSettings] = useState<AppSettings>(() => settingsRepository.load());
   const [sessionPassphrase, setSessionPassphrase] = useState("");
   const [rememberedPassphraseSavedAt, setRememberedPassphraseSavedAt] = useState<string | undefined>();
@@ -693,6 +828,18 @@ function RoutedApp() {
   useEffect(() => {
     workspaceRef.current = workspace;
   }, [workspace]);
+
+  useEffect(() => {
+    const refreshClock = () => setClockNow(timestamp());
+    const intervalId = window.setInterval(refreshClock, 60_000);
+    window.addEventListener("focus", refreshClock);
+    document.addEventListener("visibilitychange", refreshClock);
+    return () => {
+      window.clearInterval(intervalId);
+      window.removeEventListener("focus", refreshClock);
+      document.removeEventListener("visibilitychange", refreshClock);
+    };
+  }, []);
 
   useEffect(() => {
     appSettingsRef.current = appSettings;
@@ -873,6 +1020,18 @@ function RoutedApp() {
     }, 250);
   }, [runFirebaseAutoSync]);
 
+  const updateWorkspaceTimeZone = useCallback((value: string) => {
+    const timeZone = canonicalTimeZone(value);
+    if (!timeZone) return;
+    const previous = workspaceRef.current;
+    if (previous.timeZone === timeZone) return;
+    const nextWorkspace = changeRecurringWorkspaceTimeZone(previous, timeZone, timestamp());
+    workspaceRef.current = nextWorkspace;
+    setWorkspace(nextWorkspace);
+    saveWorkspaceImmediately(nextWorkspace);
+    pushWorkspaceSoon("Workspace time zone changed; syncing workspace now.");
+  }, [pushWorkspaceSoon, saveWorkspaceImmediately]);
+
   useEffect(() => {
     let active = true;
     void workspaceRepository.load().then((storedWorkspace) => {
@@ -925,6 +1084,11 @@ function RoutedApp() {
       };
     });
   }, [workspace.projects, workspacePersistence.loaded]);
+
+  useEffect(() => {
+    if (!workspacePersistence.loaded) return;
+    setWorkspace((previous) => reconcileAutomaticOccurrences(previous, clockNow).workspace);
+  }, [clockNow, workspace.workItems, workspace.recurringOccurrences, workspacePersistence.loaded]);
 
   useEffect(() => {
     const settings = appSettings.firebaseSync;
@@ -1437,6 +1601,7 @@ function RoutedApp() {
         parentId: values.parentId || undefined,
         kind: values.kind,
         title,
+        description: values.description.trim() || undefined,
         outline: nextOutline(previous.workItems, projectId, values.parentId),
         durationSeconds,
         estimate: { mostLikelySeconds: durationSeconds },
@@ -1471,7 +1636,7 @@ function RoutedApp() {
   };
 
   const moveWorkItem = (sourceProjectId: string, workItemId: string, values: WorkItemMoveValues) => {
-    const previous = workspaceRef.current;
+    const previous = reconcileAutomaticOccurrences(workspaceRef.current, timestamp()).workspace;
     const workItem = previous.workItems.find((item) => item.id === workItemId && item.projectId === sourceProjectId);
     const sourceProject = previous.projects.find((project) => project.id === sourceProjectId);
     const targetProject = previous.projects.find((project) => project.id === values.targetProjectId);
@@ -1526,30 +1691,39 @@ function RoutedApp() {
     navigate("project", values.targetProjectId);
   };
 
-  const updateWorkItemRepeatRule = (projectId: string, workItemId: string, repeatRule?: RepeatRule) => {
-    const previous = workspaceRef.current;
+  const updateWorkItemRepeatRule = (projectId: string, workItemId: string, repeatRule?: RepeatRule, description?: string) => {
+    const changedAt = timestamp();
+    const previous = reconcileAutomaticOccurrences(workspaceRef.current, changedAt).workspace;
     const workItem = previous.workItems.find((item) => item.id === workItemId && item.projectId === projectId);
     if (!workItem) return;
 
+    const effectiveRepeatRule = repeatRule
+      ? applyAutomaticRuleEditBoundary(workItem.repeatRule, repeatRule, changedAt)
+      : undefined;
     const before = workItem.repeatRule ?? null;
-    const after = repeatRule ?? null;
-    if (JSON.stringify(before) === JSON.stringify(after)) return;
+    const after = effectiveRepeatRule ?? null;
+    const nextDescription = description?.trim() || undefined;
+    if (JSON.stringify(before) === JSON.stringify(after) && workItem.description === nextDescription) return;
 
     const nextWorkspace = {
       ...previous,
       workItems: previous.workItems.map((item) => {
         if (item.id !== workItemId) return item;
-        if (repeatRule) return { ...item, repeatRule };
+        if (effectiveRepeatRule) return { ...item, repeatRule: effectiveRepeatRule, description: nextDescription };
         const nextItem = { ...item };
         delete nextItem.repeatRule;
+        nextItem.description = nextDescription;
         return nextItem;
       }),
       changeSets: [
         createChangeSet(
           projectId,
-          repeatRule ? `Set recurrence for ${workItem.title}` : `Clear recurrence for ${workItem.title}`,
-          repeatRule ? "Updated the work item's recurring schedule rule." : "Removed the work item's recurring schedule rule.",
-          [{ entity: "WorkItem", entityId: workItemId, field: "repeatRule", before, after }],
+          effectiveRepeatRule ? `Set recurrence for ${workItem.title}` : `Clear recurrence for ${workItem.title}`,
+          effectiveRepeatRule ? "Updated the work item's recurring schedule rule." : "Removed the work item's recurring schedule rule.",
+          [
+            { entity: "WorkItem", entityId: workItemId, field: "repeatRule", before, after },
+            ...(workItem.description !== nextDescription ? [{ entity: "WorkItem", entityId: workItemId, field: "description", before: workItem.description ?? null, after: nextDescription ?? null }] : [])
+          ],
           previous.changeSets.length
         ),
         ...previous.changeSets
@@ -1559,6 +1733,64 @@ function RoutedApp() {
     setWorkspace(nextWorkspace);
     saveWorkspaceImmediately(nextWorkspace);
     pushWorkspaceSoon("Recurring work changed; syncing workspace now.");
+  };
+
+  const commitAutomaticOccurrenceAction = (action: AutomaticOccurrenceAction, title: string, reason: string) => {
+    const previous = workspaceRef.current;
+    const result = applyAutomaticOccurrenceAction(previous, action);
+    if (result.workspace === previous) return;
+    const projectId = action.type === "stop-rule"
+      ? previous.workItems.find((item) => item.id === action.workItemId)?.projectId
+      : action.occurrence.projectId;
+    if (!projectId) return;
+    const diffs: ChangeSet["diffs"] = action.type === "stop-rule"
+      ? [{ entity: "WorkItem", entityId: action.workItemId, field: "repeatRule.stoppedAt", before: null, after: action.actedAt }]
+      : [{ entity: "RecurringOccurrence", entityId: action.occurrence.id, field: "status", before: action.occurrence.status, after: result.occurrence?.status ?? action.type }];
+    if (result.followUpWorkItemId) {
+      diffs.push({ entity: "WorkItem", entityId: result.followUpWorkItemId, field: "created", before: null, after: result.workspace.workItems.find((item) => item.id === result.followUpWorkItemId) });
+    }
+    const nextWorkspace = {
+      ...result.workspace,
+      changeSets: [createChangeSet(projectId, title, reason, diffs, result.workspace.changeSets.length), ...result.workspace.changeSets]
+    };
+    workspaceRef.current = nextWorkspace;
+    setWorkspace(nextWorkspace);
+    saveWorkspaceImmediately(nextWorkspace);
+    pushWorkspaceSoon("Automatic recurring history changed; syncing workspace now.");
+  };
+
+  const skipAutomaticOccurrence = (occurrence: RecurringOccurrence) => {
+    commitAutomaticOccurrenceAction(
+      { type: "skip", occurrence, actedAt: timestamp() },
+      `Skip ${occurrence.title} occurrence`,
+      "Skipped one automatic occurrence without changing the recurring rule."
+    );
+  };
+
+  const rescheduleAutomaticOccurrence = (occurrence: RecurringOccurrence, start: string, finish: string) => {
+    commitAutomaticOccurrenceAction(
+      { type: "reschedule", occurrence, start, finish, actedAt: timestamp() },
+      `Reschedule ${occurrence.title} occurrence`,
+      "Changed one future automatic occurrence without shifting the series."
+    );
+  };
+
+  const reportAutomaticOccurrenceException = (occurrence: RecurringOccurrence, note: string, dueAt?: string, resourceId?: string) => {
+    commitAutomaticOccurrenceAction(
+      { type: "report-exception", occurrence, note, dueAt, resourceId, actedAt: timestamp() },
+      `Report exception for ${occurrence.title}`,
+      "Recorded an automatic occurrence exception and created a linked manual follow-up task."
+    );
+  };
+
+  const stopAutomaticRule = (workItemId: string) => {
+    const item = workspaceRef.current.workItems.find((candidate) => candidate.id === workItemId);
+    if (!item) return;
+    commitAutomaticOccurrenceAction(
+      { type: "stop-rule", workItemId, actedAt: timestamp() },
+      `Stop recurrence for ${item.title}`,
+      "Stopped future automatic occurrences while retaining the rule and history."
+    );
   };
 
   const createDependency = (projectId: string, values: DependencyCreateValues) => {
@@ -1628,7 +1860,7 @@ function RoutedApp() {
   const recordActual = (projectId: string, workItemId: string, values: ActualRecordValues) => {
     setWorkspace((previous) => {
       const workItem = previous.workItems.find((item) => item.id === workItemId);
-      if (!workItem) return previous;
+      if (!workItem || isAutomaticRecurringWorkItem(workItem)) return previous;
       const nextPercent = values.markFinished ? 100 : clamp(values.percentComplete, 0, 100);
       const recordedAt = timestamp();
       const actual: Actual = {
@@ -1665,7 +1897,7 @@ function RoutedApp() {
     setWorkspace((previous) => {
       const project = previous.projects.find((candidate) => candidate.id === projectId);
       if (!project) return previous;
-      const targets = previous.workItems.filter((item) => item.projectId === projectId && item.kind !== "phase" && item.percentComplete < 100);
+      const targets = previous.workItems.filter((item) => item.projectId === projectId && item.kind !== "phase" && !isAutomaticRecurringWorkItem(item) && item.percentComplete < 100);
       if (!targets.length) return previous;
 
       const recordedAt = timestamp();
@@ -2126,6 +2358,7 @@ function RoutedApp() {
             onWorkItemCreate={createWorkItem}
             onWorkItemMove={moveWorkItem}
             onWorkItemRepeatRuleUpdate={updateWorkItemRepeatRule}
+            onAutomaticRuleStop={stopAutomaticRule}
             onDependencyCreate={createDependency}
             onEvidenceCreate={createEvidence}
             onActualRecord={recordActual}
@@ -2139,6 +2372,10 @@ function RoutedApp() {
             onDependencyUpdate={updateDependency}
             onDependencyRemove={removeDependency}
             projects={workspace.projects}
+            recurringOccurrences={workspace.recurringOccurrences}
+            changeSets={workspace.changeSets.filter((changeSet) => changeSet.projectId === selectedProject.id)}
+            timeZone={workspace.timeZone}
+            currentTime={clockNow}
           />
         )}
         {view === "project" && (!selectedProject || !selectedSchedule) && (
@@ -2146,17 +2383,25 @@ function RoutedApp() {
         )}
         {view === "today" && (
           <TodayExecution
+            workspace={workspace}
             schedules={model.schedules}
             projects={workspace.projects}
             gates={model.gates}
             onActualRecord={recordActual}
+            currentTime={clockNow}
+            onOccurrenceSkip={skipAutomaticOccurrence}
+            onOccurrenceReschedule={rescheduleAutomaticOccurrence}
+            onOccurrenceException={reportAutomaticOccurrenceException}
           />
         )}
         {view === "calendar" && (
           <CalendarView
-            projects={workspace.projects}
-            workItems={workspace.workItems}
+            workspace={workspace}
             schedules={model.schedules}
+            currentTime={clockNow}
+            onOccurrenceSkip={skipAutomaticOccurrence}
+            onOccurrenceReschedule={rescheduleAutomaticOccurrence}
+            onOccurrenceException={reportAutomaticOccurrenceException}
           />
         )}
         {view === "audit" && (
@@ -2221,6 +2466,7 @@ function RoutedApp() {
             onForgetRememberedPassphrase={forgetRememberedPassphrase}
             autoSyncStatus={autoSyncStatus}
             workspacePersistence={workspacePersistence}
+            onWorkspaceTimeZoneChange={updateWorkspaceTimeZone}
             onWorkspaceImport={(nextWorkspace) => setWorkspace(nextWorkspace)}
             onWorkspaceReset={() => setWorkspace(createEmptyWorkspace())}
             onEvidenceImport={importEvidenceItems}
@@ -2746,6 +2992,10 @@ function ProjectWorkspace({
   workItems,
   allWorkItems,
   projects,
+  recurringOccurrences,
+  changeSets,
+  timeZone,
+  currentTime,
   baseline,
   baselineChangeSet,
   baselineApproved,
@@ -2764,6 +3014,7 @@ function ProjectWorkspace({
   onWorkItemCreate,
   onWorkItemMove,
   onWorkItemRepeatRuleUpdate,
+  onAutomaticRuleStop,
   onDependencyCreate,
   onEvidenceCreate,
   onActualRecord,
@@ -2782,6 +3033,10 @@ function ProjectWorkspace({
   workItems: WorkItem[];
   allWorkItems: WorkItem[];
   projects: Project[];
+  recurringOccurrences: RecurringOccurrenceRecord[];
+  changeSets: ChangeSet[];
+  timeZone: string;
+  currentTime: string;
   baseline?: Baseline;
   baselineChangeSet?: ChangeSet;
   baselineApproved: boolean;
@@ -2799,7 +3054,8 @@ function ProjectWorkspace({
   onShapeUpConvert: (projectId: string) => void;
   onWorkItemCreate: (projectId: string, values: WorkItemCreateValues) => void;
   onWorkItemMove: (sourceProjectId: string, workItemId: string, values: WorkItemMoveValues) => void;
-  onWorkItemRepeatRuleUpdate: (projectId: string, workItemId: string, repeatRule?: RepeatRule) => void;
+  onWorkItemRepeatRuleUpdate: (projectId: string, workItemId: string, repeatRule?: RepeatRule, description?: string) => void;
+  onAutomaticRuleStop: (workItemId: string) => void;
   onDependencyCreate: (projectId: string, values: DependencyCreateValues) => void;
   onEvidenceCreate: (projectId: string, values: EvidenceCreateValues) => void;
   onActualRecord: (projectId: string, workItemId: string, values: ActualRecordValues) => void;
@@ -2813,13 +3069,14 @@ function ProjectWorkspace({
   onDependencyUpdate: (dependencyId: string, patch: DependencyPatch) => void;
   onDependencyRemove: (dependencyId: string) => void;
 }) {
-  const tabTarget = target === "recurring" || target === "evidence" || target === "audit" || target === "baselines" || target === "reports" ? target : "plan";
+  const recurringSelectionId = recurringTargetWorkItemId(target);
+  const tabTarget = target === "recurring" || Boolean(recurringSelectionId) ? "recurring" : target === "evidence" || target === "audit" || target === "baselines" || target === "reports" ? target : "plan";
   const next = nextScheduledItem(schedule.items);
   const blockingGate = gates.find((gate) => gate.severity === "hard" && gate.status !== "cleared");
   const latestEvidence = [...evidence].sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
   const shapeUpLocked = isShapeUpProject(project) && !isShapeUpBet(project);
   const shapeUpGanttEmpty = isShapeUpBet(project) && schedule.items.length === 0;
-  const canDeleteProject = workItems.length === 0;
+  const canDeleteProject = workItems.length === 0 && !recurringOccurrences.some((occurrence) => occurrence.projectId === project.id);
   const [dailyDraft, setDailyDraft] = useState({
     northStar: project.northStar,
     currentOutcome: project.currentOutcome
@@ -2917,7 +3174,7 @@ function ProjectWorkspace({
       </Card>
 
       <Tabs key={`${project.id}-${tabTarget}`} defaultValue={tabTarget} className="w-full">
-        <TabsList className="grid w-full grid-cols-3 sm:grid-cols-6 lg:w-auto">
+        <TabsList className="projectTabs grid h-auto min-h-9 w-full grid-cols-3 gap-1 sm:grid-cols-6 lg:w-auto">
           <TabsTrigger value="plan">Plan</TabsTrigger>
           <TabsTrigger value="recurring">Recurring</TabsTrigger>
           <TabsTrigger value="evidence">Evidence</TabsTrigger>
@@ -3045,15 +3302,21 @@ function ProjectWorkspace({
           <Card>
             <CardHeader className="compactCardHeader">
               <div className="cardHeaderLine">
-                <CardTitle className="flex items-center gap-2"><RefreshCw className="h-4 w-4" /> Recurring Work</CardTitle>
-                <Badge variant="outline" className="iconBadge" title="Recurring rules"><RefreshCw />{workItems.filter((item) => item.repeatRule).length}</Badge>
+                <CardTitle className="flex items-center gap-2"><RefreshCw className="h-4 w-4" /> Recurring rules</CardTitle>
+                <Badge variant="outline" className="iconBadge" title="Configured recurring rules"><RefreshCw />{workItems.filter((item) => item.repeatRule).length} configured</Badge>
               </div>
             </CardHeader>
             <CardContent>
               <RecurringTasksPanel
                 project={project}
                 items={workItems}
-                onRepeatRuleUpdate={(workItemId, repeatRule) => onWorkItemRepeatRuleUpdate(project.id, workItemId, repeatRule)}
+                recurringOccurrences={recurringOccurrences}
+                changeSets={changeSets}
+                initialSelectedId={recurringSelectionId}
+                timeZone={timeZone}
+                currentTime={currentTime}
+                onRepeatRuleUpdate={(workItemId, repeatRule, description) => onWorkItemRepeatRuleUpdate(project.id, workItemId, repeatRule, description)}
+                onAutomaticRuleStop={onAutomaticRuleStop}
               />
             </CardContent>
           </Card>
@@ -3537,7 +3800,7 @@ function ProjectCompletionPanel({
   onComplete: () => void;
   onArchive: () => void;
 }) {
-  const completableItems = items.filter((item) => item.kind !== "phase");
+  const completableItems = items.filter((item) => item.kind !== "phase" && !isAutomaticRecurringWorkItem(item));
   const incompleteItems = completableItems.filter((item) => item.percentComplete < 100);
   const openHardGates = gates.filter((gate) => gate.severity === "hard" && gate.status !== "cleared");
   const keyItemsMissingEvidence = completableItems.filter((item) => (
@@ -3604,34 +3867,144 @@ function ProjectCompletionPanel({
 function RecurringTasksPanel({
   project,
   items,
-  onRepeatRuleUpdate
+  recurringOccurrences,
+  changeSets,
+  initialSelectedId,
+  timeZone,
+  currentTime,
+  onRepeatRuleUpdate,
+  onAutomaticRuleStop
 }: {
   project: Project;
   items: WorkItem[];
-  onRepeatRuleUpdate: (workItemId: string, repeatRule?: RepeatRule) => void;
+  recurringOccurrences: RecurringOccurrenceRecord[];
+  changeSets: ChangeSet[];
+  initialSelectedId?: string;
+  timeZone: string;
+  currentTime: string;
+  onRepeatRuleUpdate: (workItemId: string, repeatRule: RepeatRule | undefined, description: string) => void;
+  onAutomaticRuleStop: (workItemId: string) => void;
 }) {
   const eligibleItems = items.filter((item) => item.kind !== "phase");
   const recurringItems = eligibleItems.filter((item) => item.repeatRule);
-  const [selectedId, setSelectedId] = useState(eligibleItems[0]?.id ?? "");
+  const eligibleItemIds = eligibleItems.map((item) => item.id).join("|");
+  const recurringItemIds = recurringItems.map((item) => item.id).join("|");
+  const [selectedId, setSelectedId] = useState(() => initialSelectedId && eligibleItems.some((item) => item.id === initialSelectedId)
+    ? initialSelectedId
+    : recurringItems[0]?.id ?? eligibleItems[0]?.id ?? "");
   const selected = eligibleItems.find((item) => item.id === selectedId) ?? eligibleItems[0];
-  const [draft, setDraft] = useState<RepeatRuleDraft>(() => draftFromRepeatRule(selected, project.start));
+  const [draft, setDraft] = useState<RepeatRuleDraft>(() => draftFromRepeatRule(selected, project.start, timeZone));
+  const [baselineDraft, setBaselineDraft] = useState<RepeatRuleDraft>(() => draftFromRepeatRule(selected, project.start, timeZone));
+  const [draftError, setDraftError] = useState("");
+  const [saveNotice, setSaveNotice] = useState("");
+  const [pendingDestructiveAction, setPendingDestructiveAction] = useState<"remove" | "stop" | null>(null);
+  const [historyPage, setHistoryPage] = useState(0);
+  const draftDirty = !repeatRuleDraftsEqual(draft, baselineDraft);
 
   useEffect(() => {
     if (!eligibleItems.length) {
       setSelectedId("");
       return;
     }
-    setSelectedId((current) => eligibleItems.some((item) => item.id === current) ? current : eligibleItems[0].id);
-  }, [project.id, eligibleItems.length]);
+    if (initialSelectedId && eligibleItems.some((item) => item.id === initialSelectedId)) {
+      setSelectedId(initialSelectedId);
+      return;
+    }
+    setSelectedId((current) => eligibleItems.some((item) => item.id === current) ? current : recurringItems[0]?.id ?? eligibleItems[0].id);
+  }, [project.id, eligibleItemIds, recurringItemIds, initialSelectedId]);
 
   useEffect(() => {
-    setDraft(draftFromRepeatRule(selected, project.start));
-  }, [project.id, selected?.id, selected?.repeatRule]);
+    const nextDraft = draftFromRepeatRule(selected, project.start, timeZone);
+    setDraft(nextDraft);
+    setBaselineDraft(nextDraft);
+    setDraftError("");
+    setPendingDestructiveAction(null);
+    setHistoryPage(0);
+  }, [project.id, selected?.id, timeZone]);
 
-  const update = (patch: Partial<RepeatRuleDraft>) => setDraft((current) => ({ ...current, ...patch }));
-  const previewRule = repeatRuleFromDraft(draft);
-  const previewItem = selected && previewRule ? { ...selected, repeatRule: previewRule } : undefined;
-  const preview = previewItem ? generateRecurringOccurrences(previewItem, project.start, Math.min(10, Math.max(1, draft.count))) : [];
+  const update = (patch: Partial<RepeatRuleDraft>) => {
+    setDraftError("");
+    setSaveNotice("");
+    setPendingDestructiveAction(null);
+    setDraft((current) => ({ ...current, ...patch }));
+  };
+  const requestSelection = (workItemId: string) => {
+    if (workItemId === selectedId) return;
+    if (draftDirty) {
+      setDraftError("Save or reset your changes before selecting another work item.");
+      return;
+    }
+    setDraftError("");
+    setSaveNotice("");
+    setPendingDestructiveAction(null);
+    setSelectedId(workItemId);
+  };
+  const previewRule = repeatRuleFromDraft(draft, selected, timeZone, currentTime);
+  const previewItem = selected && previewRule ? { ...selected, description: draft.description.trim() || undefined, repeatRule: previewRule } : undefined;
+  const preview = previewItem ? projectRecurringOccurrences(previewItem, project.start, {
+    timeZone,
+    now: currentTime,
+    windowStart: repeatExecutionMode(previewItem.repeatRule) === "automatic" ? currentTime : undefined,
+    limit: 8,
+    records: recurringOccurrences
+  }) : [];
+  const occurrenceHistory = selected ? selectAutomaticOccurrenceHistory({
+    timeZone,
+    projects: [project],
+    workItems: items,
+    recurringOccurrences,
+    dependencies: [],
+    resources: [],
+    capacities: [],
+    baselines: [],
+    actuals: [],
+    evidence: [],
+    decisions: [],
+    changeSets: [],
+    auditGates: [],
+    auditDecisions: []
+  }, selected.id) : [];
+  const historyEntries = [
+    ...occurrenceHistory.map((record) => ({ kind: "occurrence" as const, at: record.updatedAt, record })),
+    ...changeSets
+      .filter((changeSet) => selected && changeSet.diffs.some((diff) => diff.entity === "WorkItem" && diff.entityId === selected.id && diff.field.startsWith("repeatRule")))
+      .map((changeSet) => ({ kind: "rule" as const, at: changeSet.createdAt, changeSet }))
+  ].sort((left, right) => right.at.localeCompare(left.at));
+  const historyPageSize = 8;
+  const historyPageCount = Math.max(1, Math.ceil(historyEntries.length / historyPageSize));
+  const safeHistoryPage = Math.min(historyPage, historyPageCount - 1);
+  const visibleHistory = historyEntries.slice(safeHistoryPage * historyPageSize, (safeHistoryPage + 1) * historyPageSize);
+  const selectedAutomatic = repeatExecutionMode(selected?.repeatRule) === "automatic";
+  const selectedStopped = Boolean(selected?.repeatRule?.stoppedAt);
+  const ruleMode: "off" | RepeatExecutionMode = draft.enabled ? draft.executionMode : "off";
+  const ruleModeOptions: Array<{ value: "off" | RepeatExecutionMode; label: string }> = selected?.repeatRule
+    ? [
+        { value: "manual", label: "Manual" },
+        { value: "automatic", label: "Automatic" }
+      ]
+    : [
+        { value: "off", label: "Choose a mode…" },
+        { value: "manual", label: "Manual" },
+        { value: "automatic", label: "Automatic" }
+      ];
+  const startDateTimeValid = !draft.enabled || isValidZonedDraftDateTime(draft.startDate, draft.startTime, timeZone);
+  const endDateValid = !draft.enabled || draft.endMode !== "until" || isValidZonedDraftDateTime(draft.endDate, "23:59", timeZone);
+  const draftValid = startDateTimeValid && endDateValid && Boolean(previewRule);
+  const canSave = Boolean(selected && !selectedStopped && draft.enabled && draftDirty && draftValid);
+  const saveHelp = selectedStopped
+    ? "Stopped rules are read-only; their history remains available below."
+    : !draft.enabled
+    ? "Choose Manual or Automatic to configure a recurring rule."
+    : !draftDirty
+      ? "No unsaved changes."
+      : !draftValid
+        ? "Enter a valid start date, start time, and optional end date."
+        : selected?.repeatRule ? "Ready to save your changes." : "Ready to create this recurring rule.";
+  const selectedRuleState = !selected?.repeatRule
+    ? "Not configured"
+    : selectedStopped
+      ? "Stopped"
+      : selectedAutomatic ? "Automatic" : "Manual";
 
   if (!eligibleItems.length) {
     return (
@@ -3644,150 +4017,376 @@ function RecurringTasksPanel({
 
   return (
     <div className="recurringGrid">
-      <div className="recurringPanel">
+      <aside className="recurringSidebar" aria-labelledby="recurring-work-items-heading">
         <div className="recurringPanelHeader">
-          <div>
-            <strong>{recurringItems.length} recurring</strong>
-            <span>{eligibleItems.length} eligible work items</span>
+          <div className="recurringPanelTitle">
+            <h3 id="recurring-work-items-heading">Work items</h3>
+            <span>{eligibleItems.length} eligible · {recurringItems.length} configured</span>
           </div>
-          <Badge variant={recurringItems.length ? "success" : "outline"}><RefreshCw />{recurringItems.length}</Badge>
         </div>
-        <div className="recurringTaskList">
-          {recurringItems.length ? recurringItems.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              className={cn("recurringTaskButton", selected?.id === item.id && "active")}
-              onClick={() => setSelectedId(item.id)}
-            >
-              <span>
-                <strong>{item.title}</strong>
-                <em>{item.outline} / {item.kind}</em>
-              </span>
-              <span className="recurringTaskBadges">
-                <Badge variant="secondary">{repeatCadenceLabel(item.repeatRule)}</Badge>
-                <Badge variant="outline">{repeatStartModeLabel(item.repeatRule)}</Badge>
-              </span>
-            </button>
-          )) : (
-            <div className="recurringEmpty">No recurring rules configured.</div>
-          )}
-        </div>
-      </div>
+        <ul className="recurringTaskList">
+          {eligibleItems.map((item) => {
+            const automatic = repeatExecutionMode(item.repeatRule) === "automatic";
+            const stopped = Boolean(item.repeatRule?.stoppedAt);
+            const itemMeta = !item.repeatRule
+              ? `${item.outline} · Not configured`
+              : stopped
+                ? `${item.outline} · Stopped`
+                : automatic
+                  ? item.outline
+                  : `${item.outline} · Manual`;
+            return (
+              <li key={item.id}>
+                <button
+                  type="button"
+                  className={cn("recurringTaskButton", selected?.id === item.id && "active")}
+                  aria-current={selected?.id === item.id ? "true" : undefined}
+                  data-testid={`recurring-work-item-${item.id}`}
+                  onClick={() => requestSelection(item.id)}
+                >
+                  <span>
+                    <strong>{item.title}</strong>
+                    <em>{itemMeta}</em>
+                  </span>
+                  <span className="recurringTaskBadges">
+                    {automatic && <RecurrenceModeIcon />}
+                    {item.repeatRule ? <Badge variant="secondary">{repeatCadenceLabel(item.repeatRule)}</Badge> : <Badge variant="outline">new</Badge>}
+                  </span>
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      </aside>
 
       <form
-        className="recurringPanel"
+        className="recurringEditor"
+        aria-labelledby="recurring-rule-heading"
         onSubmit={(event) => {
           event.preventDefault();
           if (!selected) return;
-          onRepeatRuleUpdate(selected.id, repeatRuleFromDraft(draft));
+          const repeatRule = repeatRuleFromDraft(draft, selected, timeZone, currentTime);
+          if (!draft.enabled || !draftDirty) return;
+          if (!repeatRule) {
+            setDraftError("Enter a valid start date, start time, and optional end date before saving.");
+            return;
+          }
+          onRepeatRuleUpdate(selected.id, repeatRule, draft.description);
+          setBaselineDraft(draft);
+          setDraftError("");
+          setSaveNotice(selected.repeatRule ? "Recurring rule updated." : "Recurring rule created.");
         }}
       >
-        <div className="recurringPanelHeader">
-          <div>
-            <strong>Rule</strong>
-            <span>{selected?.title}</span>
+        <div className="recurringEditorHeader">
+          <div className="recurringPanelTitle">
+            <h3 id="recurring-rule-heading">{selected?.title}</h3>
+            <span>Edit the recurring behavior for this work item.</span>
           </div>
-          <ToggleField label="Recurring" checked={draft.enabled} onChange={(checked) => update({ enabled: checked })} />
-        </div>
-        <div className="recurringFormGrid">
-          <NativeSelectField
-            label="Work item"
-            value={selected?.id ?? ""}
-            onChange={setSelectedId}
-            options={eligibleItems.map((item) => ({ value: item.id, label: `${item.outline} ${item.title}` }))}
-            testId="recurring-work-item"
-          />
-          <NativeSelectField
-            label="Cadence"
-            value={draft.cadence}
-            onChange={(value) => update({ cadence: value as RepeatCadenceKind })}
-            options={[
-              { value: "every-n-days", label: "Every n days" },
-              { value: "weekly", label: "Weekly" },
-              { value: "monthly", label: "Monthly" }
-            ]}
-            testId="recurring-cadence"
-          />
-          {draft.cadence === "every-n-days" && (
-            <label className="block">
-              <span className="text-sm font-medium">Days</span>
-              <Input className="mt-2" type="number" min={1} step={1} value={draft.everyDays} onChange={(event) => update({ everyDays: Math.max(1, Math.round(Number(event.target.value) || 1)) })} />
-            </label>
+          {selectedAutomatic && !selectedStopped ? (
+            <Badge variant="success" className="iconBadge" title="Automatic recurring rule" aria-label="Automatic recurring rule"><RecurrenceModeIcon /></Badge>
+          ) : (
+            <Badge variant={selectedStopped ? "outline" : selected?.repeatRule ? "success" : "secondary"}>{selectedRuleState}</Badge>
           )}
+        </div>
+        <div className="recurringModeRow">
           <NativeSelectField
-            label="Start mode"
-            value={draft.startMode}
-            onChange={(value) => update({ startMode: value as RepeatStartMode })}
-            options={[
-              { value: "fixed-time", label: "Fixed time" },
-              { value: "after-previous-finish", label: "After previous finish" }
-            ]}
-            testId="recurring-start-mode"
+            label="Rule mode"
+            value={ruleMode}
+            onChange={(value) => update({
+              enabled: value !== "off",
+              executionMode: value === "off" ? draft.executionMode : value as RepeatExecutionMode,
+              startMode: value === "automatic" ? "fixed-time" : draft.startMode,
+              endMode: value === "automatic" && repeatExecutionMode(selected?.repeatRule) !== "automatic" ? "never" : draft.endMode
+            })}
+            options={ruleModeOptions}
+            disabled={selectedStopped}
+            testId="recurring-execution-mode"
           />
-          <SettingsInput
-            label={draft.startMode === "after-previous-finish" ? "First start date" : "Start date"}
-            name={`recurring-start-date-${project.id}`}
-            value={draft.startDate}
-            onChange={(value) => update({ startDate: value })}
-            placeholder="2026-07-06"
-            autoComplete="off"
-            testId="recurring-start-date"
-          />
-          <SettingsInput
-            label="Start time"
-            name={`recurring-start-time-${project.id}`}
-            value={draft.startTime}
-            onChange={(value) => update({ startTime: value })}
-            placeholder="09:00"
-            autoComplete="off"
-            testId="recurring-start-time"
-          />
-          <label className="block">
-            <span className="text-sm font-medium">Cycles</span>
-            <Input className="mt-2" type="number" min={1} step={1} value={draft.count} onChange={(event) => update({ count: Math.max(1, Math.round(Number(event.target.value) || 1)) })} />
-          </label>
+          <p className="recurringModeHelp">
+            {selectedStopped
+              ? "This rule is stopped. Its schedule and history remain available for reference."
+              : ruleMode === "automatic"
+                ? "Automatic rules record expected external events without requiring completion."
+                : ruleMode === "manual"
+                  ? "Manual rules create cycles that you update yourself."
+                  : "Choose how this work item should recur."}
+          </p>
         </div>
-        <div className="recurringActions">
-          <Button type="submit" disabled={!selected}>
-            <Save />
-            Save rule
-          </Button>
-          <Button
-            type="button"
-            variant="outline"
-            disabled={!selected?.repeatRule}
-            onClick={() => {
-              if (!selected) return;
-              onRepeatRuleUpdate(selected.id, undefined);
-              setDraft(draftFromRepeatRule({ ...selected, repeatRule: undefined }, project.start));
-            }}
-          >
-            Clear rule
-          </Button>
-          <Badge variant="outline">{draft.enabled ? (draft.startMode === "after-previous-finish" ? "rolling" : repeatCadenceLabel(previewRule)) : "off"}</Badge>
-        </div>
-        <div className="recurringPreview">
+
+        <fieldset className="recurringFieldset" disabled={!draft.enabled || selectedStopped}>
+          <legend>Schedule</legend>
+          <div className="recurringFieldGrid">
+            <NativeSelectField
+              label="Cadence"
+              value={draft.cadence}
+              onChange={(value) => update({ cadence: value as RepeatCadenceKind })}
+              options={[
+                { value: "every-n-days", label: "Every n days" },
+                { value: "weekly", label: "Weekly" },
+                { value: "monthly", label: "Monthly" }
+              ]}
+              testId="recurring-cadence"
+            />
+            {draft.cadence === "every-n-days" && (
+              <label className="block">
+                <span className="text-sm font-medium">Repeat every</span>
+                <div className="recurringNumberField">
+                  <Input type="number" min={1} step={1} value={draft.everyDays} aria-label="Repeat interval in days" onChange={(event) => update({ everyDays: Math.max(1, Math.round(Number(event.target.value) || 1)) })} />
+                  <span>days</span>
+                </div>
+              </label>
+            )}
+            {draft.executionMode === "manual" ? (
+              <NativeSelectField
+                label="Start mode"
+                value={draft.startMode}
+                onChange={(value) => update({ startMode: value as RepeatStartMode })}
+                options={[
+                  { value: "fixed-time", label: "Fixed time" },
+                  { value: "after-previous-finish", label: "After previous finish" }
+                ]}
+                testId="recurring-start-mode"
+              />
+            ) : (
+              <div className="recurringReadOnlyField"><span>Start mode</span><strong>Fixed time</strong></div>
+            )}
+            <SettingsInput
+              label={draft.startMode === "after-previous-finish" ? "First start date" : "Start date"}
+              name={`recurring-start-date-${project.id}`}
+              value={draft.startDate}
+              onChange={(value) => update({ startDate: value })}
+              placeholder="2026-07-06"
+              autoComplete="off"
+              type="date"
+              required
+              invalid={!startDateTimeValid}
+              describedBy={!startDateTimeValid ? "recurring-start-error" : undefined}
+              testId="recurring-start-date"
+            />
+            <SettingsInput
+              label="Start time"
+              name={`recurring-start-time-${project.id}`}
+              value={draft.startTime}
+              onChange={(value) => update({ startTime: value })}
+              placeholder="09:00"
+              autoComplete="off"
+              type="time"
+              required
+              invalid={!startDateTimeValid}
+              describedBy={!startDateTimeValid ? "recurring-start-error" : undefined}
+              testId="recurring-start-time"
+            />
+          </div>
+          {!startDateTimeValid && <p id="recurring-start-error" className="recurringFieldError">Enter a valid start date and time.</p>}
+        </fieldset>
+
+        <fieldset className="recurringFieldset" disabled={!draft.enabled || selectedStopped}>
+          <legend>End condition</legend>
+          <div className="recurringFieldGrid">
+            <NativeSelectField
+              label="Ends"
+              value={draft.endMode}
+              onChange={(value) => update({ endMode: value as RepeatEndMode })}
+              options={[
+                { value: "never", label: "Never" },
+                { value: "until", label: "On date" },
+                { value: "count", label: "After count" }
+              ]}
+              testId="recurring-end-mode"
+            />
+            {draft.endMode === "count" && (
+              <label className="block">
+                <span className="text-sm font-medium">Number of cycles</span>
+                <Input className="mt-2" type="number" min={1} step={1} value={draft.count} onChange={(event) => update({ count: Math.max(1, Math.round(Number(event.target.value) || 1)) })} />
+              </label>
+            )}
+            {draft.endMode === "until" && (
+              <SettingsInput
+                label="End date"
+                name={`recurring-end-date-${project.id}`}
+                value={draft.endDate}
+                onChange={(value) => update({ endDate: value })}
+                placeholder="2026-12-31"
+                autoComplete="off"
+                type="date"
+                required
+                invalid={!endDateValid}
+                describedBy={!endDateValid ? "recurring-end-error" : undefined}
+              />
+            )}
+          </div>
+          {!endDateValid && <p id="recurring-end-error" className="recurringFieldError">Enter a valid end date.</p>}
+        </fieldset>
+
+        {draft.executionMode === "automatic" && (
+          <fieldset className="recurringFieldset" disabled={!draft.enabled || selectedStopped}>
+            <legend>Reminder</legend>
+            <div className="recurringReminderLayout">
+              <ToggleField label="Remind me before this event" checked={draft.reminderEnabled} onChange={(reminderEnabled) => update({ reminderEnabled })} />
+              {draft.reminderEnabled && (
+                <div className="recurringReminderFields">
+                  <label className="block">
+                    <span className="text-sm font-medium">Lead time</span>
+                    <Input className="mt-2" type="number" min={1} step={1} value={draft.reminderLeadValue} onChange={(event) => update({ reminderLeadValue: Math.max(1, Number(event.target.value) || 1) })} />
+                  </label>
+                  <NativeSelectField
+                    label="Unit"
+                    value={draft.reminderLeadUnit}
+                    onChange={(value) => update({ reminderLeadUnit: value as RepeatRuleDraft["reminderLeadUnit"] })}
+                    options={[
+                      { value: "minutes", label: "Minutes" },
+                      { value: "hours", label: "Hours" },
+                      { value: "days", label: "Days" }
+                    ]}
+                  />
+                </div>
+              )}
+            </div>
+          </fieldset>
+        )}
+
+        <fieldset className="recurringFieldset" disabled={!draft.enabled || selectedStopped}>
+          <legend>Details</legend>
+          <div className="recurringFieldGrid">
+            <div className="recurringFieldFull">
+              <FormTextarea label="Description" value={draft.description} onChange={(description) => update({ description })} placeholder="Describe what the external system performs." />
+            </div>
+            {draft.executionMode === "automatic" && (
+              <>
+                <label className="block">
+                  <span className="text-sm font-medium">Calendar duration</span>
+                  <div className="recurringNumberField">
+                    <Input type="number" min={0} step={5} value={draft.displayDurationMinutes} aria-label="Calendar duration in minutes" onChange={(event) => update({ displayDurationMinutes: Math.max(0, Number(event.target.value) || 0) })} />
+                    <span>minutes</span>
+                  </div>
+                </label>
+                <div className="recurringReadOnlyField"><span>Workspace time zone</span><strong>{timeZone}</strong></div>
+              </>
+            )}
+          </div>
+        </fieldset>
+
+        {draftError && <p className="recurringFormError" role="alert">{draftError}</p>}
+
+        <section className="recurringPreview" aria-labelledby="recurring-preview-heading">
           <div className="recurringPreviewHeader">
-            <strong>Preview</strong>
-            <span>{previewRule ? `${repeatCadenceLabel(previewRule)} / ${repeatStartModeLabel(previewRule)}` : "disabled"}</span>
+            <h4 id="recurring-preview-heading">Preview</h4>
+            {previewRule && <span>{repeatCadenceLabel(previewRule)} · {repeatStartModeLabel(previewRule)}</span>}
           </div>
           {preview.length ? (
             <div className="recurringOccurrenceList">
               {preview.map((occurrence) => (
                 <div key={occurrence.index} className="recurringOccurrence">
                   <Badge variant="secondary">#{occurrence.index}</Badge>
-                  <span>{formatShortDateTime(occurrence.start)}</span>
-                  <span>{formatShortDateTime(occurrence.finish)}</span>
+                  <span>{formatShortDateTimeInZone(occurrence.start, timeZone)}</span>
+                  <span>{formatShortDateTimeInZone(occurrence.finish, timeZone)}</span>
                 </div>
               ))}
             </div>
           ) : (
-            <div className="recurringEmpty">Enable recurring to preview cycles.</div>
+            <div className="recurringEmpty">
+              {!draft.enabled ? "Choose a rule mode to preview future cycles." : !previewRule ? "Fix the highlighted date or time fields to continue." : "No future cycles fall inside the preview window."}
+            </div>
           )}
+        </section>
+
+        <div className="recurringActions">
+          <Button type="submit" disabled={!canSave} aria-describedby="recurring-save-help">
+            <Save />
+            {selected?.repeatRule ? "Save changes" : "Create rule"}
+          </Button>
+          {draftDirty && (
+            <Button type="button" variant="outline" onClick={() => {
+              setDraft(baselineDraft);
+              setDraftError("");
+              setSaveNotice("");
+              setPendingDestructiveAction(null);
+            }}>Reset changes</Button>
+          )}
+          <span className="recurringActionSpacer" />
+          {selectedAutomatic && !selectedStopped ? (
+            <Button type="button" variant="outline" disabled={draftDirty} title={draftDirty ? "Reset or save current changes first" : "Stop future occurrences"} onClick={() => setPendingDestructiveAction("stop")}>
+              <CircleSlash2 />Stop future occurrences
+            </Button>
+          ) : selected?.repeatRule && !selectedAutomatic ? (
+            <Button type="button" variant="outline" disabled={draftDirty} title={draftDirty ? "Reset or save current changes first" : "Remove recurrence"} onClick={() => setPendingDestructiveAction("remove")}>
+              Remove recurrence
+            </Button>
+          ) : null}
         </div>
+        <p id="recurring-save-help" className="recurringActionHint">{saveHelp}</p>
+
+        {pendingDestructiveAction && (
+          <div className="recurringDangerConfirm" role="group" aria-labelledby="recurring-danger-title">
+            <div>
+              <strong id="recurring-danger-title">{pendingDestructiveAction === "stop" ? "Stop future occurrences?" : "Remove this recurring rule?"}</strong>
+              <span>{pendingDestructiveAction === "stop" ? "Future occurrences will stop; recorded history stays available." : "The recurring configuration will be removed from this work item."}</span>
+            </div>
+            <div className="recurringDangerActions">
+              <Button type="button" variant="outline" onClick={() => setPendingDestructiveAction(null)}>Cancel</Button>
+              <Button type="button" variant="destructive" onClick={() => {
+                if (!selected) return;
+                if (pendingDestructiveAction === "stop") {
+                  onAutomaticRuleStop(selected.id);
+                  setSaveNotice("Future occurrences stopped. Recorded history is preserved.");
+                } else {
+                  onRepeatRuleUpdate(selected.id, undefined, selected.description ?? "");
+                  const nextDraft = draftFromRepeatRule({ ...selected, repeatRule: undefined }, project.start, timeZone);
+                  setDraft(nextDraft);
+                  setBaselineDraft(nextDraft);
+                  setSaveNotice("Recurring rule removed.");
+                }
+                setPendingDestructiveAction(null);
+              }}>{pendingDestructiveAction === "stop" ? "Stop future occurrences" : "Remove recurrence"}</Button>
+            </div>
+          </div>
+        )}
+
+        {saveNotice && <p className="recurringStatusMessage" role="status" aria-live="polite">{saveNotice}</p>}
+        {selectedAutomatic && (
+          <div className="recurringPreview">
+            <div className="recurringPreviewHeader">
+              <strong>History</strong>
+              <span>{occurrenceHistory.length} occurrences / {historyEntries.length - occurrenceHistory.length} rule changes</span>
+            </div>
+            {historyEntries.length ? (
+              <div className="recurringHistoryList">
+                {visibleHistory.map((entry) => entry.kind === "occurrence" ? (
+                  <div key={entry.record.id} className={cn("recurringHistoryItem", entry.record.status)}>
+                    <Badge variant={entry.record.status === "exception" ? "destructive" : entry.record.status === "occurred" ? "success" : "outline"}>{entry.record.status}</Badge>
+                    <span>{formatShortDateTimeInZone(entry.record.start, timeZone)}</span>
+                    <strong>{entry.record.title}</strong>
+                  </div>
+                ) : (
+                  <div key={entry.changeSet.id} className="recurringHistoryItem ruleChange">
+                    <Badge variant="secondary"><RefreshCw />rule</Badge>
+                    <span>{formatShortDateTimeInZone(entry.changeSet.createdAt, timeZone)}</span>
+                    <strong>{entry.changeSet.title}</strong>
+                  </div>
+                ))}
+                <PaginationControls
+                  page={safeHistoryPage}
+                  pageCount={historyPageCount}
+                  pageSize={historyPageSize}
+                  total={historyEntries.length}
+                  onPageChange={setHistoryPage}
+                  label="recurring history"
+                />
+              </div>
+            ) : <div className="recurringEmpty">No automatic occurrence history yet.</div>}
+          </div>
+        )}
       </form>
     </div>
+  );
+}
+
+function RecurrenceModeIcon() {
+  return (
+    <span className="recurrenceIconStack" role="img" aria-label="Recurring automatic occurrence" title="Recurring automatic occurrence">
+      <RefreshCw aria-hidden="true" />
+      <Zap aria-hidden="true" />
+    </span>
   );
 }
 
@@ -3804,6 +4403,7 @@ function WorkItemComposer({
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [draft, setDraft] = useState<WorkItemCreateValues>({
     title: "",
+    description: "",
     kind: "task",
     parentId: undefined,
     durationDays: 1,
@@ -3825,6 +4425,7 @@ function WorkItemComposer({
     setDraft((current) => ({
       ...current,
       title: "",
+      description: "",
       kind: "task",
       durationDays: 1,
       effortHours: 2,
@@ -3859,6 +4460,7 @@ function WorkItemComposer({
         >
           <div className="workItemQuickCreate">
             <SettingsInput label="Title" name={`work-title-${projectId}`} value={draft.title} onChange={(value) => update({ title: value })} placeholder="Task or milestone title" autoComplete="off" />
+            <SettingsInput label="Description" name={`work-description-${projectId}`} value={draft.description} onChange={(value) => update({ description: value })} placeholder="What happens or what needs to be done?" autoComplete="off" />
             <div className="quickProjectDefaults" aria-label="Work item defaults">
               <Badge variant="secondary" className="iconBadge" title="Kind"><Workflow />{draft.kind}</Badge>
               <Badge variant="outline" className="iconBadge" title="Duration"><CalendarClock />{draft.durationDays}d</Badge>
@@ -4136,29 +4738,36 @@ function TaskProgressPanel({
 }
 
 function CalendarView({
-  projects,
-  workItems,
-  schedules
+  workspace,
+  schedules,
+  currentTime,
+  onOccurrenceSkip,
+  onOccurrenceReschedule,
+  onOccurrenceException
 }: {
-  projects: Project[];
-  workItems: WorkItem[];
+  workspace: WorkspaceSnapshot;
   schedules: ScheduleResult[];
-}) {
-  const [monthStart, setMonthStart] = useState(() => monthStartIso(now));
-  const [selectedDay, setSelectedDay] = useState(now.slice(0, 10));
+  currentTime: string;
+} & AutomaticOccurrenceHandlers) {
+  const { projects, workItems, timeZone } = workspace;
+  const [monthStart, setMonthStart] = useState(() => monthStartKey(currentTime, timeZone));
+  const [selectedDay, setSelectedDay] = useState(() => zonedDateKey(currentTime, timeZone));
   const [monthEventsOpen, setMonthEventsOpen] = useState(false);
   const [recurringOpen, setRecurringOpen] = useState(false);
+  const [showAutomatic, setShowAutomatic] = useState(true);
+  const [selectedOccurrence, setSelectedOccurrence] = useState<RecurringOccurrence>();
   const days = buildCalendarDays(monthStart);
-  const gridStart = `${days[0]}T00:00:00.000Z`;
-  const gridEnd = addSeconds(`${days[days.length - 1]}T00:00:00.000Z`, daySeconds);
-  const events = buildCalendarEvents(projects, workItems, schedules, gridStart, gridEnd);
-  const recurringRules = buildRecurringRules(projects, workItems);
+  const gridStart = zonedDateTimeToIso(days[0], "00:00", timeZone);
+  const gridEnd = zonedDateTimeToIso(addSeconds(`${days[days.length - 1]}T00:00:00.000Z`, daySeconds).slice(0, 10), "00:00", timeZone);
+  const allEvents = buildCalendarEvents(workspace, schedules, gridStart, gridEnd, currentTime);
+  const events = showAutomatic ? allEvents : allEvents.filter((event) => !event.automatic);
+  const recurringRules = buildRecurringRules(workspace, currentTime);
   const eventsByDay = new Map<string, CalendarEvent[]>();
   for (const event of events) {
-    const day = event.start.slice(0, 10);
+    const day = zonedDateKey(event.start, timeZone);
     eventsByDay.set(day, [...(eventsByDay.get(day) ?? []), event]);
   }
-  const monthEvents = events.filter((event) => isSameUtcMonth(event.start.slice(0, 10), monthStart));
+  const monthEvents = events.filter((event) => isSameCalendarMonth(zonedDateKey(event.start, timeZone), monthStart));
   const selectedEvents = eventsByDay.get(selectedDay) ?? [];
   const monthEventPage = usePagedItems(monthEvents, 10);
   const recurringRulePage = usePagedItems(recurringRules, 12);
@@ -4166,14 +4775,19 @@ function CalendarView({
   const selectedLabel = new Intl.DateTimeFormat("en", { day: "2-digit", month: "short", timeZone: "UTC", weekday: "short" }).format(new Date(`${selectedDay}T00:00:00.000Z`));
 
   const changeMonth = (offset: number) => {
-    const nextMonth = addUtcMonths(monthStart, offset);
+    const nextMonth = addCalendarMonths(monthStart, offset);
     setMonthStart(nextMonth);
-    setSelectedDay(nextMonth.slice(0, 10));
+    setSelectedDay(nextMonth);
   };
 
   const jumpToday = () => {
-    setMonthStart(monthStartIso(now));
-    setSelectedDay(now.slice(0, 10));
+    setMonthStart(monthStartKey(currentTime, timeZone));
+    setSelectedDay(zonedDateKey(currentTime, timeZone));
+  };
+
+  const openOccurrence = (occurrence: RecurringOccurrence) => {
+    setMonthEventsOpen(false);
+    setSelectedOccurrence(occurrence);
   };
 
   return (
@@ -4184,6 +4798,16 @@ function CalendarView({
           <CardDescription>Scheduled work and recurring cycles across active projects.</CardDescription>
         </div>
         <div className="calendarControls">
+          <Button
+            type="button"
+            variant="outline"
+            size="icon"
+            className="calendarAutoFilter"
+            aria-label={showAutomatic ? "Hide automatic recurring occurrences" : "Show automatic recurring occurrences"}
+            title={showAutomatic ? "Hide automatic occurrences" : "Show automatic occurrences"}
+            aria-pressed={showAutomatic}
+            onClick={() => setShowAutomatic((visible) => !visible)}
+          ><Zap /></Button>
           <Button type="button" variant="outline" size="icon" aria-label="Previous month" title="Previous month" onClick={() => changeMonth(-1)}><ChevronLeft /></Button>
           <Button type="button" variant="outline" onClick={jumpToday}>Today</Button>
           <Button type="button" variant="outline" size="icon" aria-label="Next month" title="Next month" onClick={() => changeMonth(1)}><ChevronRight /></Button>
@@ -4216,7 +4840,7 @@ function CalendarView({
           </SheetHeader>
           <div className="calendarAgenda monthEventSheetList">
             {monthEvents.length ? monthEventPage.items.map((event) => (
-              <CalendarAgendaEvent key={event.id} event={event} />
+              <CalendarAgendaEvent key={event.id} event={event} timeZone={timeZone} onOccurrenceOpen={openOccurrence} />
             )) : (
               <div className="emptyState">
                 <CalendarClock />
@@ -4237,7 +4861,7 @@ function CalendarView({
             {recurringRules.length ? recurringRulePage.items.map((rule) => (
               <a key={rule.id} className="calendarRecurringRule" href={rule.href}>
                 <div className="calendarAgendaIcon">
-                  <RefreshCw />
+                  {rule.automatic ? <RecurrenceModeIcon /> : <RefreshCw />}
                 </div>
                 <div className="calendarRecurringRuleBody">
                   <div className="calendarRecurringRuleTitle">
@@ -4247,7 +4871,8 @@ function CalendarView({
                   <div className="calendarRecurringRuleMeta">
                     <Badge variant="outline"><RefreshCw />{rule.cadenceLabel}</Badge>
                     <Badge variant="outline"><Timer />{rule.startModeLabel}</Badge>
-                    <Badge variant="outline"><CalendarClock />{formatShortDateTime(rule.nextStart)}</Badge>
+                    <Badge variant="outline"><CalendarClock />{formatShortDateTimeInZone(rule.nextStart, timeZone)}</Badge>
+                    {rule.stopped && <Badge variant="outline">stopped</Badge>}
                   </div>
                   <span>{rule.projectName}</span>
                 </div>
@@ -4272,31 +4897,60 @@ function CalendarView({
             <div className="calendarGrid" role="grid" aria-label={`${monthLabel(monthStart)} calendar`}>
               {days.map((day) => {
                 const dayEvents = eventsByDay.get(day) ?? [];
-                const inMonth = isSameUtcMonth(day, monthStart);
+                const inMonth = isSameCalendarMonth(day, monthStart);
                 const isSelected = day === selectedDay;
-                const isToday = day === now.slice(0, 10);
+                const isToday = day === zonedDateKey(currentTime, timeZone);
                 return (
-                  <button
+                  <div
                     key={day}
-                    type="button"
                     className={cn("calendarDay", !inMonth && "outsideMonth", isSelected && "selected", isToday && "today")}
-                    onClick={() => setSelectedDay(day)}
-                    aria-label={`${day}, ${dayEvents.length} event${dayEvents.length === 1 ? "" : "s"}`}
+                    role="gridcell"
                   >
-                    <span className="calendarDayTop">
+                    <button
+                      type="button"
+                      className="calendarDaySelector"
+                      onClick={() => setSelectedDay(day)}
+                      aria-label={`${day}, ${dayEvents.length} event${dayEvents.length === 1 ? "" : "s"}`}
+                    >
+                      <span className="calendarDayTop">
                       <strong>{Number(day.slice(8, 10))}</strong>
                       {dayEvents.length > 0 && <Badge variant={dayEvents.some((event) => event.critical) ? "warning" : "secondary"}>{dayEvents.length}</Badge>}
-                    </span>
-                    <span className="calendarDayEvents">
-                      {dayEvents.slice(0, 3).map((event) => (
-                        <span key={event.id} className={cn("calendarEventChip", event.kind, event.critical && "critical")} title={`${event.projectName}: ${event.title}`}>
-                          {event.kind === "recurring" ? <RefreshCw /> : <CalendarClock />}
+                      </span>
+                    </button>
+                    <div className="calendarDayEvents">
+                      {dayEvents.slice(0, 3).map((event) => {
+                        const eventClassName = cn("calendarEventChip", event.kind, event.automatic && "automatic", event.status, event.critical && "critical");
+                        const eventContent = (
+                          <>
+                          {event.automatic ? <RecurrenceModeIcon /> : event.kind === "recurring" ? <RefreshCw /> : <CalendarClock />}
+                          {event.status === "exception" && <AlertTriangle aria-hidden="true" />}
+                          {event.status === "skipped" && <CircleSlash2 aria-hidden="true" />}
                           <span>{event.title}</span>
-                        </span>
-                      ))}
+                          </>
+                        );
+                        return event.automatic && event.occurrence ? (
+                          <button
+                            key={event.id}
+                            type="button"
+                            className={eventClassName}
+                            title={`${event.projectName}: ${event.title}, ${event.status}`}
+                            aria-label={`Open ${event.title}, automatic recurring occurrence, ${event.status}`}
+                            onClick={() => {
+                              setSelectedDay(day);
+                              openOccurrence(event.occurrence!);
+                            }}
+                          >
+                            {eventContent}
+                          </button>
+                        ) : (
+                          <a key={event.id} className={eventClassName} href={event.href} title={`${event.projectName}: ${event.title}`}>
+                            {eventContent}
+                          </a>
+                        );
+                      })}
                       {dayEvents.length > 3 && <span className="calendarMore">+{dayEvents.length - 3}</span>}
-                    </span>
-                  </button>
+                    </div>
+                  </div>
                 );
               })}
             </div>
@@ -4310,7 +4964,7 @@ function CalendarView({
           </CardHeader>
           <CardContent className="calendarAgenda">
             {selectedEvents.length ? selectedEvents.map((event) => (
-              <CalendarAgendaEvent key={event.id} event={event} />
+              <CalendarAgendaEvent key={event.id} event={event} timeZone={timeZone} onOccurrenceOpen={openOccurrence} />
             )) : (
               <div className="emptyState">
                 <CalendarClock />
@@ -4325,17 +4979,31 @@ function CalendarView({
           </CardContent>
         </Card>
       </div>
+      <AutomaticOccurrenceSheet
+        occurrence={selectedOccurrence}
+        open={Boolean(selectedOccurrence)}
+        onOpenChange={(open) => !open && setSelectedOccurrence(undefined)}
+        timeZone={timeZone}
+        currentTime={currentTime}
+        resources={workspace.resources}
+        historyRecords={workspace.recurringOccurrences}
+        ruleChangeSets={workspace.changeSets}
+        onOccurrenceSkip={onOccurrenceSkip}
+        onOccurrenceReschedule={onOccurrenceReschedule}
+        onOccurrenceException={onOccurrenceException}
+      />
     </section>
   );
 }
 
 function buildCalendarEvents(
-  projects: Project[],
-  workItems: WorkItem[],
+  workspace: WorkspaceSnapshot,
   schedules: ScheduleResult[],
   windowStart: string,
-  windowEnd: string
+  windowEnd: string,
+  currentTime: string
 ): CalendarEvent[] {
+  const { projects, workItems } = workspace;
   const projectById = new Map(projects.map((project) => [project.id, project]));
   const events: CalendarEvent[] = [];
 
@@ -4363,19 +5031,27 @@ function buildCalendarEvents(
     if (!item.repeatRule || item.kind === "phase") continue;
     const project = projectById.get(item.projectId);
     if (!project || isProjectArchived(project)) continue;
-    const occurrenceLimit = Math.min(90, Math.max(1, Math.round(item.repeatRule.count || 1)));
-    for (const occurrence of generateRecurringOccurrences(item, project.start, occurrenceLimit)) {
-      if (occurrence.start < windowStart || occurrence.start >= windowEnd) continue;
+    for (const occurrence of projectRecurringOccurrences(item, project.start, {
+      timeZone: workspace.timeZone,
+      now: currentTime,
+      windowStart,
+      windowEnd,
+      records: workspace.recurringOccurrences,
+      limit: 400
+    })) {
       events.push({
-        id: `recurring-${item.id}-${occurrence.index}`,
+        id: `recurring-${occurrence.id}`,
         kind: "recurring",
         projectId: project.id,
         projectName: project.name,
-        title: item.title,
+        title: occurrence.title,
         start: occurrence.start,
         finish: occurrence.finish,
-        href: hashForRoute({ view: "project", selectedProjectId: project.id, target: "recurring" }),
-        repeatLabel: repeatCadenceLabel(item.repeatRule)
+        href: hashForRoute({ view: "project", selectedProjectId: project.id, target: recurringRouteTarget(item.id) }),
+        repeatLabel: repeatCadenceLabel(item.repeatRule),
+        automatic: occurrence.executionMode === "automatic",
+        status: occurrence.executionMode === "automatic" ? occurrence.status : undefined,
+        occurrence: occurrence.executionMode === "automatic" ? occurrence : undefined
       });
     }
   }
@@ -4383,16 +5059,17 @@ function buildCalendarEvents(
   return events.sort((a, b) => a.start.localeCompare(b.start) || a.projectName.localeCompare(b.projectName) || a.title.localeCompare(b.title));
 }
 
-function buildRecurringRules(projects: Project[], workItems: WorkItem[]): CalendarRecurringRule[] {
+function buildRecurringRules(workspace: WorkspaceSnapshot, currentTime: string): CalendarRecurringRule[] {
+  const { projects, workItems } = workspace;
   const projectById = new Map(projects.map((project) => [project.id, project]));
   const rules: CalendarRecurringRule[] = [];
   for (const item of workItems) {
     if (!item.repeatRule || item.kind === "phase") continue;
     const project = projectById.get(item.projectId);
     if (!project || isProjectArchived(project)) continue;
-    const occurrenceLimit = Math.min(90, Math.max(1, Math.round(item.repeatRule.count || 1)));
-    const occurrences = generateRecurringOccurrences(item, project.start, occurrenceLimit);
-    const nextOccurrence = occurrences.find((occurrence) => occurrence.start >= now) ?? occurrences[0];
+    const nextOccurrence = item.repeatRule.stoppedAt
+      ? projectRecurringOccurrences(item, project.start, { timeZone: workspace.timeZone, now: currentTime, records: workspace.recurringOccurrences, limit: 1 })[0]
+      : nextRecurringOccurrence(item, project.start, currentTime, workspace.timeZone);
     if (!nextOccurrence) continue;
     rules.push({
       id: item.id,
@@ -4404,43 +5081,229 @@ function buildRecurringRules(projects: Project[], workItems: WorkItem[]): Calend
       startModeLabel: repeatStartModeLabel(item.repeatRule),
       nextStart: nextOccurrence.start,
       nextFinish: nextOccurrence.finish,
-      href: hashForRoute({ view: "project", selectedProjectId: project.id, target: "recurring" })
+      href: hashForRoute({ view: "project", selectedProjectId: project.id, target: recurringRouteTarget(item.id) }),
+      automatic: repeatExecutionMode(item.repeatRule) === "automatic",
+      stopped: Boolean(item.repeatRule.stoppedAt)
     });
   }
   return rules.sort((a, b) => a.nextStart.localeCompare(b.nextStart) || a.projectName.localeCompare(b.projectName) || a.title.localeCompare(b.title));
 }
 
-function CalendarAgendaEvent({ event }: { event: CalendarEvent }) {
-  return (
-    <a className={cn("calendarAgendaItem", event.kind, event.critical && "critical")} href={event.href}>
+function CalendarAgendaEvent({ event, timeZone, onOccurrenceOpen }: { event: CalendarEvent; timeZone: string; onOccurrenceOpen: (occurrence: RecurringOccurrence) => void }) {
+  const content = (
+    <>
       <div className="calendarAgendaIcon">
-        {event.kind === "recurring" ? <RefreshCw /> : <CalendarClock />}
+        {event.automatic ? <RecurrenceModeIcon /> : event.kind === "recurring" ? <RefreshCw /> : <CalendarClock />}
       </div>
       <div className="calendarAgendaBody">
         <div className="calendarAgendaTitle">
           <strong>{event.title}</strong>
           <Badge variant={event.kind === "recurring" ? "outline" : event.critical ? "warning" : "secondary"}>
-            {event.kind === "recurring" ? event.repeatLabel ?? "repeat" : event.critical ? "critical" : "scheduled"}
+            {event.status ?? (event.kind === "recurring" ? event.repeatLabel ?? "repeat" : event.critical ? "critical" : "scheduled")}
           </Badge>
+          {event.status === "exception" && <AlertTriangle aria-label="Exception" />}
+          {event.status === "skipped" && <CircleSlash2 aria-label="Skipped" />}
         </div>
         <span>{event.projectName}</span>
-        <em>{formatShortDateTime(event.start)} / {formatShortDateTime(event.finish)}</em>
+        <em>{formatShortDateTimeInZone(event.start, timeZone)} / {formatShortDateTimeInZone(event.finish, timeZone)}</em>
       </div>
-    </a>
+    </>
+  );
+  const className = cn("calendarAgendaItem", event.kind, event.automatic && "automatic", event.status, event.critical && "critical");
+  if (event.automatic && event.occurrence) {
+    return <button type="button" className={className} onClick={() => onOccurrenceOpen(event.occurrence!)} aria-label={`Open ${event.title}, automatic recurring occurrence, ${event.status}`}>{content}</button>;
+  }
+  return <a className={className} href={event.href}>{content}</a>;
+}
+
+function AutomaticOccurrenceSheet({
+  occurrence,
+  open,
+  onOpenChange,
+  timeZone,
+  currentTime,
+  resources,
+  historyRecords,
+  ruleChangeSets,
+  onOccurrenceSkip,
+  onOccurrenceReschedule,
+  onOccurrenceException
+}: {
+  occurrence?: RecurringOccurrence;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  timeZone: string;
+  currentTime: string;
+  resources: Resource[];
+  historyRecords: RecurringOccurrenceRecord[];
+  ruleChangeSets: ChangeSet[];
+} & AutomaticOccurrenceHandlers) {
+  const [editOnce, setEditOnce] = useState(false);
+  const [startDate, setStartDate] = useState("");
+  const [startTime, setStartTime] = useState("");
+  const [durationMinutes, setDurationMinutes] = useState(0);
+  const [exceptionNote, setExceptionNote] = useState("");
+  const [dueDate, setDueDate] = useState("");
+  const [resourceId, setResourceId] = useState("none");
+  const [announcement, setAnnouncement] = useState("");
+  const [actionError, setActionError] = useState("");
+  const closeTimerRef = useRef<number | undefined>();
+
+  useEffect(() => {
+    if (!occurrence) return;
+    setEditOnce(false);
+    setStartDate(zonedDateKey(occurrence.start, timeZone));
+    setStartTime(zonedTimeKey(occurrence.start, timeZone));
+    setDurationMinutes(Math.max(0, Math.round(secondsBetween(occurrence.start, occurrence.finish) / 60)));
+    setExceptionNote("");
+    setDueDate(zonedDateKey(currentTime, timeZone));
+    setResourceId("none");
+    setAnnouncement("");
+    setActionError("");
+  }, [occurrence?.id, occurrence?.start, occurrence?.finish, timeZone]);
+
+  useEffect(() => () => {
+    if (closeTimerRef.current) window.clearTimeout(closeTimerRef.current);
+  }, []);
+
+  if (!occurrence) return null;
+  const future = occurrence.status === "scheduled" && occurrence.start > currentTime;
+  const canReportException = occurrence.status === "occurred" && occurrence.finish <= currentTime;
+  const rescheduled = occurrence.start !== occurrence.scheduledStart || occurrence.finish !== occurrence.scheduledFinish;
+  const editRuleHref = hashForRoute({ view: "project", selectedProjectId: occurrence.projectId, target: recurringRouteTarget(occurrence.workItemId) });
+  const recentHistory = [
+    ...historyRecords
+      .filter((record) => record.workItemId === occurrence.workItemId)
+      .map((record) => ({ kind: "occurrence" as const, at: record.updatedAt, id: record.id, label: record.status, title: record.title })),
+    ...ruleChangeSets
+      .filter((changeSet) => changeSet.diffs.some((diff) => diff.entity === "WorkItem" && diff.entityId === occurrence.workItemId && diff.field.startsWith("repeatRule")))
+      .map((changeSet) => ({ kind: "rule" as const, at: changeSet.createdAt, id: changeSet.id, label: "rule", title: changeSet.title }))
+  ].sort((left, right) => right.at.localeCompare(left.at)).slice(0, 3);
+  const announceAndClose = (message: string) => {
+    setAnnouncement(message);
+    if (closeTimerRef.current) window.clearTimeout(closeTimerRef.current);
+    closeTimerRef.current = window.setTimeout(() => onOpenChange(false), 500);
+  };
+
+  return (
+    <Sheet open={open} onOpenChange={onOpenChange}>
+      <SheetContent className="w-[92vw] overflow-y-auto sm:max-w-xl">
+        <SheetHeader>
+          <SheetTitle>{occurrence.title}</SheetTitle>
+          <SheetDescription className="srOnly">Automatic recurring occurrence</SheetDescription>
+        </SheetHeader>
+        <div className="automaticOccurrenceDetails">
+          <div className="automaticOccurrenceBadges">
+            <RecurrenceModeIcon />
+            <Badge variant={occurrence.status === "exception" ? "destructive" : occurrence.status === "occurred" ? "success" : "outline"}>{occurrence.status}</Badge>
+            <Badge variant="outline"><CalendarClock />{formatShortDateTimeInZone(occurrence.start, timeZone)}</Badge>
+          </div>
+          <p>{occurrence.description || "No description."}</p>
+          <SettingsRow label="Time zone" value={timeZone} />
+          <SettingsRow label="Scheduled range" value={`${formatShortDateTimeInZone(occurrence.scheduledStart, timeZone)} – ${formatShortDateTimeInZone(occurrence.scheduledFinish, timeZone)}`} />
+          {rescheduled && <SettingsRow label="Current range" value={`${formatShortDateTimeInZone(occurrence.start, timeZone)} – ${formatShortDateTimeInZone(occurrence.finish, timeZone)}`} />}
+          {occurrence.record?.settlementSource && <SettingsRow label="Recorded by" value={occurrence.record.settlementSource === "system-catch-up" ? "System catch-up" : "On time"} />}
+          {occurrence.record?.exceptionNote && <div className="automaticOccurrenceException"><AlertTriangle />{occurrence.record.exceptionNote}</div>}
+          {recentHistory.length > 0 && (
+            <div className="automaticOccurrenceHistory">
+              <div className="recurringPreviewHeader"><strong>History</strong><span>latest {recentHistory.length}</span></div>
+              <div className="recurringHistoryList">
+                {recentHistory.map((entry) => (
+                  <div key={entry.id} className={cn("recurringHistoryItem", entry.kind === "rule" && "ruleChange")}>
+                    <Badge variant={entry.kind === "rule" ? "secondary" : entry.label === "exception" ? "destructive" : entry.label === "occurred" ? "success" : "outline"}>{entry.label}</Badge>
+                    <span>{formatShortDateTimeInZone(entry.at, timeZone)}</span>
+                    <strong>{entry.title}</strong>
+                  </div>
+                ))}
+              </div>
+              <Button asChild variant="outline"><a href={editRuleHref}><RefreshCw />Open full history</a></Button>
+            </div>
+          )}
+
+          {future && !editOnce && (
+            <div className="automaticOccurrenceActions">
+              <Button type="button" variant="outline" onClick={() => setEditOnce(true)}><CalendarClock />Edit this occurrence</Button>
+              <Button type="button" variant="outline" onClick={() => {
+                try {
+                  onOccurrenceSkip(occurrence);
+                  announceAndClose("Occurrence skipped.");
+                } catch (error) {
+                  setActionError(error instanceof Error ? error.message : "This occurrence can no longer be skipped.");
+                }
+              }}><CircleSlash2 />Skip this occurrence</Button>
+              <Button asChild type="button" variant="outline"><a href={editRuleHref}><RefreshCw />Edit rule</a></Button>
+            </div>
+          )}
+
+          {future && editOnce && (
+            <form className="automaticOccurrenceEditForm" onSubmit={(event) => {
+              event.preventDefault();
+              try {
+                const start = zonedDateTimeToIso(startDate, startTime, timeZone);
+                onOccurrenceReschedule(occurrence, start, addSeconds(start, durationMinutes * 60));
+                announceAndClose("Occurrence rescheduled.");
+              } catch (error) {
+                setActionError(error instanceof Error ? error.message : "Enter a valid future date and time.");
+              }
+            }}>
+              <SettingsInput label="Date" name={`occurrence-date-${occurrence.id}`} value={startDate} onChange={setStartDate} placeholder="2026-07-31" autoComplete="off" />
+              <SettingsInput label="Time" name={`occurrence-time-${occurrence.id}`} value={startTime} onChange={setStartTime} placeholder="09:00" autoComplete="off" />
+              <label className="block"><span className="text-sm font-medium">Duration min</span><Input className="mt-2" type="number" min={0} value={durationMinutes} onChange={(event) => setDurationMinutes(Math.max(0, Number(event.target.value) || 0))} /></label>
+              <div className="automaticOccurrenceActions"><Button type="submit"><Save />Save this occurrence</Button><Button type="button" variant="outline" onClick={() => setEditOnce(false)}>Cancel</Button></div>
+            </form>
+          )}
+
+          {canReportException && (
+            <form className="exceptionReportForm" onSubmit={(event) => {
+              event.preventDefault();
+              if (!exceptionNote.trim()) return;
+              try {
+                onOccurrenceException(
+                  occurrence,
+                  exceptionNote,
+                  zonedDateTimeToIso(dueDate, "23:59", timeZone),
+                  resourceId === "none" ? undefined : resourceId
+                );
+                announceAndClose("Exception reported and follow-up task created.");
+              } catch (error) {
+                setActionError(error instanceof Error ? error.message : "Enter a valid follow-up date.");
+              }
+            }}>
+              <FormTextarea label="Exception explanation" value={exceptionNote} onChange={setExceptionNote} placeholder="What failed or needs attention?" />
+              <div className="automaticOccurrenceEditForm">
+                <SettingsInput label="Follow-up due" name={`exception-due-${occurrence.id}`} value={dueDate} onChange={setDueDate} placeholder="2026-07-18" autoComplete="off" />
+                <NativeSelectField label="Assignee" value={resourceId} onChange={setResourceId} options={[{ value: "none", label: "Unassigned" }, ...resources.map((resource) => ({ value: resource.id, label: resource.name }))]} />
+              </div>
+              <Button type="submit" disabled={!exceptionNote.trim()}><AlertTriangle />Report exception</Button>
+            </form>
+          )}
+          {actionError && <p className="recurringFormError" role="alert">{actionError}</p>}
+          <div className="srOnly" aria-live="polite">{announcement}</div>
+        </div>
+      </SheetContent>
+    </Sheet>
   );
 }
 
 function TodayExecution({
+  workspace,
   projects,
   schedules,
   gates,
-  onActualRecord
+  onActualRecord,
+  currentTime,
+  onOccurrenceSkip,
+  onOccurrenceReschedule,
+  onOccurrenceException
 }: {
+  workspace: WorkspaceSnapshot;
   projects: Project[];
   schedules: ScheduleResult[];
   gates: AuditGate[];
   onActualRecord: (projectId: string, workItemId: string, values: ActualRecordValues) => void;
-}) {
+  currentTime: string;
+} & AutomaticOccurrenceHandlers) {
+  const [selectedOccurrence, setSelectedOccurrence] = useState<RecurringOccurrence>();
   const activeProjectIds = new Set(projects.filter((project) => !isProjectArchived(project)).map((project) => project.id));
   const rows = schedules
     .filter((schedule) => activeProjectIds.has(schedule.projectId))
@@ -4460,7 +5323,7 @@ function TodayExecution({
           candidate.severity === "warning" &&
           candidate.targetId === item.workItem.id
       );
-      const timing = scheduleTiming(item);
+      const timing = scheduleTiming(item, currentTime);
       return { item, project, gate, warningGate, timing };
     })
     .sort((a, b) => {
@@ -4473,8 +5336,15 @@ function TodayExecution({
     });
   const activeRows = rows.filter((row) => row.timing !== "Upcoming");
   const upcomingRows = rows.filter((row) => row.timing === "Upcoming");
+  const automaticReminderRows = selectAutomaticReminderOccurrences(workspace, currentTime)
+    .map((occurrence) => ({ occurrence, project: projects.find((project) => project.id === occurrence.projectId) }))
+    .filter((row): row is { occurrence: RecurringOccurrence; project: Project } => Boolean(row.project && activeProjectIds.has(row.project.id)));
+  const upcomingEntries = [
+    ...upcomingRows.map((row) => ({ kind: "scheduled" as const, row, start: row.item.start })),
+    ...automaticReminderRows.map((row) => ({ kind: "automatic-reminder" as const, row, start: row.occurrence.start }))
+  ].sort((a, b) => a.start.localeCompare(b.start));
   const activeRowsPage = usePagedItems(activeRows, 8);
-  const upcomingRowsPage = usePagedItems(upcomingRows, 4);
+  const upcomingRowsPage = usePagedItems(upcomingEntries, 4);
 
   return (
     <section className="grid gap-3 lg:grid-cols-2">
@@ -4516,29 +5386,49 @@ function TodayExecution({
           <div className="cardHeaderLine">
             <CardTitle className="flex items-center gap-2"><CalendarClock className="h-4 w-4" /> Upcoming Watchlist</CardTitle>
             <div className="cardHeaderBadges">
-              <Badge variant="secondary" className="iconBadge" title="Upcoming work"><CalendarClock />{upcomingRows.length}</Badge>
+              <Badge variant="secondary" className="iconBadge" title="Upcoming watchlist"><CalendarClock />{upcomingEntries.length}</Badge>
               <Badge variant={upcomingRows.some((row) => row.item.isCritical) ? "destructive" : "outline"} className="iconBadge" title="Critical path"><AlertTriangle />{upcomingRows.filter((row) => row.item.isCritical).length} CP</Badge>
             </div>
           </div>
         </CardHeader>
         <CardContent className="space-y-1.5">
-          {upcomingRows.length ? upcomingRowsPage.items.map(({ item, project, gate, warningGate }) => (
-            <article className={cn("todayItem mutedRow", gate && "isLocked")} key={item.workItem.id}>
-              <div className="todayItemMain">
-                <div className="min-w-0">
-                  <strong className="todayItemTitle">{item.workItem.title}</strong>
-                  <div className="todayItemMeta">
-                    <Badge variant="secondary" className="todayIconBadge todayProjectBadge" title={project.name}><Layers3 />{compactProjectCode(project.name)}</Badge>
-                    {item.isCritical && <Badge variant="destructive" className="todayIconBadge" title="Critical path"><AlertTriangle />CP</Badge>}
-                    <Badge variant="outline" className="todayIconBadge" title={formatScheduleRange(item)}><CalendarClock />{formatCompactScheduleRange(item)}</Badge>
+          {upcomingEntries.length ? upcomingRowsPage.items.map((entry) => {
+            if (entry.kind === "automatic-reminder") {
+              const { occurrence, project } = entry.row;
+              return (
+                <button type="button" className="todayItem mutedRow automaticReminder" key={occurrence.id} onClick={() => setSelectedOccurrence(occurrence)} aria-label={`Open reminder for ${occurrence.title}, automatic recurring occurrence`}>
+                  <div className="todayItemMain">
+                    <div className="min-w-0">
+                      <strong className="todayItemTitle">{occurrence.title}</strong>
+                      <div className="todayItemMeta">
+                        <Badge variant="secondary" className="todayIconBadge todayProjectBadge" title={project.name}><Layers3 />{compactProjectCode(project.name)}</Badge>
+                        <Badge variant="outline" className="todayIconBadge" title="Automatic recurring reminder"><RecurrenceModeIcon /></Badge>
+                        <Badge variant="outline" className="todayIconBadge" title={formatShortDateTimeInZone(occurrence.start, workspace.timeZone)}><CalendarClock />{formatShortDateTimeInZone(occurrence.start, workspace.timeZone)}</Badge>
+                      </div>
+                    </div>
                   </div>
-                  {gate && <span className="todayInlineAlert dangerText"><Lock size={13} />{gate.reason}</span>}
-                  {!gate && warningGate && <span className="todayInlineAlert warnReason"><AlertTriangle size={13} />{warningGate.reason}</span>}
+                </button>
+              );
+            }
+            const { item, project, gate, warningGate } = entry.row;
+            return (
+              <article className={cn("todayItem mutedRow", gate && "isLocked")} key={item.workItem.id}>
+                <div className="todayItemMain">
+                  <div className="min-w-0">
+                    <strong className="todayItemTitle">{item.workItem.title}</strong>
+                    <div className="todayItemMeta">
+                      <Badge variant="secondary" className="todayIconBadge todayProjectBadge" title={project.name}><Layers3 />{compactProjectCode(project.name)}</Badge>
+                      {item.isCritical && <Badge variant="destructive" className="todayIconBadge" title="Critical path"><AlertTriangle />CP</Badge>}
+                      <Badge variant="outline" className="todayIconBadge" title={formatScheduleRange(item)}><CalendarClock />{formatCompactScheduleRange(item)}</Badge>
+                    </div>
+                    {gate && <span className="todayInlineAlert dangerText"><Lock size={13} />{gate.reason}</span>}
+                    {!gate && warningGate && <span className="todayInlineAlert warnReason"><AlertTriangle size={13} />{warningGate.reason}</span>}
+                  </div>
+                  {!gate && <InlineActualForm projectId={project.id} item={item.workItem} onRecord={onActualRecord} compact />}
                 </div>
-                {!gate && <InlineActualForm projectId={project.id} item={item.workItem} onRecord={onActualRecord} compact />}
-              </div>
-            </article>
-          )) : <div className="compactEmptyState"><CheckCircle2 />Clear</div>}
+              </article>
+            );
+          }) : <div className="compactEmptyState"><CheckCircle2 />Clear</div>}
           <PaginationControls label="upcoming work" {...upcomingRowsPage} onPageChange={upcomingRowsPage.setPage} />
         </CardContent>
       </Card>
@@ -4555,6 +5445,19 @@ function TodayExecution({
           <SignalList gates={sortGates(gates.filter((gate) => activeProjectIds.has(gate.projectId) && gate.severity === "hard" && gate.status !== "cleared")).slice(0, 8)} />
         </CardContent>
       </Card>
+      <AutomaticOccurrenceSheet
+        occurrence={selectedOccurrence}
+        open={Boolean(selectedOccurrence)}
+        onOpenChange={(open) => !open && setSelectedOccurrence(undefined)}
+        timeZone={workspace.timeZone}
+        currentTime={currentTime}
+        resources={workspace.resources}
+        historyRecords={workspace.recurringOccurrences}
+        ruleChangeSets={workspace.changeSets}
+        onOccurrenceSkip={onOccurrenceSkip}
+        onOccurrenceReschedule={onOccurrenceReschedule}
+        onOccurrenceException={onOccurrenceException}
+      />
     </section>
   );
 }
@@ -5162,6 +6065,7 @@ function Settings({
   onForgetRememberedPassphrase,
   autoSyncStatus,
   workspacePersistence,
+  onWorkspaceTimeZoneChange,
   onWorkspaceImport,
   onWorkspaceReset,
   onEvidenceImport
@@ -5177,6 +6081,7 @@ function Settings({
   onForgetRememberedPassphrase: () => Promise<void>;
   autoSyncStatus: AutoSyncStatus;
   workspacePersistence: { loaded: boolean; status: string; lastSavedAt: string };
+  onWorkspaceTimeZoneChange: (timeZone: string) => void;
   onWorkspaceImport: (workspace: WorkspaceSnapshot) => void;
   onWorkspaceReset: () => void;
   onEvidenceImport: (projectId: string, evidenceItems: Evidence[], reason: string) => void;
@@ -5196,6 +6101,7 @@ function Settings({
   const [evidenceProjectId, setEvidenceProjectId] = useState(() => workspace.projects[0]?.id ?? defaultProjectId);
   const [evidenceWorkItemId, setEvidenceWorkItemId] = useState<string>("project");
   const [expandedPanels, setExpandedPanels] = useState<Set<SettingsPanelId>>(() => new Set());
+  const [workspaceTimeZoneDraft, setWorkspaceTimeZoneDraft] = useState(workspace.timeZone);
   const githubSecret = githubDraft.tokenSecretId ? secretVault.readEncrypted(githubDraft.tokenSecretId) : undefined;
   const aiSecret = aiDraft.apiKeySecretId ? secretVault.readEncrypted(aiDraft.apiKeySecretId) : undefined;
   const gitHubReady = Boolean(githubDraft.owner.trim() && githubDraft.repo.trim() && githubDraft.tokenSecretId);
@@ -5264,6 +6170,22 @@ function Settings({
       setEvidenceProjectId(workspace.projects[0]?.id ?? defaultProjectId);
     }
   }, [workspace.projects, evidenceProjectId]);
+
+  useEffect(() => {
+    setWorkspaceTimeZoneDraft(workspace.timeZone);
+  }, [workspace.timeZone]);
+
+  const saveWorkspaceTimeZone = (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const timeZone = canonicalTimeZone(workspaceTimeZoneDraft);
+    if (!timeZone) {
+      setNotice("Enter a valid IANA time zone such as Asia/Tokyo or America/New_York.");
+      return;
+    }
+    onWorkspaceTimeZoneChange(timeZone);
+    setWorkspaceTimeZoneDraft(timeZone);
+    setNotice(`Workspace time zone saved as ${timeZone}. Future automatic occurrences use this time zone; recorded history keeps its original timestamps.`);
+  };
 
   const saveGitHubSync = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -5951,6 +6873,20 @@ function Settings({
             <SettingsRow label="Persistence" value={workspacePersistence.status} />
             <SettingsRow label="Last saved" value={workspacePersistence.lastSavedAt ? workspacePersistence.lastSavedAt.slice(0, 19).replace("T", " ") : "pending"} />
           </div>
+          <form className="grid gap-3 rounded-lg border bg-background p-3 md:grid-cols-[1fr_auto]" onSubmit={saveWorkspaceTimeZone}>
+            <SettingsInput
+              label="Workspace time zone"
+              name="workspace-time-zone"
+              value={workspaceTimeZoneDraft}
+              onChange={setWorkspaceTimeZoneDraft}
+              placeholder="Asia/Tokyo"
+              autoComplete="off"
+            />
+            <div className="flex items-end">
+              <Button type="submit">Save time zone</Button>
+            </div>
+            <p className="text-sm text-muted-foreground md:col-span-2">Automatic schedules follow this time zone. Existing occurrence history remains fixed to its recorded timestamps.</p>
+          </form>
           <div className="flex flex-wrap gap-2">
             <IconActionButton label="Import backup" type="button" variant="outline" onClick={() => workspaceImportRef.current?.click()}>
               <Upload />
@@ -6293,7 +7229,11 @@ function SettingsInput({
   onChange,
   placeholder,
   autoComplete,
-  testId
+  testId,
+  type = "text",
+  required = false,
+  invalid = false,
+  describedBy
 }: {
   label: string;
   name: string;
@@ -6302,6 +7242,10 @@ function SettingsInput({
   placeholder: string;
   autoComplete: string;
   testId?: string;
+  type?: React.HTMLInputTypeAttribute;
+  required?: boolean;
+  invalid?: boolean;
+  describedBy?: string;
 }) {
   const handleInput = (event: React.ChangeEvent<HTMLInputElement>) => onChange(event.target.value);
   return (
@@ -6309,6 +7253,7 @@ function SettingsInput({
       <span className="text-sm font-medium">{label}</span>
       <Input
         className="mt-2"
+        type={type}
         name={name}
         value={value}
         onInput={handleInput}
@@ -6316,6 +7261,9 @@ function SettingsInput({
         placeholder={placeholder}
         autoComplete={autoComplete}
         aria-label={label}
+        aria-invalid={invalid || undefined}
+        aria-describedby={describedBy}
+        required={required}
         data-testid={testId}
       />
     </label>
@@ -6327,13 +7275,15 @@ function NativeSelectField<T extends string>({
   value,
   onChange,
   options,
-  testId
+  testId,
+  disabled = false
 }: {
   label: string;
   value: T;
   onChange: (value: T) => void;
   options: Array<{ value: T; label: string }>;
   testId?: string;
+  disabled?: boolean;
 }) {
   return (
     <label className="block">
@@ -6343,6 +7293,7 @@ function NativeSelectField<T extends string>({
         name={testId ?? label.toLowerCase().replace(/\s+/g, "-")}
         value={value}
         onChange={(event) => onChange(event.target.value as T)}
+        disabled={disabled}
         aria-label={label}
         data-testid={testId}
       >
@@ -6541,6 +7492,17 @@ function formatShortDateTime(iso: string) {
   return `${iso.slice(5, 10)} ${iso.slice(11, 16)}`;
 }
 
+function formatShortDateTimeInZone(iso: string, timeZone: string) {
+  return new Intl.DateTimeFormat("en", {
+    day: "2-digit",
+    hour: "2-digit",
+    hourCycle: "h23",
+    minute: "2-digit",
+    month: "2-digit",
+    timeZone
+  }).format(new Date(iso));
+}
+
 function formatTick(iso: string) {
   const date = new Date(iso);
   return date.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
@@ -6560,8 +7522,8 @@ function formatCompactScheduleRange(item: ScheduledItem) {
     : `${startDate} ${startTime}->${finishDate} ${finishTime}`;
 }
 
-function scheduleTiming(item: ScheduledItem): ScheduleTiming {
-  const dayStart = `${now.slice(0, 10)}T00:00:00.000Z`;
+function scheduleTiming(item: ScheduledItem, referenceTime = now): ScheduleTiming {
+  const dayStart = `${referenceTime.slice(0, 10)}T00:00:00.000Z`;
   const dayEnd = addSeconds(dayStart, 24 * 60 * 60);
   if (item.finish < dayStart) return "Overdue";
   if (item.start < dayEnd && item.finish >= dayStart) return "Due now";

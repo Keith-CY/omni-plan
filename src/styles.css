@@ -149,6 +149,12 @@ input:focus-visible {
   outline: none;
 }
 
+.appNavButton:focus-visible,
+.sidebarCollapseButton:focus-visible {
+  outline: 2px solid var(--cyan);
+  outline-offset: 2px;
+}
+
 .srOnly,
 .routeAnnouncer {
   position: absolute;
@@ -630,6 +636,10 @@ input:focus-visible {
 
 .cardHeaderLine > :first-child {
   min-width: 0;
+}
+
+.cardHeaderLine > .iconBadge {
+  justify-self: end;
 }
 
 .collapseHeaderButton {
@@ -1665,22 +1675,33 @@ input:focus-visible {
 
 .recurringGrid {
   display: grid;
-  grid-template-columns: minmax(260px, 0.78fr) minmax(420px, 1.22fr);
-  gap: 12px;
+  grid-template-columns: minmax(240px, 276px) minmax(0, 1fr);
+  align-items: start;
+  gap: 0;
   min-width: 0;
 }
 
-.recurringPanel {
+.recurringSidebar,
+.recurringEditor {
   display: grid;
-  gap: 12px;
+  align-content: start;
+  align-self: start;
   min-width: 0;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 12px;
-  background: rgba(248, 250, 252, 0.66);
 }
 
-.recurringPanelHeader {
+.recurringSidebar {
+  gap: 10px;
+  padding-right: 16px;
+  border-right: 1px solid var(--line);
+}
+
+.recurringEditor {
+  gap: 16px;
+  padding-left: 20px;
+}
+
+.recurringPanelHeader,
+.recurringEditorHeader {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
@@ -1688,30 +1709,40 @@ input:focus-visible {
   min-width: 0;
 }
 
-.recurringPanelHeader > div {
+.recurringPanelTitle {
   display: grid;
   gap: 2px;
   min-width: 0;
 }
 
-.recurringPanelHeader strong,
-.recurringPanelHeader span {
+.recurringPanelTitle h3,
+.recurringPanelTitle span {
+  margin: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.recurringPanelHeader strong {
+.recurringPanelTitle h3 {
   font-size: 13px;
   font-weight: 950;
 }
 
-.recurringPanelHeader span {
+.recurringPanelTitle span {
   color: var(--text-muted);
   font-size: 12px;
 }
 
-.recurringTaskList,
+.recurringTaskList {
+  display: grid;
+  grid-auto-rows: max-content;
+  gap: 4px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
 .recurringOccurrenceList {
   display: grid;
   gap: 7px;
@@ -1723,20 +1754,30 @@ input:focus-visible {
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 8px;
+  width: 100%;
   min-width: 0;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 9px;
-  background: var(--surface);
+  border: 0;
+  border-left: 3px solid transparent;
+  border-radius: 6px;
+  padding: 8px 9px 8px 10px;
+  background: transparent;
   color: var(--ink);
   text-align: left;
 }
 
-.recurringTaskButton.active,
-.recurringTaskButton:hover,
-.recurringTaskButton:focus-visible {
-  border-color: rgba(37, 99, 235, 0.38);
+.recurringTaskButton:hover {
   background: rgba(37, 99, 235, 0.06);
+}
+
+.recurringTaskButton.active,
+.recurringTaskButton[aria-current="true"] {
+  border-left-color: var(--cyan);
+  background: rgba(37, 99, 235, 0.08);
+}
+
+.recurringTaskButton:focus-visible {
+  outline: 2px solid var(--cyan);
+  outline-offset: 2px;
 }
 
 .recurringTaskButton > span:first-child {
@@ -1772,11 +1813,231 @@ input:focus-visible {
   gap: 6px;
 }
 
-.recurringFormGrid {
+.recurringModeRow {
   display: grid;
-  grid-template-columns: repeat(3, minmax(145px, 1fr));
-  gap: 10px;
+  grid-template-columns: minmax(180px, 220px) minmax(0, 1fr);
+  align-items: end;
+  gap: 14px;
   min-width: 0;
+}
+
+.recurringModeHelp,
+.recurringActionHint {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.recurringFieldset {
+  min-inline-size: 0;
+  margin: 0;
+  border: 0;
+  border-top: 1px solid var(--line);
+  padding: 15px 0 0;
+}
+
+.recurringFieldset legend {
+  padding: 0 8px 0 0;
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 950;
+  letter-spacing: 0.02em;
+}
+
+.recurringFieldset:disabled {
+  opacity: 0.58;
+}
+
+.recurringFieldGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+  gap: 12px 14px;
+  min-width: 0;
+}
+
+.recurringFieldFull {
+  grid-column: 1 / -1;
+}
+
+.recurringNumberField {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.recurringNumberField > span,
+.recurringReadOnlyField > span {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.recurringReadOnlyField {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  min-width: 0;
+}
+
+.recurringReadOnlyField strong {
+  display: flex;
+  align-items: center;
+  min-height: 36px;
+  overflow: hidden;
+  border-radius: 6px;
+  padding: 0 10px;
+  background: rgba(248, 250, 252, 0.9);
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 750;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.recurringReminderLayout {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.recurringEditor label:has(input[type="checkbox"]:focus-visible) {
+  outline: 2px solid var(--cyan);
+  outline-offset: 2px;
+}
+
+.recurringActionSpacer {
+  flex: 1 1 auto;
+}
+
+.recurringDangerConfirm {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  border: 1px solid rgba(220, 38, 38, 0.24);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: rgba(220, 38, 38, 0.045);
+}
+
+.recurringDangerConfirm > div:first-child {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.recurringDangerConfirm strong {
+  font-size: 12px;
+}
+
+.recurringDangerConfirm span {
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.recurringDangerActions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 6px;
+}
+
+.recurringStatusMessage {
+  margin: 0;
+  border-radius: 7px;
+  padding: 8px 10px;
+  background: rgba(5, 150, 105, 0.08);
+  color: #047857;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.recurringFieldError {
+  margin: 8px 0 0;
+  color: #b91c1c;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.recurringFormError {
+  margin: 0;
+  border: 1px solid rgba(220, 38, 38, 0.3);
+  border-radius: 7px;
+  padding: 8px 10px;
+  background: rgba(220, 38, 38, 0.06);
+  color: #991b1b;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.recurrenceIconStack {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  color: currentColor;
+}
+
+.recurrenceIconStack > svg:first-child {
+  width: 15px;
+  height: 15px;
+}
+
+.recurrenceIconStack > svg:last-child {
+  position: absolute;
+  right: -3px;
+  bottom: -2px;
+  width: 9px;
+  height: 9px;
+  padding: 1px;
+  border-radius: 999px;
+  background: var(--surface);
+  color: #b45309;
+  stroke-width: 3;
+}
+
+.recurringReminderFields,
+.automaticOccurrenceEditForm {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(130px, 1fr));
+  gap: 10px;
+  min-width: min(100%, 300px);
+}
+
+.recurringHistoryList {
+  display: grid;
+  gap: 6px;
+}
+
+.recurringHistoryItem {
+  display: grid;
+  grid-template-columns: auto 88px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 7px 8px;
+  background: var(--surface);
+  font-size: 12px;
+}
+
+.recurringHistoryItem.exception {
+  border-color: rgba(220, 38, 38, 0.3);
+}
+
+.recurringHistoryItem.skipped strong {
+  color: var(--text-muted);
+  text-decoration: line-through;
+}
+
+.recurringHistoryItem.ruleChange {
+  border-style: dashed;
+  background: rgba(37, 99, 235, 0.035);
 }
 
 .recurringPreview {
@@ -1784,7 +2045,7 @@ input:focus-visible {
   gap: 8px;
   min-width: 0;
   border-top: 1px solid var(--line);
-  padding-top: 10px;
+  padding-top: 15px;
 }
 
 .recurringPreviewHeader {
@@ -1796,7 +2057,9 @@ input:focus-visible {
   font-size: 12px;
 }
 
-.recurringPreviewHeader strong {
+.recurringPreviewHeader strong,
+.recurringPreviewHeader h4 {
+  margin: 0;
   color: var(--ink);
   font-size: 13px;
   font-weight: 950;
@@ -1823,9 +2086,9 @@ input:focus-visible {
 }
 
 .recurringEmpty {
-  border: 1px dashed var(--line-strong);
   border-radius: 8px;
   padding: 12px;
+  background: rgba(248, 250, 252, 0.84);
   color: var(--text-muted);
   font-size: 12px;
   font-weight: 800;
@@ -1844,6 +2107,12 @@ input:focus-visible {
   align-items: center;
   gap: 6px;
   flex: 0 0 auto;
+}
+
+.calendarAutoFilter[aria-pressed="true"] {
+  border-color: rgba(180, 83, 9, 0.4);
+  background: rgba(245, 158, 11, 0.12);
+  color: #92400e;
 }
 
 .calendarWorkspace {
@@ -1891,11 +2160,27 @@ input:focus-visible {
 }
 
 .calendarDay:hover,
-.calendarDay:focus-visible,
+.calendarDay:focus-within,
 .calendarDay.selected {
   border-color: rgba(37, 99, 235, 0.42);
   background: rgba(37, 99, 235, 0.06);
   box-shadow: 0 8px 18px rgba(15, 23, 42, 0.06);
+}
+
+.calendarDaySelector {
+  width: 100%;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}
+
+.calendarDaySelector:focus-visible {
+  border-radius: 5px;
+  outline: 2px solid rgba(37, 99, 235, 0.55);
+  outline-offset: 2px;
 }
 
 .calendarDay.outsideMonth {
@@ -1938,6 +2223,11 @@ input:focus-visible {
   color: var(--ink);
   font-size: 10px;
   font-weight: 850;
+  font-family: inherit;
+  text-align: left;
+  text-decoration: none;
+  width: 100%;
+  cursor: pointer;
 }
 
 .calendarEventChip svg {
@@ -1956,6 +2246,32 @@ input:focus-visible {
   border-color: rgba(37, 99, 235, 0.22);
   background: rgba(37, 99, 235, 0.06);
   color: #1d4ed8;
+}
+
+.calendarEventChip.automatic {
+  border-color: rgba(180, 83, 9, 0.22);
+  background: rgba(245, 158, 11, 0.06);
+  color: #78350f;
+}
+
+.calendarEventChip.automatic.occurred {
+  border-color: rgba(120, 113, 108, 0.24);
+  background: rgba(120, 113, 108, 0.06);
+  color: #57534e;
+}
+
+.calendarEventChip.automatic.exception {
+  border-color: rgba(220, 38, 38, 0.42);
+  background: rgba(220, 38, 38, 0.08);
+  color: #991b1b;
+  opacity: 1;
+}
+
+.calendarEventChip.automatic.skipped {
+  border-color: rgba(120, 113, 108, 0.24);
+  background: rgba(120, 113, 108, 0.06);
+  color: #57534e;
+  text-decoration: line-through;
 }
 
 .calendarEventChip.critical {
@@ -2059,6 +2375,9 @@ input:focus-visible {
   color: var(--ink);
   text-decoration: none;
   transition: border-color 160ms ease, background 160ms ease;
+  width: 100%;
+  font: inherit;
+  text-align: left;
 }
 
 .calendarAgendaItem:hover,
@@ -2069,6 +2388,29 @@ input:focus-visible {
 
 .calendarAgendaItem.critical {
   border-color: rgba(217, 119, 6, 0.28);
+}
+
+.calendarAgendaItem.automatic {
+  border-color: rgba(180, 83, 9, 0.22);
+}
+
+.calendarAgendaItem.automatic.occurred {
+  border-color: rgba(120, 113, 108, 0.24);
+  background: rgba(120, 113, 108, 0.05);
+  color: #57534e;
+}
+
+.calendarAgendaItem.automatic.exception {
+  border-color: rgba(220, 38, 38, 0.42);
+  background: rgba(220, 38, 38, 0.05);
+  opacity: 1;
+}
+
+.calendarAgendaItem.automatic.skipped {
+  border-color: rgba(120, 113, 108, 0.24);
+  background: rgba(120, 113, 108, 0.05);
+  color: #57534e;
+  text-decoration: line-through;
 }
 
 .calendarAgendaIcon {
@@ -2129,6 +2471,66 @@ input:focus-visible {
   color: var(--text-muted);
   font-size: 12px;
   font-weight: 800;
+}
+
+.automaticOccurrenceDetails {
+  display: grid;
+  gap: 12px;
+  margin-top: 18px;
+}
+
+.automaticOccurrenceDetails > p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
+.automaticOccurrenceBadges,
+.automaticOccurrenceActions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.automaticOccurrenceException {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  border: 1px solid rgba(220, 38, 38, 0.26);
+  border-radius: 8px;
+  padding: 10px;
+  background: rgba(220, 38, 38, 0.06);
+  color: #991b1b;
+  font-size: 13px;
+  font-weight: 750;
+}
+
+.automaticOccurrenceException svg {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+}
+
+.automaticOccurrenceHistory {
+  display: grid;
+  gap: 8px;
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+
+.automaticOccurrenceHistory > a,
+.automaticOccurrenceHistory > button {
+  justify-self: start;
+}
+
+.exceptionReportForm {
+  display: grid;
+  gap: 10px;
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
 }
 
 .outlinePanel,
@@ -3164,6 +3566,18 @@ th {
   background: rgba(244, 245, 242, 0.72);
 }
 
+button.todayItem {
+  width: 100%;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}
+
+.todayItem.automaticReminder {
+  border-color: rgba(180, 83, 9, 0.24);
+  background: rgba(245, 158, 11, 0.05);
+}
+
 .todayItem.isLocked {
   border-color: rgba(223, 93, 66, 0.38);
   background: rgba(255, 244, 240, 0.9);
@@ -3933,6 +4347,20 @@ th {
     overflow-x: hidden;
   }
 
+  .recurringSidebar {
+    padding: 0 0 14px;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .recurringEditor {
+    padding: 16px 0 0;
+  }
+
+  .recurringTaskList {
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  }
+
   .chartScroll {
     width: calc(100vw - 56px);
     max-width: calc(100vw - 56px);
@@ -4029,12 +4457,10 @@ th {
     justify-content: stretch;
   }
 
-  .recurringFormGrid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .recurringTaskButton {
+  .automaticOccurrenceEditForm,
+  .recurringReminderFields {
     grid-template-columns: 1fr;
+    width: 100%;
   }
 
   .calendarPageHeader {
@@ -4089,15 +4515,55 @@ th {
     padding-inline: 6px;
   }
 
-  .recurringFormGrid,
-  .recurringOccurrence {
+  .recurringFieldGrid,
+  .recurringModeRow {
     grid-template-columns: 1fr;
   }
 
+  .recurringTaskList {
+    grid-template-columns: 1fr;
+  }
+
+  .recurringHistoryItem {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .recurringHistoryItem strong {
+    grid-column: 1 / -1;
+  }
+
   .recurringPanelHeader,
+  .recurringEditorHeader,
   .recurringPreviewHeader {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .recurringPanelTitle h3,
+  .recurringPanelTitle span {
+    overflow: visible;
+    text-overflow: clip;
+    white-space: normal;
+  }
+
+  .cardHeaderLine > .iconBadge {
+    justify-self: start;
+  }
+
+  .recurringActions,
+  .recurringDangerConfirm,
+  .recurringDangerActions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .recurringActions > button,
+  .recurringDangerActions > button {
+    width: 100%;
+  }
+
+  .recurringActionSpacer {
+    display: none;
   }
 
   .calendarMonthShell {

@@ -9,6 +9,7 @@ import type {
   WorkItem
 } from "./types";
 import { isShapeUpBet, isShapeUpCycleExpired, isShapeUpPitchComplete, shapeUpMissingBetRequirements } from "./shapeUp";
+import { isExecutionWorkItem } from "./recurring";
 
 function hasCompleteDirectionCard(card?: DirectionCard): boolean {
   if (!card) return false;
@@ -105,7 +106,7 @@ export function evaluateAuditGates(
     });
   }
 
-  for (const item of items.filter((candidate) => candidate.projectId === project.id)) {
+  for (const item of items.filter((candidate) => candidate.projectId === project.id && isExecutionWorkItem(candidate))) {
     const linkedEvidence = evidence.filter((candidate) => candidate.workItemId === item.id);
     if (item.kind === "milestone" && item.evidenceRequired && item.percentComplete >= 100 && linkedEvidence.length === 0) {
       gates.push({

@@ -1,6 +1,7 @@
 import { evaluateAuditGates } from "./audit";
 import { calculateProjectHealth } from "./portfolio";
 import { isProjectArchived, projectLifecycleLabel, projectLifecycleStatus } from "./projectLifecycle";
+import { isAutomaticRecurringWorkItem, isExecutionWorkItem } from "./recurring";
 import { createShapeUpPitch, isShapeUpBet, isShapeUpPitchComplete, scheduleShapeUpAwarePortfolio, scheduleShapeUpAwareProject, shapeUpAppetiteDays, shapeUpMissingBetRequirements, shapeUpScopeStatus } from "./shapeUp";
 import type {
   Actual,
@@ -117,6 +118,7 @@ export function workspaceRevision(snapshot: WorkspaceSnapshot) {
   return `rev-${hashText(JSON.stringify({
     projects: snapshot.projects.map((project) => [project.id, projectLifecycleStatus(project), isProjectArchived(project), project.mode, project.priority, project.horizon]),
     workItems: snapshot.workItems.map((item) => [item.id, item.projectId, item.percentComplete, item.title, item.outline]),
+    recurringOccurrences: snapshot.recurringOccurrences.map((item) => [item.id, item.status, item.updatedAt, item.followUpWorkItemId]),
     dependencies: snapshot.dependencies.map((dependency) => [dependency.id, dependency.fromId, dependency.toId, dependency.type, dependency.lagSeconds]),
     baselines: snapshot.baselines.map((baseline) => [baseline.id, baseline.projectId, baseline.capturedAt, baseline.approvedByDecisionId]),
     evidence: snapshot.evidence.map((item) => [item.id, item.projectId, item.workItemId, item.createdAt, item.summary]),
@@ -801,6 +803,9 @@ function validateCommand(snapshot: WorkspaceSnapshot, project: Project, workItem
   if ((command.command_type === "update_task_progress" || command.command_type === "record_actual") && !workItem) {
     errors.push("Work item could not be resolved. Set work_item_id or an exact task title.");
   }
+  if ((command.command_type === "update_task_progress" || command.command_type === "record_actual") && workItem && isAutomaticRecurringWorkItem(workItem)) {
+    errors.push("Automatic recurring items do not accept progress or actuals. Report an occurrence exception instead.");
+  }
   if (command.command_type === "create_task" && !command.title?.trim()) {
     errors.push("create_task requires title.");
   }
@@ -987,7 +992,7 @@ function projectJson(
   depth: "summary" | "detail"
 ) {
   const scheduled = schedule ?? scheduleShapeUpAwareProject(project, snapshot.workItems, snapshot.dependencies);
-  const projectItems = snapshot.workItems.filter((item) => item.projectId === project.id);
+  const projectItems = snapshot.workItems.filter((item) => item.projectId === project.id && isExecutionWorkItem(item));
   const projectEvidence = snapshot.evidence.filter((item) => item.projectId === project.id);
   const projectGates = gates.filter((gate) => gate.projectId === project.id);
   const baseline = snapshot.baselines.find((item) => item.projectId === project.id);

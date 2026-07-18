@@ -1,4 +1,4 @@
-import type { Project, ProjectStatus, WorkspaceSnapshot } from "./types";
+import type { Project, ProjectStatus, RepeatRule, WorkItem, WorkspaceSnapshot } from "./types";
 
 export const selectableProjectStatuses: ProjectStatus[] = ["active", "waiting", "paused", "done"];
 
@@ -27,14 +27,56 @@ export function normalizeProjectLifecycle(project: Project): Project {
 }
 
 export function normalizeWorkspaceSnapshot(snapshot: WorkspaceSnapshot): WorkspaceSnapshot {
+  const legacy = snapshot as WorkspaceSnapshot & {
+    timeZone?: string;
+    recurringOccurrences?: WorkspaceSnapshot["recurringOccurrences"];
+  };
   return {
     ...snapshot,
-    projects: snapshot.projects.map(normalizeProjectLifecycle)
+    timeZone: validTimeZone(legacy.timeZone) ? legacy.timeZone : "UTC",
+    projects: (snapshot.projects ?? []).map(normalizeProjectLifecycle),
+    workItems: (snapshot.workItems ?? []).map(normalizeRecurringWorkItem),
+    recurringOccurrences: deduplicateOccurrences(legacy.recurringOccurrences ?? [])
   };
 }
 
+function deduplicateOccurrences(records: WorkspaceSnapshot["recurringOccurrences"]): WorkspaceSnapshot["recurringOccurrences"] {
+  const byId = new Map(records.map((record) => [record.id, record]));
+  return [...byId.values()].sort((a, b) => a.id.localeCompare(b.id));
+}
+
+function normalizeRecurringWorkItem(item: WorkItem): WorkItem {
+  if (!item.repeatRule) return item;
+  return { ...item, repeatRule: normalizeRepeatRule(item.id, item.repeatRule) };
+}
+
+function normalizeRepeatRule(workItemId: string, rule: RepeatRule): RepeatRule {
+  const executionMode = rule.executionMode ?? "manual";
+  return {
+    ...rule,
+    id: rule.id ?? `repeat-${workItemId}`,
+    executionMode,
+    endMode: rule.endMode ?? "count",
+    startMode: executionMode === "automatic" ? "fixed-time" : rule.startMode ?? "fixed-time",
+    count: Math.max(1, Math.round(rule.count || 1)),
+    automaticDurationSeconds: Math.max(0, Math.round(rule.automaticDurationSeconds ?? 0))
+  };
+}
+
+function validTimeZone(value: unknown): value is string {
+  if (typeof value !== "string" || !value) return false;
+  try {
+    new Intl.DateTimeFormat("en", { timeZone: value }).format();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function canDeleteEmptyProject(snapshot: WorkspaceSnapshot, projectId: string): boolean {
-  return snapshot.projects.some((project) => project.id === projectId) && !snapshot.workItems.some((item) => item.projectId === projectId);
+  return snapshot.projects.some((project) => project.id === projectId) &&
+    !snapshot.workItems.some((item) => item.projectId === projectId) &&
+    !snapshot.recurringOccurrences.some((occurrence) => occurrence.projectId === projectId);
 }
 
 export function removeEmptyProjectFromWorkspace(snapshot: WorkspaceSnapshot, projectId: string): WorkspaceSnapshot | undefined {

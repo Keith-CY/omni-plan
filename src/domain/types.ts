@@ -11,6 +11,10 @@ export type AuditAction = "Accelerate" | "Continue" | "Narrow" | "Pivot" | "Stop
 export type EvidenceKind = "note" | "commit" | "pr" | "ci" | "doc" | "screenshot" | "release" | "feedback" | "metric" | "email" | "calendar" | "minutes" | "booking";
 export type ChangeSetStatus = "draft" | "queued-audit" | "approved" | "blocked";
 export type ShapeUpAppetiteKind = "small-batch" | "big-batch";
+export type RepeatExecutionMode = "manual" | "automatic";
+export type RepeatEndMode = "count" | "until" | "never";
+export type RecurringOccurrenceStatus = "scheduled" | "occurred" | "exception" | "skipped";
+export type RecurringSettlementSource = "on-time" | "system-catch-up" | "manual";
 
 export interface DirectionCard {
   targetUser: string;
@@ -98,11 +102,19 @@ export interface SplitSegment {
 }
 
 export interface RepeatRule {
+  id?: Id;
   cadence?: RepeatCadenceKind;
   everyDays?: number;
   count: number;
   startMode?: RepeatStartMode;
   startAt?: ISODate;
+  executionMode?: RepeatExecutionMode;
+  endMode?: RepeatEndMode;
+  until?: ISODate;
+  reminderLeadSeconds?: Seconds;
+  automaticDurationSeconds?: Seconds;
+  automaticFrom?: ISODate;
+  stoppedAt?: ISODate;
 }
 
 export type RepeatCadenceKind = "every-n-days" | "weekly" | "monthly";
@@ -114,6 +126,7 @@ export interface WorkItem {
   parentId?: Id;
   kind: WorkItemKind;
   title: string;
+  description?: string;
   outline: string;
   durationSeconds: Seconds;
   estimate: Estimate;
@@ -130,6 +143,27 @@ export interface WorkItem {
   evidenceRequired?: boolean;
   shapeUpScopeId?: Id;
   isShapeUpCycleMarker?: boolean;
+}
+
+export interface RecurringOccurrenceRecord {
+  id: Id;
+  ruleId: Id;
+  workItemId: Id;
+  projectId: Id;
+  occurrenceIndex: number;
+  scheduledStart: ISODate;
+  scheduledFinish: ISODate;
+  start: ISODate;
+  finish: ISODate;
+  status: RecurringOccurrenceStatus;
+  title: string;
+  description: string;
+  createdAt: ISODate;
+  updatedAt: ISODate;
+  settledAt?: ISODate;
+  settlementSource?: RecurringSettlementSource;
+  exceptionNote?: string;
+  followUpWorkItemId?: Id;
 }
 
 export interface Dependency {
@@ -303,8 +337,10 @@ export interface MonteCarloResult {
 }
 
 export interface WorkspaceSnapshot {
+  timeZone: string;
   projects: Project[];
   workItems: WorkItem[];
+  recurringOccurrences: RecurringOccurrenceRecord[];
   dependencies: Dependency[];
   resources: Resource[];
   capacities: AttentionCapacity[];

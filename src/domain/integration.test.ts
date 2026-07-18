@@ -25,6 +25,62 @@ describe("workspace, GitHub, and secrets", () => {
 
     expect(imported.projects).toHaveLength(sampleWorkspace.projects.length);
     expect(imported.workItems).toHaveLength(sampleWorkspace.workItems.length);
+    expect(JSON.parse(payload).schemaVersion).toBe(2);
+    expect(imported.timeZone).toBe("Asia/Tokyo");
+    expect(imported.recurringOccurrences).toEqual([]);
+  });
+
+  it("migrates schema-1 recurrence defaults without changing manual behavior", () => {
+    const repository = new BrowserWorkspaceRepository();
+    const legacy = JSON.parse(JSON.stringify(sampleWorkspace));
+    delete legacy.timeZone;
+    delete legacy.recurringOccurrences;
+    legacy.workItems[1].repeatRule = {
+      cadence: "weekly",
+      count: 4,
+      startMode: "after-previous-finish",
+      startAt: "2026-07-10T09:00:00.000Z"
+    };
+
+    const imported = repository.importWorkspace(JSON.stringify({ schemaVersion: 1, snapshot: legacy }));
+    const rule = imported.workItems[1].repeatRule;
+
+    expect(imported.timeZone).toBe("UTC");
+    expect(imported.recurringOccurrences).toEqual([]);
+    expect(rule?.executionMode).toBe("manual");
+    expect(rule?.endMode).toBe("count");
+    expect(rule?.startMode).toBe("after-previous-finish");
+    expect(rule?.id).toBe(`repeat-${imported.workItems[1].id}`);
+  });
+
+  it("round-trips automatic occurrence history in schema 2", () => {
+    const repository = new BrowserWorkspaceRepository();
+    const occurrence = {
+      id: "occ-repeat-transfer-20260718090000000",
+      ruleId: "repeat-transfer",
+      workItemId: sampleWorkspace.workItems[1].id,
+      projectId: sampleWorkspace.projects[0].id,
+      occurrenceIndex: 3,
+      scheduledStart: "2026-07-18T09:00:00.000Z",
+      scheduledFinish: "2026-07-18T09:00:00.000Z",
+      start: "2026-07-18T09:00:00.000Z",
+      finish: "2026-07-18T09:00:00.000Z",
+      status: "exception" as const,
+      title: "Automatic transfer",
+      description: "Transfer reserve",
+      createdAt: "2026-07-18T09:00:00.000Z",
+      updatedAt: "2026-07-18T10:00:00.000Z",
+      settledAt: "2026-07-18T09:00:00.000Z",
+      settlementSource: "on-time" as const,
+      exceptionNote: "Rejected",
+      followUpWorkItemId: "w-auto-exception"
+    };
+    const imported = repository.importWorkspace(repository.exportWorkspace({
+      ...sampleWorkspace,
+      recurringOccurrences: [occurrence]
+    }));
+
+    expect(imported.recurringOccurrences).toEqual([occurrence]);
   });
 
   it("migrates legacy archived project status into an archive flag", () => {

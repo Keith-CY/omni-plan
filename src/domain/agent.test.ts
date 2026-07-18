@@ -79,6 +79,48 @@ describe("agent protocol", () => {
     expect(applied.workspace.auditGates[0].status).toBe("queued");
   });
 
+  it("keeps automatic recurring items out of agent work and rejects progress updates", () => {
+    const snapshot = cloneWorkspace();
+    const openWorkBefore = buildAgentWorkspaceJson(snapshot, fixedNow).projects.find((project) => project.id === "p-omni")?.summary.open_work;
+    snapshot.workItems.push({
+      id: "w-automatic-transfer",
+      projectId: "p-omni",
+      kind: "task",
+      title: "Automatic reserve transfer",
+      description: "Transfer the reserve automatically.",
+      outline: "9",
+      durationSeconds: 0,
+      estimate: { mostLikelySeconds: 0 },
+      assignmentIds: [],
+      percentComplete: 0,
+      repeatRule: {
+        id: "repeat-automatic-transfer",
+        cadence: "monthly",
+        count: 1,
+        startMode: "fixed-time",
+        startAt: "2026-07-20T00:00:00.000Z",
+        executionMode: "automatic",
+        endMode: "never",
+        automaticDurationSeconds: 0,
+        automaticFrom: "2026-07-20T00:00:00.000Z"
+      }
+    });
+
+    const model = buildAgentWorkspaceJson(snapshot, fixedNow);
+    const applied = applyAgentCommandInput(snapshot, JSON.stringify({
+      command_type: "update_task_progress",
+      project_id: "p-omni",
+      work_item_id: "w-automatic-transfer",
+      percent_complete: 100
+    }), fixedNow);
+
+    expect(model.projects.find((project) => project.id === "p-omni")?.summary.open_work).toBe(openWorkBefore);
+    expect(buildAgentProjectText(snapshot, "p-omni", fixedNow)).not.toContain("Automatic reserve transfer");
+    expect(applied.receipt.status).toBe("rejected");
+    expect(applied.receipt.messages[0]).toContain("do not accept progress or actuals");
+    expect(applied.workspace.workItems.find((item) => item.id === "w-automatic-transfer")?.percentComplete).toBe(0);
+  });
+
   it("lets agents shape a project without approving the bet", () => {
     const snapshot = cloneWorkspace();
     const input = JSON.stringify({

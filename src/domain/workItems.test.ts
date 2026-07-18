@@ -56,6 +56,42 @@ function workspace(): WorkspaceSnapshot {
       { id: "e-child", projectId: "p-source", workItemId: "w-child", kind: "note", summary: "Child done.", createdAt: start, confidence: 1, tags: [] },
       { id: "e-project", projectId: "p-source", kind: "note", summary: "Project note.", createdAt: start, confidence: 1, tags: [] }
     ],
+    recurringOccurrences: [
+      {
+        id: "occ-future",
+        ruleId: "repeat-w-child",
+        workItemId: "w-child",
+        projectId: "p-source",
+        occurrenceIndex: 2,
+        scheduledStart: "2026-07-20T00:00:00.000Z",
+        scheduledFinish: "2026-07-20T00:00:00.000Z",
+        start: "2026-07-21T00:00:00.000Z",
+        finish: "2026-07-21T00:00:00.000Z",
+        status: "scheduled",
+        title: "Child task",
+        description: "",
+        createdAt: start,
+        updatedAt: start
+      },
+      {
+        id: "occ-past",
+        ruleId: "repeat-w-child",
+        workItemId: "w-child",
+        projectId: "p-source",
+        occurrenceIndex: 1,
+        scheduledStart: "2026-07-08T00:00:00.000Z",
+        scheduledFinish: "2026-07-08T00:00:00.000Z",
+        start: "2026-07-08T00:00:00.000Z",
+        finish: "2026-07-08T00:00:00.000Z",
+        status: "occurred",
+        title: "Child task",
+        description: "",
+        createdAt: start,
+        updatedAt: start,
+        settledAt: start,
+        settlementSource: "system-catch-up"
+      }
+    ],
     baselines: [{
       id: "b-source",
       projectId: "p-source",
@@ -104,5 +140,7 @@ describe("work item moves", () => {
     expect(result?.workspace.evidence.find((entry) => entry.id === "e-project")?.projectId).toBe("p-source");
     expect(result?.workspace.auditGates.find((entry) => entry.id === "g-child")?.projectId).toBe("p-target");
     expect(result?.workspace.baselines[0].plannedStartByItem).toEqual({ "w-other": start });
+    expect(result?.workspace.recurringOccurrences.find((entry) => entry.id === "occ-future")?.projectId).toBe("p-target");
+    expect(result?.workspace.recurringOccurrences.find((entry) => entry.id === "occ-past")?.projectId).toBe("p-source");
   });
 });

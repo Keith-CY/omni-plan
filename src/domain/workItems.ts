@@ -79,6 +79,11 @@ export function moveWorkItemToProject(snapshot: WorkspaceSnapshot, input: MoveWo
       evidence: snapshot.evidence.map((item) => (
         item.workItemId && movedIds.has(item.workItemId) ? { ...item, projectId: input.targetProjectId } : item
       )),
+      recurringOccurrences: snapshot.recurringOccurrences.map((occurrence) => (
+        movedIds.has(occurrence.workItemId) && occurrence.status === "scheduled"
+          ? { ...occurrence, projectId: input.targetProjectId }
+          : occurrence
+      )),
       auditGates: snapshot.auditGates.map((gate) => (
         movedIds.has(gate.targetId) ? { ...gate, projectId: input.targetProjectId } : gate
       )),
