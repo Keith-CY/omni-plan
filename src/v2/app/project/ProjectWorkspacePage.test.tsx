@@ -15,6 +15,14 @@ import type { WorkspaceV2 } from "../../domain/types";
 import type { V2WorkspaceRuntime } from "../state/V2WorkspaceProvider";
 import { renderV2 } from "../test/renderV2";
 import { ProjectWorkspacePage } from "./ProjectWorkspacePage";
+import {
+  applyFixtureCommand,
+  closingWorkspace as guidedClosingWorkspace,
+  expiredValidatingWorkspace as guidedExpiredValidatingWorkspace,
+  executingWorkspace as guidedExecutingWorkspace,
+  GUIDED_PROJECT_ID,
+  validatingWorkspace as guidedValidatingWorkspace,
+} from "./test/guidedStageFixture";
 
 const NOW = "2026-07-16T03:00:00.000Z";
 const PROJECT_ID = "project:guided-shell";
@@ -141,7 +149,7 @@ function crossOwnerBetWorkspace(): WorkspaceV2 {
   return source;
 }
 
-function runtime(source: WorkspaceV2): V2WorkspaceRuntime {
+function runtime(source: WorkspaceV2, now = NOW): V2WorkspaceRuntime {
   return {
     bootstrap: { resolve: vi.fn(async () => ({ status: "ready" as const, workspace: source })) },
     commands: {
@@ -153,17 +161,17 @@ function runtime(source: WorkspaceV2): V2WorkspaceRuntime {
       run: vi.fn(async () => source),
       nextScheduledWakeAt: vi.fn(() => undefined),
     },
-    now: () => NOW,
+    now: () => now,
     createCommandId: () => "project-shell-command",
   };
 }
 
-function renderWorkspace(initialPath: string, source = workspace()) {
+function renderWorkspace(initialPath: string, source = workspace(), now = NOW) {
   renderV2(
     <Routes>
       <Route path="/projects/:projectId/:stage" element={<ProjectWorkspacePage />} />
     </Routes>,
-    { initialPath, runtime: runtime(source) },
+    { initialPath, runtime: runtime(source, now) },
   );
 }
 
@@ -285,6 +293,66 @@ describe("ProjectWorkspacePage", () => {
     expect(within(summary).getByText("0 work items in the active Bet")).toBeVisible();
     expect(within(summary).queryByRole("button")).toBeNull();
     expect(within(summary).queryByRole("textbox")).toBeNull();
+  });
+
+  it("routes Execute, Evidence, and Close to real guided surfaces instead of the generic shell", async () => {
+    const cases = [
+      ["execute", await guidedExecutingWorkspace(), "Execute workspace"],
+      ["evidence", await guidedValidatingWorkspace(), "Evidence workspace"],
+      ["close", await guidedClosingWorkspace(), "Close decision"],
+    ] as const;
+
+    for (const [route, source, regionName] of cases) {
+      renderWorkspace(`/projects/${GUIDED_PROJECT_ID}/${route}`, source);
+      expect(await screen.findByRole("region", { name: regionName })).toBeVisible();
+      expect(screen.queryByText(/Continue with the guided/i)).toBeNull();
+      cleanup();
+    }
+  });
+
+  it("keeps the validating Evidence route open for the exact appetite-boundary abandonment decision", async () => {
+    const source = await guidedExpiredValidatingWorkspace();
+    const appetiteEnd = source.bets.find(
+      ({ id }) => id === source.projects[0].activeBetId,
+    )!.appetiteEnd;
+
+    renderWorkspace(
+      `/projects/${GUIDED_PROJECT_ID}/evidence`,
+      source,
+      appetiteEnd,
+    );
+
+    expect(await screen.findByRole("region", {
+      name: "Appetite boundary decision",
+    })).toBeVisible();
+    expect(screen.queryByRole("region", { name: "evidence stage locked" })).toBeNull();
+  });
+
+  it("returns a successfully closed Project to immutable Close history", async () => {
+    const closing = await guidedClosingWorkspace();
+    const closed = await applyFixtureCommand(
+      closing,
+      {
+        type: "close_project",
+        projectId: GUIDED_PROJECT_ID,
+        decision: {
+          id: "close:guided-history",
+          projectId: GUIDED_PROJECT_ID,
+          successComparison: "Observed result matched the Direction success evidence.",
+          outcome: "achieved",
+          keyLearning: "Explicit decisions kept the lifecycle auditable.",
+          unfinishedDisposition: "historical_incomplete",
+        },
+      },
+      "fixture:close-guided-history",
+    );
+
+    renderWorkspace(`/projects/${GUIDED_PROJECT_ID}/close`, closed);
+
+    const history = await screen.findByRole("region", { name: "Close immutable history" });
+    expect(within(history).getByText("close:guided-history")).toBeVisible();
+    expect(within(history).queryByRole("textbox")).toBeNull();
+    expect(within(history).queryByRole("button")).toBeNull();
   });
 
   it("fails closed before rendering project facts when the active Bet belongs to another Project", async () => {

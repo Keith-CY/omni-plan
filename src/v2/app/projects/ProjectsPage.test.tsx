@@ -189,6 +189,7 @@ describe("ProjectsPage", () => {
     ["attach_evidence", `/projects/${PROJECT_ID}/evidence`, "Open Evidence"],
     ["approve_evidence_exception", `/projects/${PROJECT_ID}/evidence`, "Open Evidence"],
     ["satisfy_validation", `/projects/${PROJECT_ID}/evidence`, "Open Evidence"],
+    ["abandon_project", `/projects/${PROJECT_ID}/evidence`, "Open Evidence"],
     ["close_project", `/projects/${PROJECT_ID}/close`, "Open Close"],
   ])(
     "routes the %s command to its owning surface",

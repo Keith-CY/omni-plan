@@ -10,7 +10,10 @@ import {
 import { useV2Workspace } from "../state/V2WorkspaceProvider";
 import { BetHistory } from "./bet/BetHistory";
 import { BetStage } from "./bet/BetStage";
+import { CloseStage } from "./close/CloseStage";
 import { DirectionStage } from "./direction/DirectionStage";
+import { EvidenceStage } from "./evidence/EvidenceStage";
+import { ExecuteStage } from "./execute/ExecuteStage";
 import { LifecycleNav, USER_LIFECYCLE_STAGES, USER_STAGE_LABELS } from "./LifecycleNav";
 import { LockedStagePanel } from "./LockedStagePanel";
 import { PlanStageSummary } from "./plan/PlanStageSummary";
@@ -154,6 +157,9 @@ export function ProjectWorkspacePage() {
     stage === "bet" &&
     (betHistoryRequested || (!betDecisionRequired && step.status === "completed"));
   const showPlanSummary = stage === "plan" && step.status === "current";
+  const showExecuteStage = stage === "execute" && step.status === "current";
+  const showEvidenceStage = stage === "evidence" && step.status === "current";
+  const showCloseStage = stage === "close" && step.status === "current";
 
   return (
     <article className="v2-project-workspace v2-route-page">
@@ -174,6 +180,12 @@ export function ProjectWorkspacePage() {
           <BetHistory projectId={projectId} />
         ) : showPlanSummary ? (
           <PlanStageSummary projectId={projectId} />
+        ) : showExecuteStage ? (
+          <ExecuteStage projectId={projectId} />
+        ) : showEvidenceStage ? (
+          <EvidenceStage projectId={projectId} />
+        ) : showCloseStage ? (
+          <CloseStage projectId={projectId} />
         ) : step.status === "completed" ? (
           <StageHistory
             step={step}

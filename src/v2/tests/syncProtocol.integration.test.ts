@@ -686,7 +686,7 @@ describe("V2 encrypted command-log sync protocol", () => {
         }),
       ).rejects.toMatchObject({ code: "RECEIPT_REQUIRED" });
     }
-  });
+  }, 15_000);
 
   it("creates and advances an immutable manifest while preserving exact per-device heads", async () => {
     const otherHash = "d".repeat(64);

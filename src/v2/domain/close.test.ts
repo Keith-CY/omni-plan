@@ -19,6 +19,9 @@ import {
 import { stableHashSync } from "./stableHash";
 import type {
   Action,
+  AuditDiff,
+  CommandReceipt,
+  DailyCommitment,
   InboxItem,
   JsonValue,
   ProjectDependency,
@@ -94,8 +97,230 @@ const DEPENDENCY: ProjectDependency = {
   revision: 1,
 };
 
+function lifecycleReceipt({
+  id,
+  commandType,
+  baseRevision,
+  actorKind = "human",
+  capability = "human_decision",
+  createdAt = CREATED_AT,
+  payload,
+  diff,
+}: {
+  id: string;
+  commandType: string;
+  baseRevision: number;
+  actorKind?: "human" | "system";
+  capability?: "human_decision" | "system_time";
+  createdAt?: string;
+  payload: JsonValue;
+  diff: AuditDiff[];
+}): CommandReceipt {
+  const base: Omit<CommandReceipt, "receiptHash"> = {
+    id,
+    commandId: id,
+    commandType,
+    baseRevision,
+    revision: baseRevision + 1,
+    payloadHash: stableHashSync(payload),
+    actorId: actorKind === "human" ? "human-1" : "system-clock",
+    actorKind,
+    origin: actorKind === "human" ? "ui" : "agent",
+    source: {
+      sourceId: `fixture:${id}`,
+      verified: true,
+      capabilities: [capability],
+    },
+    status: "applied",
+    createdAt,
+    diff: structuredClone(diff),
+  };
+  return {
+    ...base,
+    receiptHash: stableHashSync(base as unknown as JsonValue),
+  };
+}
+
+function installPlanProvenance(workspace: WorkspaceV2): CommandReceipt {
+  const project = workspace.projects[0];
+  const sourcePlan = workspace.planVersions[0];
+  if (project === undefined || sourcePlan === undefined) {
+    throw new Error("Close fixture requires one Project and Plan.");
+  }
+  const commitmentId = "commitment-close-provenance";
+  const plan = {
+    ...sourcePlan,
+    id: `plan:${project.id}:${commitmentId}`,
+    actorId: "human-1",
+    createdAt: CREATED_AT,
+  };
+  workspace.planVersions = [plan];
+  project.activePlanVersionId = plan.id;
+  const slots = Object.entries(plan.workItemRevisions)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([workItemId, targetRevision], index) => ({
+      id: `slot-close-provenance-${index + 1}`,
+      target: {
+        kind: "work_item" as const,
+        workItemId,
+        projectId: project.id,
+      },
+      targetRevision,
+      start: new Date(Date.parse(CREATED_AT) + index * 1_800_000).toISOString(),
+      finish: new Date(Date.parse(CREATED_AT) + (index + 1) * 1_800_000).toISOString(),
+      attention: "deep" as const,
+    }));
+  const commitment: DailyCommitment = {
+    id: commitmentId,
+    localDate: "2026-07-11",
+    version: 1,
+    proposalHash: "close-fixture-proposal",
+    capacitySnapshot: {
+      timeZone: "UTC",
+      weeklyWindows: [{ weekday: 6, startMinute: 0, finishMinute: 1_440 }],
+      dailyBudgets: [{
+        weekday: 6,
+        deepSeconds: 86_400,
+        mediumSeconds: 86_400,
+        shallowSeconds: 86_400,
+      }],
+      unavailableBlocks: [],
+      updatedAt: CREATED_AT,
+      updatedBy: "human-1",
+    },
+    slots,
+    actorId: plan.actorId,
+    committedAt: plan.createdAt,
+  };
+  workspace.dailyCommitments = [commitment];
+  return lifecycleReceipt({
+    id: "fixture:commit-close-plan",
+    commandType: "commit_today",
+    baseRevision: 0,
+    payload: { type: "commit_today", fixture: true },
+    diff: [
+      {
+        entity: "DailyCommitment",
+        entityId: commitment.id,
+        field: "created",
+        before: null,
+        after: structuredClone(commitment) as unknown as JsonValue,
+      },
+      {
+        entity: "PlanVersion",
+        entityId: plan.id,
+        field: "created",
+        before: null,
+        after: structuredClone(plan) as unknown as JsonValue,
+      },
+      {
+        entity: "ProjectV2",
+        entityId: project.id,
+        field: "stage",
+        before: "planning",
+        after: "executing",
+      },
+      {
+        entity: "ProjectV2",
+        entityId: project.id,
+        field: "activePlanVersionId",
+        before: null,
+        after: plan.id,
+      },
+    ],
+  });
+}
+
+function installClosingProvenance(workspace: WorkspaceV2): WorkspaceV2 {
+  const project = workspace.projects[0];
+  const planReceipt = installPlanProvenance(workspace);
+  workspace.revision = 3;
+  workspace.commandReceipts = [
+    planReceipt,
+    lifecycleReceipt({
+      id: "fixture:request-close-validation",
+      commandType: "request_validation",
+      baseRevision: 1,
+      payload: { type: "request_validation", projectId: project.id },
+      diff: [{
+        entity: "ProjectV2",
+        entityId: project.id,
+        field: "stage",
+        before: "executing",
+        after: "validating",
+      }],
+    }),
+    lifecycleReceipt({
+      id: "fixture:satisfy-close-validation",
+      commandType: "satisfy_validation",
+      baseRevision: 2,
+      payload: { type: "satisfy_validation", projectId: project.id },
+      diff: [{
+        entity: "ProjectV2",
+        entityId: project.id,
+        field: "stage",
+        before: "validating",
+        after: "closing",
+      }],
+    }),
+  ];
+  project.stage = "closing";
+  project.updatedAt = CREATED_AT;
+  return workspace;
+}
+
+function installBoundaryProvenance(workspace: WorkspaceV2): WorkspaceV2 {
+  const project = workspace.projects[0];
+  const bet = workspace.bets[0];
+  const planReceipt = installPlanProvenance(workspace);
+  workspace.revision = 3;
+  workspace.commandReceipts = [
+    planReceipt,
+    lifecycleReceipt({
+      id: "fixture:expire-close-bet",
+      commandType: "record_bet_boundary",
+      baseRevision: 2,
+      actorKind: "system",
+      capability: "system_time",
+      createdAt: NOW,
+      payload: {
+        type: "record_bet_boundary",
+        projectId: project.id,
+        boundary: "expired",
+        triggerKey: `${bet.id}:expired`,
+      },
+      diff: [
+        {
+          entity: "ProjectV2",
+          entityId: project.id,
+          field: "stage",
+          before: "executing",
+          after: "validating",
+        },
+        {
+          entity: "ProjectV2",
+          entityId: project.id,
+          field: "holds",
+          before: [],
+          after: structuredClone(project.holds) as unknown as JsonValue,
+        },
+        {
+          entity: "ProjectV2",
+          entityId: project.id,
+          field: "updatedAt",
+          before: CREATED_AT,
+          after: NOW,
+        },
+      ],
+    }),
+  ];
+  project.stage = "validating";
+  project.updatedAt = NOW;
+  return workspace;
+}
+
 function closingWorkspace(overrides: Partial<WorkspaceV2> = {}): WorkspaceV2 {
-  return buildWorkspaceV2("workspace-close", {
+  return installClosingProvenance(buildWorkspaceV2("workspace-close", {
     projects: [
       buildProjectV2({
         id: "project-1",
@@ -162,13 +387,13 @@ function closingWorkspace(overrides: Partial<WorkspaceV2> = {}): WorkspaceV2 {
       },
     ],
     ...overrides,
-  });
+  }));
 }
 
 function context(overrides: Partial<CommandContext> = {}): CommandContext {
   return {
     commandId: "command-close",
-    expectedRevision: 0,
+    expectedRevision: 3,
     actorId: "human-1",
     actorKind: "human",
     origin: "ui",
@@ -215,7 +440,7 @@ function decision(
 function appetiteBoundaryWorkspace(
   overrides: Partial<WorkspaceV2> = {},
 ): WorkspaceV2 {
-  const workspace = closingWorkspace();
+  const workspace = closingWorkspace(overrides);
   workspace.projects[0] = {
     ...workspace.projects[0],
     stage: "validating",
@@ -229,7 +454,7 @@ function appetiteBoundaryWorkspace(
     ],
   };
   setCurrentBetAppetiteEnd(workspace, NOW);
-  return { ...workspace, ...overrides };
+  return installBoundaryProvenance(workspace);
 }
 
 function setCurrentBetAppetiteEnd(
@@ -240,6 +465,12 @@ function setCurrentBetAppetiteEnd(
   bet.appetiteEnd = appetiteEnd;
   bet.briefSnapshot.appetiteSeconds =
     (Date.parse(appetiteEnd) - Date.parse(bet.appetiteStart)) / 1_000;
+  const approvedBrief = workspace.directionBriefs.find(
+    ({ id }) => id === bet.briefId,
+  );
+  if (approvedBrief !== undefined) {
+    approvedBrief.appetiteSeconds = bet.briefSnapshot.appetiteSeconds;
+  }
   bet.briefHash = stableHashSync(
     bet.briefSnapshot as unknown as JsonValue,
   );
@@ -1229,6 +1460,8 @@ describe("appetite-boundary Close and Abandon", () => {
   it.each([
     {
       name: "a hold owned by another Bet",
+      expectedCode: "SYNC_CONFLICT",
+      expectedNextCommand: "resolve_sync_conflict",
       mutate: (workspace: WorkspaceV2) => {
         workspace.bets.push({
           ...structuredClone(workspace.bets[0]),
@@ -1245,12 +1478,16 @@ describe("appetite-boundary Close and Abandon", () => {
     },
     {
       name: "a future appetite boundary",
+      expectedCode: "ILLEGAL_LIFECYCLE_TRANSITION",
+      expectedNextCommand: "record_bet_boundary",
       mutate: (workspace: WorkspaceV2) => {
         setCurrentBetAppetiteEnd(workspace, APPETITE_END);
       },
     },
     {
       name: "an invalidated active Bet",
+      expectedCode: "ILLEGAL_LIFECYCLE_TRANSITION",
+      expectedNextCommand: "record_bet_boundary",
       mutate: (workspace: WorkspaceV2) => {
         workspace.bets[0] = {
           ...workspace.bets[0],
@@ -1261,6 +1498,8 @@ describe("appetite-boundary Close and Abandon", () => {
     },
     {
       name: "duplicate boundary affected record IDs",
+      expectedCode: "SYNC_CONFLICT",
+      expectedNextCommand: "resolve_sync_conflict",
       mutate: (workspace: WorkspaceV2) => {
         workspace.projects[0].holds[0] = {
           ...workspace.projects[0].holds[0],
@@ -1268,7 +1507,11 @@ describe("appetite-boundary Close and Abandon", () => {
         };
       },
     },
-  ])("rejects Abandon from $name", async ({ mutate }) => {
+  ])("rejects Abandon from $name", async ({
+    mutate,
+    expectedCode,
+    expectedNextCommand,
+  }) => {
     const workspace = appetiteBoundaryWorkspace();
     mutate(workspace);
     const result = rejected(
@@ -1286,9 +1529,9 @@ describe("appetite-boundary Close and Abandon", () => {
       ),
     );
     expect(result.rejection).toMatchObject({
-      code: "ILLEGAL_LIFECYCLE_TRANSITION",
+      code: expectedCode,
       gate: "project:project-1:appetite_boundary",
-      permittedNextCommand: "record_bet_boundary",
+      permittedNextCommand: expectedNextCommand,
     });
     expect(result.workspace).toBe(workspace);
   });

@@ -39,6 +39,11 @@ import {
 } from "./evidence";
 import { transitionLifecycle } from "./lifecycle";
 import {
+  resolveClosureProvenance,
+  resolveExpiredBoundaryProvenance,
+  resolveValidationProvenance,
+} from "./lifecycleProvenance";
+import {
   capacityForLocalDate,
   createCapacityLedger,
   localDateAt,
@@ -47,6 +52,7 @@ import {
 import {
   buildPlanVersionsForCommitment,
   PlanVersionBuildError,
+  resolveExecutionPlanProvenance,
   resolvePlanningContext,
   type PlanningContextRejection,
 } from "./planning";
@@ -4075,6 +4081,16 @@ export async function applyCommandHandler(
       if (!access.ok) {
         return planningAccessRejection(workspace, context, access);
       }
+      if (access.project.stage === "executing") {
+        const provenance = resolveExecutionPlanProvenance(
+          workspace,
+          access.project.id,
+          context.now,
+        );
+        if (!provenance.ok) {
+          return planningAccessRejection(workspace, context, provenance);
+        }
+      }
       const projectIndex = workspace.projects.findIndex(
         ({ id }) => id === access.project.id,
       );
@@ -4160,6 +4176,26 @@ export async function applyCommandHandler(
                 ? "approve_evidence_exception"
                 : "attach_evidence",
           });
+        }
+      }
+      const provenance = resolveValidationProvenance(
+        workspace,
+        project.id,
+        context.now,
+      );
+      if (!provenance.ok) {
+        return planningAccessRejection(workspace, context, provenance);
+      }
+      if (
+        Date.parse(context.now) >= Date.parse(provenance.bet.appetiteEnd)
+      ) {
+        const boundary = resolveExpiredBoundaryProvenance(
+          workspace,
+          project.id,
+          context.now,
+        );
+        if (!boundary.ok) {
+          return planningAccessRejection(workspace, context, boundary);
         }
       }
       const transition = transitionLifecycle(project, "validation_satisfied");
@@ -5258,6 +5294,14 @@ export async function applyCommandHandler(
         command.type,
       );
       if (!prepared.ok) return prepared.result;
+      const provenance = resolveClosureProvenance(
+        workspace,
+        project.id,
+        context.now,
+      );
+      if (!provenance.ok) {
+        return planningAccessRejection(workspace, context, provenance);
+      }
       const transition = transitionLifecycle(project, "project_closed");
       if (!transition.ok) {
         return rejection(workspace, context, transition.code, {
@@ -5301,20 +5345,7 @@ export async function applyCommandHandler(
       if (!currentBet.ok && currentBet.issue.code === "SYNC_CONFLICT") {
         return closeValidationRejection(workspace, context, currentBet.issue);
       }
-      const boundaryBet = currentBet.ok ? currentBet.bet : undefined;
-      const boundaryHold =
-        boundaryBet === undefined
-          ? undefined
-          : exactCanonicalAppetiteBoundaryHold(
-              project,
-              boundaryBet,
-              context.now,
-            );
-      const atRecordedAppetiteBoundary =
-        project.stage === "validating" &&
-        boundaryBet !== undefined &&
-        boundaryHold !== undefined;
-      if (!atRecordedAppetiteBoundary) {
+      if (project.stage !== "validating" || !currentBet.ok) {
         return rejection(
           workspace,
           context,
@@ -5326,6 +5357,15 @@ export async function applyCommandHandler(
           },
         );
       }
+      const boundary = resolveExpiredBoundaryProvenance(
+        workspace,
+        project.id,
+        context.now,
+      );
+      if (!boundary.ok) {
+        return planningAccessRejection(workspace, context, boundary);
+      }
+      const boundaryHold = boundary.hold;
       const prepared = prepareCloseArtifacts(
         workspace,
         context,
@@ -5334,6 +5374,14 @@ export async function applyCommandHandler(
         command.type,
       );
       if (!prepared.ok) return prepared.result;
+      const provenance = resolveValidationProvenance(
+        workspace,
+        project.id,
+        context.now,
+      );
+      if (!provenance.ok) {
+        return planningAccessRejection(workspace, context, provenance);
+      }
       const abandonTransition = transitionLifecycle(
         project,
         "abandon_confirmed",

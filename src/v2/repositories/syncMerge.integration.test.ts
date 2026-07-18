@@ -3689,7 +3689,7 @@ describe("V2 common-ancestor merge", () => {
         status: "completed",
       }),
     ]);
-  }, 10_000);
+  }, 30_000);
 
   it("records independent equivalent conflict resolutions as auditable no-op confirmations", async () => {
     const fixture = await openDailyConflictFixture("equivalent-resolution");

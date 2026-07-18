@@ -4,6 +4,7 @@ import {
   executeCommand,
   type CommandContext,
   type V2Command,
+  workspaceCommandAuthorizationRejection,
 } from "./commands";
 import type { RejectionCode } from "./errors";
 import {
@@ -477,6 +478,33 @@ export async function selectCommandAvailability(
     ...(result.rejection.hold === undefined
       ? {}
       : { hold: result.rejection.hold }),
+  };
+}
+
+export function selectCommandPolicyAvailability(
+  workspace: WorkspaceV2,
+  command: V2Command,
+  context: CommandContext,
+): CommandAvailability {
+  const rejection = workspaceCommandAuthorizationRejection(
+    workspace,
+    command,
+    context,
+  );
+  if (rejection === undefined) {
+    return {
+      available: true,
+      reason: "Command is available.",
+      permittedNextCommand: command.type,
+    };
+  }
+  return {
+    available: false,
+    code: rejection.code,
+    reason: rejection.reason,
+    permittedNextCommand: rejection.permittedNextCommand,
+    ...(rejection.gate === undefined ? {} : { gate: rejection.gate }),
+    ...(rejection.hold === undefined ? {} : { hold: rejection.hold }),
   };
 }
 

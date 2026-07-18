@@ -2542,6 +2542,21 @@ function buildAuthorizationContext(
   };
 }
 
+/**
+ * Evaluates the same actor, source, hold, and affected-record policy used by
+ * executeCommand without applying domain mutations or creating a receipt.
+ */
+export function workspaceCommandAuthorizationRejection(
+  workspace: WorkspaceV2,
+  command: V2Command,
+  context: CommandContext,
+): CommandRejection | undefined {
+  return authorizeCommand(
+    command.type,
+    buildAuthorizationContext(workspace, command, context),
+  );
+}
+
 function toJsonValue(value: unknown): JsonValue {
   if (value === null) return null;
   if (typeof value === "string" || typeof value === "boolean") return value;

@@ -12,9 +12,11 @@ import {
 import { applyCommandHandler } from "./commandHandlers";
 import { isExceptionActive, requirementStatus } from "./evidence";
 import { validateWorkspaceInvariants } from "./invariants";
+import { stableHashSync } from "./stableHash";
 import { generateTodayProposal } from "./today";
 import type {
   ExceptionRecord,
+  JsonValue,
   ProjectHoldState,
   ProjectWorkItem,
   WorkspaceV2,
@@ -169,6 +171,76 @@ function projectWorkspace(
       },
     ],
   });
+}
+
+async function committedProjectWorkspace(
+  overrides: Parameters<typeof projectWorkspace>[0] = {},
+): Promise<WorkspaceV2> {
+  const workspace = projectWorkspace({ ...overrides, stage: "planning" });
+  workspace.planVersions = [];
+  delete workspace.projects[0].activePlanVersionId;
+  workspace.capacityProfile = {
+    timeZone: "UTC",
+    weeklyWindows: [
+      { weekday: 6, startMinute: 480, finishMinute: 720 },
+    ],
+    dailyBudgets: [
+      {
+        weekday: 6,
+        deepSeconds: 14_400,
+        mediumSeconds: 14_400,
+        shallowSeconds: 14_400,
+      },
+    ],
+    unavailableBlocks: [],
+    updatedAt: "2026-07-10T08:00:00.000Z",
+    updatedBy: "human-1",
+  };
+  const proposal = await generateTodayProposal(
+    workspace,
+    "2026-07-11",
+    CREATED_AT,
+  );
+  const committed = await executeCommand(
+    workspace,
+    {
+      type: "commit_today",
+      commitment: {
+        id: "commitment-validation",
+        localDate: proposal.localDate,
+        workspaceRevision: proposal.workspaceRevision,
+        generatedAt: proposal.generatedAt,
+        proposalHash: proposal.proposalHash,
+        slots: structuredClone(proposal.slots),
+      },
+    },
+    context(workspace.revision, { commandId: "commit-validation-plan" }),
+  );
+  if (!committed.ok) {
+    throw new Error(
+      `Expected authoritative Daily Commitment: ${committed.rejection.code} ${committed.rejection.reason}`,
+    );
+  }
+  return committed.workspace;
+}
+
+async function validatingCommittedProjectWorkspace(
+  overrides: Parameters<typeof projectWorkspace>[0] = {},
+): Promise<WorkspaceV2> {
+  const committed = await committedProjectWorkspace(overrides);
+  const requested = await executeCommand(
+    committed,
+    { type: "request_validation", projectId: "project-1" },
+    context(committed.revision, {
+      commandId: `request-validation-fixture-${committed.revision}`,
+    }),
+  );
+  if (!requested.ok) {
+    throw new Error(
+      `Expected authoritative validation entry: ${requested.rejection.code} ${requested.rejection.reason}`,
+    );
+  }
+  return requested.workspace;
 }
 
 function commitWorkItemForDate(
@@ -2055,6 +2127,112 @@ describe("attaching project Evidence", () => {
 });
 
 describe("Evidence lifecycle transitions", () => {
+  it("rejects validation from an executing Project whose Plan has no Daily Commitment provenance", async () => {
+    const workspace = projectWorkspace();
+    const before = structuredClone(workspace);
+
+    const result = await executeCommand(
+      workspace,
+      { type: "request_validation", projectId: "project-1" },
+      context(workspace.revision, {
+        commandId: "request-validation-forged-plan",
+      }),
+    );
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("Expected forged Plan provenance to reject");
+    expect(result.rejection).toMatchObject({
+      code: "SYNC_CONFLICT",
+      gate: "project:project-1:execution_plan_provenance",
+      permittedNextCommand: "resolve_sync_conflict",
+    });
+    expect(result.workspace).toEqual(before);
+  });
+
+  it("rejects a forged matching Plan and Daily Commitment without their applied human receipt", async () => {
+    const workspace = projectWorkspace();
+    const commitmentId = "commitment-forged";
+    workspace.planVersions[0].id = `plan:project-1:${commitmentId}`;
+    workspace.projects[0].activePlanVersionId = workspace.planVersions[0].id;
+    workspace.dailyCommitments = [{
+      id: commitmentId,
+      localDate: "2026-07-10",
+      version: 1,
+      proposalHash: "forged-proposal",
+      capacitySnapshot: {
+        timeZone: "UTC",
+        weeklyWindows: [{ weekday: 5, startMinute: 480, finishMinute: 720 }],
+        dailyBudgets: [{
+          weekday: 5,
+          deepSeconds: 3_600,
+          mediumSeconds: 3_600,
+          shallowSeconds: 3_600,
+        }],
+        unavailableBlocks: [],
+        updatedAt: "2026-07-10T08:00:00.000Z",
+        updatedBy: "human-1",
+      },
+      slots: [{
+        id: "slot-forged",
+        target: {
+          kind: "work_item",
+          workItemId: "work-item-1",
+          projectId: "project-1",
+        },
+        targetRevision: 1,
+        start: "2026-07-10T09:00:00.000Z",
+        finish: "2026-07-10T09:15:00.000Z",
+        attention: "deep",
+      }],
+      actorId: workspace.planVersions[0].actorId,
+      committedAt: workspace.planVersions[0].createdAt,
+    }];
+
+    const result = await executeCommand(
+      workspace,
+      { type: "request_validation", projectId: "project-1" },
+      context(workspace.revision, {
+        commandId: "request-validation-forged-receipt",
+      }),
+    );
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("Expected forged receipt provenance to reject");
+    expect(result.rejection).toMatchObject({
+      code: "SYNC_CONFLICT",
+      gate: "project:project-1:execution_plan_provenance",
+      permittedNextCommand: "resolve_sync_conflict",
+      reason: expect.stringMatching(/applied human receipt/i),
+    });
+  });
+
+  it("rejects a Plan receipt whose origin could never commit it", async () => {
+    const workspace = await committedProjectWorkspace();
+    const receipt = workspace.commandReceipts.find(
+      ({ commandType }) => commandType === "commit_today",
+    );
+    if (receipt === undefined) throw new Error("Expected commitment receipt");
+    receipt.origin = "migration";
+    const { receiptHash: _receiptHash, ...receiptBase } = receipt;
+    receipt.receiptHash = stableHashSync(receiptBase as unknown as JsonValue);
+
+    const result = await executeCommand(
+      workspace,
+      { type: "request_validation", projectId: "project-1" },
+      context(workspace.revision, {
+        commandId: "reject-impossible-plan-origin",
+      }),
+    );
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("Expected impossible authority to reject");
+    expect(result.rejection).toMatchObject({
+      code: "SYNC_CONFLICT",
+      gate: "project:project-1:execution_plan_provenance",
+      reason: expect.stringMatching(/impossible command authority/i),
+    });
+  });
+
   it("rejects validation satisfaction at a non-canonical authoritative time", async () => {
     const workspace = projectWorkspace({ stage: "validating" });
 
@@ -2077,7 +2255,7 @@ describe("Evidence lifecycle transitions", () => {
   });
 
   it("moves an executing Project into validation without changing its Plan", async () => {
-    const workspace = projectWorkspace();
+    const workspace = await committedProjectWorkspace();
     const planBefore = structuredClone(workspace.planVersions);
 
     const result = await executeCommand(
@@ -2093,6 +2271,111 @@ describe("Evidence lifecycle transitions", () => {
       updatedAt: CREATED_AT,
     });
     expect(result.workspace.planVersions).toEqual(planBefore);
+  });
+
+  it("keeps immutable Plan provenance valid after a committed Work Item completes", async () => {
+    const committed = await committedProjectWorkspace();
+    const actual = await executeCommand(
+      committed,
+      {
+        type: "record_actual",
+        actual: {
+          id: "actual-before-validation",
+          revision: 1,
+          target: { kind: "work_item", workItemId: "work-item-1" },
+          actualWorkSeconds: 900,
+          remainingWorkSeconds: 0,
+          actualCost: 0,
+          recordedAt: CREATED_AT,
+        },
+      },
+      context(committed.revision, {
+        commandId: "record-actual-before-validation",
+      }),
+    );
+    if (!actual.ok) {
+      throw new Error(`Expected Actual: ${actual.rejection.reason}`);
+    }
+    const completed = await executeCommand(
+      actual.workspace,
+      {
+        type: "complete_work_item",
+        projectId: "project-1",
+        workItemId: "work-item-1",
+        resultStatus: "completed",
+        outcomeNote: "Delivered and ready for validation.",
+      },
+      context(actual.workspace.revision, {
+        commandId: "complete-before-validation",
+      }),
+    );
+    if (!completed.ok) {
+      throw new Error(`Expected completion: ${completed.rejection.reason}`);
+    }
+    expect(completed.workspace.planVersions[0].workItemRevisions).toEqual({
+      "work-item-1": 1,
+    });
+    expect(completed.workspace.workItems[0].revision).toBe(2);
+
+    const result = await executeCommand(
+      completed.workspace,
+      { type: "request_validation", projectId: "project-1" },
+      context(completed.workspace.revision, {
+        commandId: "request-validation-after-completion",
+      }),
+    );
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("Expected validation after completion");
+    expect(result.workspace.projects[0].stage).toBe("validating");
+  });
+
+  it("keeps execution provenance valid across an editorial Direction revision", async () => {
+    const committed = await committedProjectWorkspace();
+    const activeBrief = committed.directionBriefs.find(
+      ({ id }) => id === committed.projects[0].activeDirectionBriefId,
+    );
+    if (activeBrief === undefined) throw new Error("Expected active Direction");
+    const {
+      version: _version,
+      createdAt: _createdAt,
+      updatedAt: _updatedAt,
+      ...brief
+    } = activeBrief;
+    const edited = await executeCommand(
+      committed,
+      {
+        type: "update_direction",
+        projectId: "project-1",
+        brief: {
+          ...brief,
+          advancedNotes: "Clarified wording without changing the Bet.",
+        },
+      },
+      context(committed.revision, {
+        commandId: "editorial-direction-before-validation",
+      }),
+    );
+    if (!edited.ok) {
+      throw new Error(`Expected editorial Direction: ${edited.rejection.reason}`);
+    }
+    expect(edited.workspace.projects[0].stage).toBe("executing");
+    expect(edited.workspace.projects[0].activeBetId).toBe("bet-1");
+    expect(edited.workspace.projects[0].activeDirectionBriefId).not.toBe(
+      "brief-1",
+    );
+
+    const result = await executeCommand(
+      edited.workspace,
+      { type: "request_validation", projectId: "project-1" },
+      context(edited.workspace.revision, {
+        commandId: "request-validation-after-editorial-direction",
+      }),
+    );
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("Expected validation after editorial edit");
+    expect(result.workspace.projects[0].stage).toBe("validating");
   });
 
   it("blocks validation satisfaction until every concrete requirement is satisfied", async () => {
@@ -2132,11 +2415,65 @@ describe("Evidence lifecycle transitions", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) throw new Error("Expected planning closure request");
     expect(result.workspace.projects[0].stage).toBe("validating");
+
+    const closing = await executeCommand(
+      result.workspace,
+      { type: "satisfy_validation", projectId: "project-1" },
+      context(result.workspace.revision, {
+        commandId: "satisfy-planning-close",
+      }),
+    );
+    expect(closing.ok).toBe(true);
+    if (!closing.ok) throw new Error("Expected receipt-backed planning closure");
+    expect(closing.workspace.projects[0].stage).toBe("closing");
+  });
+
+  it("preserves the Plan-less planning path at the canonical appetite boundary", async () => {
+    const workspace = projectWorkspace({ stage: "planning" });
+    delete workspace.projects[0].activePlanVersionId;
+    workspace.planVersions = [];
+    const expiresAt = workspace.bets[0].appetiteEnd;
+
+    const expired = await executeCommand(
+      workspace,
+      {
+        type: "record_bet_boundary",
+        projectId: "project-1",
+        boundary: "expired",
+        triggerKey: "bet-1:expired",
+      },
+      context(workspace.revision, {
+        commandId: "expire-planning-project",
+        actorId: "system-clock",
+        actorKind: "system",
+        origin: "agent",
+        source: {
+          sourceId: "canonical-bet-clock",
+          verified: true,
+          capabilities: ["system_time"],
+        },
+        now: expiresAt,
+      }),
+    );
+    expect(expired.ok).toBe(true);
+    if (!expired.ok) throw new Error("Expected canonical planning expiry");
+
+    const closing = await executeCommand(
+      expired.workspace,
+      { type: "satisfy_validation", projectId: "project-1" },
+      context(expired.workspace.revision, {
+        commandId: "satisfy-expired-planning-project",
+        now: expiresAt,
+      }),
+    );
+    expect(closing.ok).toBe(true);
+    if (!closing.ok) throw new Error(closing.rejection.reason);
+    expect(closing.workspace.projects[0].stage).toBe("closing");
+    expect(closing.workspace.projects[0].activePlanVersionId).toBeUndefined();
   });
 
   it("moves validation to closing with exact current Evidence", async () => {
-    const workspace = projectWorkspace({
-      stage: "validating",
+    const workspace = await validatingCommittedProjectWorkspace({
       kind: "milestone",
       evidenceRequired: true,
     });
@@ -2157,14 +2494,17 @@ describe("Evidence lifecycle transitions", () => {
       context(workspace.revision, { commandId: "satisfy-with-evidence" }),
     );
 
+    if (!result.ok) {
+      throw new Error(
+        `Expected validation satisfaction: ${result.rejection.code} ${result.rejection.reason}`,
+      );
+    }
     expect(result.ok).toBe(true);
-    if (!result.ok) throw new Error("Expected validation satisfaction");
     expect(result.workspace.projects[0].stage).toBe("closing");
   });
 
   it("accepts an exact active Exception but not a resolved one", async () => {
-    const activeWorkspace = projectWorkspace({
-      stage: "validating",
+    const activeWorkspace = await validatingCommittedProjectWorkspace({
       kind: "milestone",
       evidenceRequired: true,
     });
@@ -2177,6 +2517,11 @@ describe("Evidence lifecycle transitions", () => {
         commandId: "satisfy-with-exception",
       }),
     );
+    if (!activeResult.ok) {
+      throw new Error(
+        `Expected active exception satisfaction: ${activeResult.rejection.code} ${activeResult.rejection.reason}`,
+      );
+    }
     expect(activeResult.ok).toBe(true);
 
     const resolvedWorkspace = structuredClone(activeWorkspace);
@@ -2203,6 +2548,67 @@ describe("Evidence lifecycle transitions", () => {
     expect(resolvedResult.ok).toBe(false);
     if (resolvedResult.ok) throw new Error("Expected reopened evidence gate");
     expect(resolvedResult.rejection.code).toBe("EVIDENCE_REQUIRED");
+  });
+
+  it("rejects a forged validating stage even when its Evidence is complete", async () => {
+    const workspace = projectWorkspace({
+      stage: "validating",
+      kind: "milestone",
+      evidenceRequired: true,
+    });
+    workspace.evidence.push({
+      id: "evidence-forged-stage",
+      kind: "metric",
+      summary: "A result without lifecycle provenance",
+      projectId: "project-1",
+      workItemId: "work-item-1",
+      createdAt: CREATED_AT,
+      confidence: 1,
+      tags: [],
+    });
+
+    const result = await executeCommand(
+      workspace,
+      { type: "satisfy_validation", projectId: "project-1" },
+      context(workspace.revision, {
+        commandId: "reject-forged-validating-stage",
+      }),
+    );
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("Expected validation provenance gate");
+    expect(result.rejection).toMatchObject({
+      code: "SYNC_CONFLICT",
+      gate: "project:project-1:validation_provenance",
+      permittedNextCommand: "resolve_sync_conflict",
+    });
+  });
+
+  it("rejects a lifecycle receipt whose origin could never execute its command", async () => {
+    const workspace = await validatingCommittedProjectWorkspace();
+    const receipt = workspace.commandReceipts.find(
+      ({ commandType }) => commandType === "request_validation",
+    );
+    if (receipt === undefined) throw new Error("Expected request receipt");
+    receipt.origin = "migration";
+    const { receiptHash: _receiptHash, ...receiptBase } = receipt;
+    receipt.receiptHash = stableHashSync(receiptBase as unknown as JsonValue);
+
+    const result = await executeCommand(
+      workspace,
+      { type: "satisfy_validation", projectId: "project-1" },
+      context(workspace.revision, {
+        commandId: "reject-impossible-validation-origin",
+      }),
+    );
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("Expected impossible authority to reject");
+    expect(result.rejection).toMatchObject({
+      code: "SYNC_CONFLICT",
+      gate: "project:project-1:validation_provenance",
+      reason: expect.stringMatching(/impossible command authority/i),
+    });
   });
 
   it("never lets an evidence Exception bypass an overdue Review hold", async () => {

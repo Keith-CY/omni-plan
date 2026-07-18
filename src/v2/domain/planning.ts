@@ -1,13 +1,19 @@
 import type { Id, ISODate } from "@/domain/types";
 
 import { scheduleV2Project } from "../projections/schedulerAdapter";
-import { betIntegrityIssue } from "./betIntegrity";
+import {
+  betIntegrityIssue,
+  betReplacementProvenanceIssue,
+} from "./betIntegrity";
 import type { RejectionCode } from "./errors";
 import { transitionLifecycle } from "./lifecycle";
-import { stableHash } from "./stableHash";
+import { authorizeCommandIdentity } from "./policy";
+import { stableHash, stableHashSync } from "./stableHash";
 import type {
   BetVersion,
   CommitmentSlot,
+  DailyCommitment,
+  DirectionBrief,
   JsonValue,
   PlanVersion,
   ProjectHold,
@@ -32,6 +38,15 @@ export interface PlanningContextRejection {
 
 export type PlanningContextResult =
   | PlanningContext
+  | PlanningContextRejection;
+
+export interface ExecutionPlanProvenance extends PlanningContext {
+  plan: PlanVersion;
+  commitment: DailyCommitment;
+}
+
+export type ExecutionPlanProvenanceResult =
+  | ExecutionPlanProvenance
   | PlanningContextRejection;
 
 export class PlanVersionBuildError extends Error {
@@ -162,6 +177,393 @@ function solePlanLeaf(
     );
   }
   return leaves[0];
+}
+
+function executionPlanProvenanceRejection(
+  projectId: Id,
+  reason: string,
+): PlanningContextRejection {
+  return {
+    ok: false,
+    code: "SYNC_CONFLICT",
+    reason,
+    gate: `project:${projectId}:execution_plan_provenance`,
+    permittedNextCommand: "resolve_sync_conflict",
+  };
+}
+
+function planCommitmentReceiptIssue(
+  workspace: WorkspaceV2,
+  project: ProjectV2,
+  plan: PlanVersion,
+  commitment: DailyCommitment,
+): string | undefined {
+  const receipts = workspace.commandReceipts.filter((receipt) => {
+    if (
+      receipt.status !== "applied" ||
+      (receipt.commandType !== "commit_today" &&
+        receipt.commandType !== "accept_replan") ||
+      receipt.actorKind !== "human" ||
+      receipt.actorId !== commitment.actorId ||
+      receipt.createdAt !== commitment.committedAt ||
+      receipt.revision !== receipt.baseRevision + 1 ||
+      receipt.revision > workspace.revision ||
+      receipt.id !== receipt.commandId ||
+      !receipt.source.verified
+    ) {
+      return false;
+    }
+    const planCreates = receipt.diff.filter(
+      ({ entity, entityId, field, before, after }) =>
+        entity === "PlanVersion" &&
+        entityId === plan.id &&
+        field === "created" &&
+        before === null &&
+        stableHashSync(after) ===
+          stableHashSync(plan as unknown as JsonValue),
+    );
+    const commitmentCreates = receipt.diff.filter(
+      ({ entity, entityId, field, before, after }) =>
+        entity === "DailyCommitment" &&
+        entityId === commitment.id &&
+        field === "created" &&
+        before === null &&
+        stableHashSync(after) ===
+          stableHashSync(commitment as unknown as JsonValue),
+    );
+    return planCreates.length === 1 && commitmentCreates.length === 1;
+  });
+  const receipt = receipts[0];
+  if (receipts.length !== 1 || receipt === undefined) {
+    return `Plan ${plan.id} and Daily Commitment ${commitment.id} lack one exact applied human receipt.`;
+  }
+  const { receiptHash, ...receiptBase } = receipt;
+  if (
+    receiptHash !== stableHashSync(receiptBase as unknown as JsonValue)
+  ) {
+    return `Plan ${plan.id} commitment receipt hash is invalid.`;
+  }
+  const authorityIssue = authorizeCommandIdentity(receipt.commandType, {
+    actorKind: receipt.actorKind,
+    origin: receipt.origin,
+    source: receipt.source,
+    workspaceRevision: receipt.baseRevision,
+    projectHolds: [],
+  });
+  if (authorityIssue !== undefined) {
+    return `Plan ${plan.id} commitment receipt has impossible command authority: ${authorityIssue.reason}`;
+  }
+  if (
+    receipt.diff.filter(
+      ({ entity, entityId, field }) =>
+        entity === "ProjectV2" &&
+        entityId === project.id &&
+        (field === "stage" || field === "activePlanVersionId"),
+    ).length === 0
+  ) {
+    return `Plan ${plan.id} receipt does not record its Project lifecycle effect.`;
+  }
+  return undefined;
+}
+
+function materialDirectionHash(brief: DirectionBrief): string {
+  return stableHashSync({
+    audienceAndProblem: brief.audienceAndProblem,
+    successEvidence: brief.successEvidence,
+    appetiteSeconds: brief.appetiteSeconds,
+    validationMethod: brief.validationMethod,
+    firstScope: brief.firstScope,
+    noGoOrKill: brief.noGoOrKill,
+  } as unknown as JsonValue);
+}
+
+function directionLineageIssue(
+  workspace: WorkspaceV2,
+  project: ProjectV2,
+  bet: BetVersion,
+): string | undefined {
+  const history = workspace.directionBriefs.filter(
+    ({ projectId }) => projectId === project.id,
+  );
+  const active = workspace.directionBriefs.filter(
+    ({ id }) => id === project.activeDirectionBriefId,
+  );
+  const approved = workspace.directionBriefs.filter(
+    ({ id }) => id === bet.briefId,
+  );
+  if (
+    history.length === 0 ||
+    active.length !== 1 ||
+    approved.length !== 1 ||
+    active[0].projectId !== project.id ||
+    approved[0].projectId !== project.id
+  ) {
+    return `Project ${project.id} Direction history has ambiguous active or approved records.`;
+  }
+  const versions = [...history]
+    .map(({ version }) => version)
+    .sort((left, right) => left - right);
+  const firstVersion = versions[0];
+  if (
+    new Set(history.map(({ id }) => id)).size !== history.length ||
+    firstVersion === undefined ||
+    !Number.isInteger(firstVersion) ||
+    firstVersion <= 0 ||
+    versions.some((version, index) => version !== firstVersion + index) ||
+    active[0].version !== versions[versions.length - 1]
+  ) {
+    return `Project ${project.id} Direction history is forked or discontinuous.`;
+  }
+  if (
+    stableHashSync(approved[0] as unknown as JsonValue) !== bet.briefHash ||
+    materialDirectionHash(active[0]) !== materialDirectionHash(bet.briefSnapshot)
+  ) {
+    return `Project ${project.id} active Direction is not an editorial continuation of Bet ${bet.id}.`;
+  }
+  return undefined;
+}
+
+function betLineageIssue(
+  workspace: WorkspaceV2,
+  project: ProjectV2,
+  activeBet: BetVersion,
+): string | undefined {
+  const history = workspace.bets.filter(
+    ({ projectId }) => projectId === project.id,
+  );
+  const byId = new Map(history.map((bet) => [bet.id, bet]));
+  const versions = new Set<number>();
+  const supersededIds = new Set<Id>();
+  if (
+    history.length === 0 ||
+    byId.size !== history.length ||
+    workspace.bets.filter(({ id }) => id === activeBet.id).length !== 1
+  ) {
+    return `Project ${project.id} Bet history contains ambiguous identities.`;
+  }
+  for (const bet of history) {
+    if (
+      !Number.isInteger(bet.version) ||
+      bet.version <= 0 ||
+      versions.has(bet.version) ||
+      betReplacementProvenanceIssue(workspace, bet) !== undefined
+    ) {
+      return `Project ${project.id} Bet history contains an invalid version or replacement.`;
+    }
+    versions.add(bet.version);
+    if (bet.supersedesId === undefined) {
+      if (bet.version !== 1) {
+        return `Project ${project.id} Bet history has no version-one root.`;
+      }
+      continue;
+    }
+    const parent = byId.get(bet.supersedesId);
+    if (
+      parent === undefined ||
+      parent.id === bet.id ||
+      bet.version !== parent.version + 1
+    ) {
+      return `Project ${project.id} Bet history has an invalid supersedes link.`;
+    }
+    supersededIds.add(parent.id);
+  }
+  const leaves = history.filter(({ id }) => !supersededIds.has(id));
+  if (leaves.length !== 1 || leaves[0] !== activeBet) {
+    return `Project ${project.id} active Bet is not the unique history leaf.`;
+  }
+  const visited = new Set<Id>();
+  let cursor: BetVersion | undefined = activeBet;
+  while (cursor !== undefined) {
+    if (visited.has(cursor.id)) {
+      return `Project ${project.id} Bet history contains a cycle.`;
+    }
+    visited.add(cursor.id);
+    cursor =
+      cursor.supersedesId === undefined
+        ? undefined
+        : byId.get(cursor.supersedesId);
+  }
+  return visited.size === history.length
+    ? undefined
+    : `Project ${project.id} Bet history is disconnected.`;
+}
+
+function resolvePlanProvenanceForSubject(
+  workspace: WorkspaceV2,
+  project: ProjectV2,
+  bet: BetVersion,
+): ExecutionPlanProvenanceResult {
+  const briefIssue = directionLineageIssue(workspace, project, bet);
+  const currentBetLineageIssue = betLineageIssue(workspace, project, bet);
+  const lineageIssue = briefIssue ?? currentBetLineageIssue;
+  if (lineageIssue !== undefined) {
+    return executionPlanProvenanceRejection(
+      project.id,
+      lineageIssue,
+    );
+  }
+
+  let leaf: PlanVersion | undefined;
+  try {
+    leaf = solePlanLeaf(workspace, project.id);
+  } catch (error) {
+    return executionPlanProvenanceRejection(
+      project.id,
+      error instanceof Error
+        ? error.message
+        : `Project ${project.id} Plan lineage is invalid.`,
+    );
+  }
+  const activePlanMatches = workspace.planVersions.filter(
+    ({ id }) => id === project.activePlanVersionId,
+  );
+  if (
+    leaf === undefined ||
+    activePlanMatches.length !== 1 ||
+    activePlanMatches[0] !== leaf ||
+    leaf.betId !== bet.id
+  ) {
+    return executionPlanProvenanceRejection(
+      project.id,
+      `Project ${project.id} active Plan does not resolve to its unique current-Bet history leaf.`,
+    );
+  }
+
+  const projectPlans = workspace.planVersions.filter(
+    (plan) => plan.projectId === project.id,
+  );
+  let activeCommitment: DailyCommitment | undefined;
+  for (const plan of projectPlans) {
+    if (
+      workspace.bets.filter(
+        ({ id, projectId: ownerId }) =>
+          id === plan.betId && ownerId === project.id,
+      ).length !== 1
+    ) {
+      return executionPlanProvenanceRejection(
+        project.id,
+        `Plan ${plan.id} does not resolve to one Bet in the Project lineage.`,
+      );
+    }
+    const commitments = workspace.dailyCommitments.filter(
+      (commitment) => plan.id === `plan:${project.id}:${commitment.id}`,
+    );
+    const commitment = commitments[0];
+    if (
+      commitments.length !== 1 ||
+      commitment === undefined ||
+      workspace.dailyCommitments.filter(({ id }) => id === commitment.id)
+        .length !== 1 ||
+      commitment.actorId !== plan.actorId ||
+      commitment.committedAt !== plan.createdAt
+    ) {
+      return executionPlanProvenanceRejection(
+        project.id,
+        `Plan ${plan.id} is not the exact immutable sibling of one Daily Commitment.`,
+      );
+    }
+    const receiptIssue = planCommitmentReceiptIssue(
+      workspace,
+      project,
+      plan,
+      commitment,
+    );
+    if (receiptIssue !== undefined) {
+      return executionPlanProvenanceRejection(project.id, receiptIssue);
+    }
+    if (plan === leaf) activeCommitment = commitment;
+  }
+  if (activeCommitment === undefined) {
+    return executionPlanProvenanceRejection(
+      project.id,
+      `Project ${project.id} active Plan has no Daily Commitment provenance.`,
+    );
+  }
+
+  return { ok: true, project, bet, plan: leaf, commitment: activeCommitment };
+}
+
+/**
+ * Resolves immutable Plan lineage without comparing its historical snapshot
+ * to mutable current Work Item revisions. Every Plan must be the deterministic
+ * sibling of exactly one persisted Daily Commitment.
+ */
+export function resolveStoredPlanProvenance(
+  workspace: WorkspaceV2,
+  projectId: Id,
+  now: ISODate,
+): ExecutionPlanProvenanceResult {
+  const projects = workspace.projects.filter(({ id }) => id === projectId);
+  if (projects.length !== 1) {
+    return executionPlanProvenanceRejection(
+      projectId,
+      projects.length === 0
+        ? `Project ${projectId} does not exist.`
+        : `Project ${projectId} has duplicate records for one identity.`,
+    );
+  }
+  const project = projects[0];
+  if (
+    project.stage !== "executing" &&
+    project.stage !== "validating" &&
+    project.stage !== "closing"
+  ) {
+    return executionPlanProvenanceRejection(
+      project.id,
+      `Project ${project.id} is not in an operational stage backed by an active Plan.`,
+    );
+  }
+  const bets = workspace.bets.filter(
+    ({ id }) => id === project.activeBetId,
+  );
+  const bet = bets[0];
+  const sameProjectCurrent = workspace.bets.filter(
+    ({ projectId: ownerId, invalidatedAt }) =>
+      ownerId === project.id && invalidatedAt === undefined,
+  );
+  if (
+    bets.length !== 1 ||
+    bet === undefined ||
+    bet.projectId !== project.id ||
+    bet.invalidatedAt !== undefined ||
+    sameProjectCurrent.length !== 1 ||
+    sameProjectCurrent[0] !== bet
+  ) {
+    return executionPlanProvenanceRejection(
+      project.id,
+      `Project ${project.id} does not resolve to one exact current Bet.`,
+    );
+  }
+  const integrityIssue = betIntegrityIssue(bet, now);
+  if (integrityIssue !== undefined) {
+    return executionPlanProvenanceRejection(project.id, integrityIssue);
+  }
+  return resolvePlanProvenanceForSubject(workspace, project, bet);
+}
+
+export function resolveExecutionPlanProvenance(
+  workspace: WorkspaceV2,
+  projectId: Id,
+  now: ISODate,
+): ExecutionPlanProvenanceResult {
+  const access = resolvePlanningContext(
+    workspace,
+    projectId,
+    now,
+    "request_validation",
+  );
+  if (!access.ok) return access;
+  if (access.project.stage !== "executing") {
+    return executionPlanProvenanceRejection(
+      access.project.id,
+      `Project ${access.project.id} is not executing from an authoritative Plan.`,
+    );
+  }
+  return resolvePlanProvenanceForSubject(
+    workspace,
+    access.project,
+    access.bet,
+  );
 }
 
 function recordsForPlan(

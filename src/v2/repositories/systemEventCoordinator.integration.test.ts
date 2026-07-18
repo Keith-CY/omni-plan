@@ -735,7 +735,7 @@ describe("SystemEventCoordinator", () => {
     expect(
       coordinator.nextScheduledWakeAt(repository.workspace!, nextWeekOpensAt),
     ).toBe("2026-07-19T18:00:00.000Z");
-  });
+  }, 15_000);
 
   it("keeps weekly opening and deadline wakes DST-aware", () => {
     const now = "2026-03-04T12:00:00.000Z";

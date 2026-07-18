@@ -717,8 +717,15 @@ const coverageExpectedRejections = {
   attach_evidence: [],
   approve_evidence_exception: ["EVIDENCE_REQUIRED"],
   resolve_evidence_exception: [],
-  request_validation: [],
-  satisfy_validation: ["EVIDENCE_REQUIRED", "EXCEPTION_EXPIRED"],
+  // The stage-only scenario fixtures deliberately omit immutable lifecycle
+  // receipts. Provenance-sensitive commands must fail closed there; the
+  // guaranteed workflow above exercises their authoritative success path.
+  request_validation: ["SYNC_CONFLICT"],
+  satisfy_validation: [
+    "EVIDENCE_REQUIRED",
+    "EXCEPTION_EXPIRED",
+    "SYNC_CONFLICT",
+  ],
   record_bet_boundary: ["INVALID_COMMAND"],
   mark_review_overdue: ["HOLD_BLOCKS_COMMAND"],
   create_review: ["INVALID_COMMAND", "DUPLICATE_COMMAND"],
@@ -728,7 +735,7 @@ const coverageExpectedRejections = {
   // still fail the conflict-authority gate.
   open_sync_conflict: ["INVALID_COMMAND", "SOURCE_NOT_AUTHORIZED"],
   resolve_sync_conflict: ["INVALID_COMMAND", "ENTITY_NOT_FOUND"],
-  close_project: [],
+  close_project: ["SYNC_CONFLICT"],
   abandon_project: ["ILLEGAL_LIFECYCLE_TRANSITION"],
   archive_project: [],
   submit_command_proposal: [],

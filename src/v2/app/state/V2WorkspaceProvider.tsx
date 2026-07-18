@@ -231,7 +231,14 @@ export function V2WorkspaceProvider({
       }
       const now = runtime.now();
       const boundCommand: V2Command =
-        command.type === "place_bet" ? { ...command, start: now } : command;
+        command.type === "place_bet"
+          ? { ...command, start: now }
+          : command.type === "attach_evidence"
+            ? {
+                ...command,
+                evidence: { ...command.evidence, createdAt: now },
+              }
+            : command;
       const context: CommandContext = {
         commandId: runtime.createCommandId(),
         expectedRevision: current.workspace.revision,

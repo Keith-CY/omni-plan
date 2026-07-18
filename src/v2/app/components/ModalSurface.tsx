@@ -7,7 +7,7 @@ import {
 import { createPortal } from "react-dom";
 
 const FOCUSABLE_SELECTOR =
-  "button, input, select, textarea, a[href], [tabindex]";
+  "button, input, select, textarea, a[href], summary, [tabindex]";
 
 export function ModalSurface({
   className,

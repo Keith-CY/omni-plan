@@ -68,7 +68,7 @@ const projectStageByCommand = {
   approve_evidence_exception: "evidence",
   satisfy_validation: "evidence",
   close_project: "close",
-  abandon_project: "close",
+  abandon_project: "evidence",
   read_project_history: "close",
   create_follow_up_project: "close",
   archive_project: "close",

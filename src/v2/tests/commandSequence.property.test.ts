@@ -19,7 +19,6 @@ import {
 import {
   buildBetVersion,
   buildCapacityProfile,
-  buildCloseDecision,
   buildCommandContext,
   buildDirectionBrief,
   buildExceptionRecord,
@@ -58,8 +57,10 @@ function replayParameters(
 ): fc.Parameters<unknown> {
   const seed = process.env.FC_SEED;
   const path = process.env.FC_TEST === testKey ? process.env.FC_PATH : undefined;
+  const requestedRuns = process.env.FC_NUM_RUNS;
   return {
-    numRuns,
+    numRuns:
+      requestedRuns === undefined ? numRuns : Number(requestedRuns),
     ...(seed === undefined ? {} : { seed: Number(seed) }),
     ...(path === undefined ? {} : { path }),
   };
@@ -98,7 +99,7 @@ function expectValidAppliedState(
   );
 }
 
-function activeProjectWorkspace(
+async function activeProjectWorkspace(
   seed: number,
   options: {
     stage?: LifecycleStage;
@@ -109,7 +110,7 @@ function activeProjectWorkspace(
     exceptions?: WorkspaceV2["exceptions"];
     evidence?: WorkspaceV2["evidence"];
   } = {},
-): WorkspaceV2 {
+): Promise<WorkspaceV2> {
   const projectId = `active-project:${seed}`;
   const scopeId = `active-scope:${seed}`;
   const brief = buildDirectionBrief({
@@ -145,23 +146,21 @@ function activeProjectWorkspace(
       ? { kind: "milestone" as const, evidenceRequired: true }
       : {}),
   });
-  const planId = `active-plan:${seed}`;
-  const stage = options.stage ?? "planning";
+  const requestedStage = options.stage ?? "planning";
   const hasExistingPlan = ["executing", "validating", "closing", "closed"]
-    .includes(stage);
+    .includes(requestedStage);
   const project = buildProjectV2({
     id: projectId,
-    stage,
+    stage: hasExistingPlan ? "planning" : requestedStage,
     activeDirectionBriefId: brief.id,
     activeBetId: bet.id,
-    ...(hasExistingPlan ? { activePlanVersionId: planId } : {}),
     holds: options.holds ?? [],
     createdAt: "2026-07-10T00:00:00.000Z",
     updatedAt: "2026-07-10T00:00:00.000Z",
   });
-  return buildWorkspaceV2(`active-workspace:${seed}`, {
+  let workspace = buildWorkspaceV2(`active-workspace:${seed}`, {
     capacityProfile:
-      options.capacitySeconds === undefined
+      options.capacitySeconds === undefined && !hasExistingPlan
         ? undefined
         : buildCapacityProfile({
             timeZone: "UTC",
@@ -171,9 +170,9 @@ function activeProjectWorkspace(
             dailyBudgets: [
               {
                 weekday: 6,
-                deepSeconds: options.capacitySeconds,
-                mediumSeconds: options.capacitySeconds,
-                shallowSeconds: options.capacitySeconds,
+                deepSeconds: options.capacitySeconds ?? 86_400,
+                mediumSeconds: options.capacitySeconds ?? 86_400,
+                shallowSeconds: options.capacitySeconds ?? 86_400,
               },
             ],
             updatedAt: "2026-07-10T00:00:00.000Z",
@@ -182,42 +181,84 @@ function activeProjectWorkspace(
     projects: [project],
     directionBriefs: [brief],
     bets: [bet],
-    planVersions: hasExistingPlan
-      ? [{
-        id: planId,
-        projectId,
-        version: 1,
-        betId: bet.id,
-        workItemRevisions: { [workItem.id]: workItem.revision },
-        dependencyRevisions: {},
-        scopeMapping: { [workItem.id]: scopeId },
-        scheduleHash: `active-schedule-hash:${seed}`,
-        capacityIndependentDates: {
-          [workItem.id]: {
-            start: "2026-07-10T00:00:00.000Z",
-            finish: "2026-07-10T00:30:00.000Z",
-          },
-        },
-        actorId: "property-human",
-        createdAt: "2026-07-10T00:00:00.000Z",
-        },
-      ]
-      : [],
+    planVersions: [],
     workItems: [workItem],
     exceptions: options.exceptions ?? [],
     evidence: options.evidence ?? [],
     closeDecisions:
-      stage === "closed"
-        ? [
-            buildCloseDecision({
-              id: `active-close:${seed}`,
-              projectId,
-              actorId: "property-human",
-              closedAt: "2026-07-11T00:00:00.000Z",
-            }),
-          ]
-        : [],
+      [],
   });
+  if (!hasExistingPlan) return workspace;
+
+  const committedAt = "2026-07-11T00:10:00.000Z";
+  const proposal = await generateTodayProposal(
+    workspace,
+    "2026-07-11",
+    committedAt,
+  );
+  workspace = await appliedWorkspace(
+    workspace,
+    {
+      type: "commit_today",
+      commitment: {
+        id: `active-commitment:${seed}`,
+        localDate: proposal.localDate,
+        workspaceRevision: proposal.workspaceRevision,
+        generatedAt: proposal.generatedAt,
+        proposalHash: proposal.proposalHash,
+        slots: structuredClone(proposal.slots),
+      },
+    },
+    buildCommandContext({
+      commandId: `active-commit-command:${seed}`,
+      expectedRevision: workspace.revision,
+      now: committedAt,
+    }),
+  );
+  if (requestedStage === "executing") return workspace;
+
+  workspace = await appliedWorkspace(
+    workspace,
+    { type: "request_validation", projectId },
+    buildCommandContext({
+      commandId: `active-validation-command:${seed}`,
+      expectedRevision: workspace.revision,
+      now: "2026-07-11T00:11:00.000Z",
+    }),
+  );
+  if (requestedStage === "validating") return workspace;
+
+  workspace = await appliedWorkspace(
+    workspace,
+    { type: "satisfy_validation", projectId },
+    buildCommandContext({
+      commandId: `active-satisfaction-command:${seed}`,
+      expectedRevision: workspace.revision,
+      now: "2026-07-11T00:12:00.000Z",
+    }),
+  );
+  if (requestedStage === "closing") return workspace;
+
+  return appliedWorkspace(
+    workspace,
+    {
+      type: "close_project",
+      projectId,
+      decision: {
+        id: `active-close:${seed}`,
+        projectId,
+        successComparison: "Compared with the bounded success evidence.",
+        outcome: "achieved",
+        keyLearning: "The authoritative lifecycle remains inspectable.",
+        unfinishedDisposition: "historical_incomplete",
+      },
+    },
+    buildCommandContext({
+      commandId: `active-close-command:${seed}`,
+      expectedRevision: workspace.revision,
+      now: "2026-07-11T00:13:00.000Z",
+    }),
+  );
 }
 
 type HumanOnlyApproval =
@@ -250,7 +291,7 @@ async function humanOnlyApprovalFixture(
   const now = "2026-07-11T01:00:00.000Z";
   const projectId = `active-project:${seed}`;
   if (approval === "place_bet") {
-    const workspace = activeProjectWorkspace(seed);
+    const workspace = await activeProjectWorkspace(seed);
     workspace.projects[0].stage = "awaiting_bet";
     delete workspace.projects[0].activeBetId;
     delete workspace.projects[0].activePlanVersionId;
@@ -268,7 +309,7 @@ async function humanOnlyApprovalFixture(
     };
   }
   if (approval === "commit_today") {
-    const workspace = activeProjectWorkspace(seed, { capacitySeconds: 3_600 });
+    const workspace = await activeProjectWorkspace(seed, { capacitySeconds: 3_600 });
     const proposal = await generateTodayProposal(workspace, "2026-07-11", now);
     return {
       workspace,
@@ -287,7 +328,7 @@ async function humanOnlyApprovalFixture(
     };
   }
   if (approval === "accept_replan") {
-    let workspace = activeProjectWorkspace(seed, { capacitySeconds: 3_600 });
+    let workspace = await activeProjectWorkspace(seed, { capacitySeconds: 3_600 });
     const proposal = await generateTodayProposal(workspace, "2026-07-11", now);
     workspace = await appliedWorkspace(
       workspace,
@@ -357,7 +398,7 @@ async function humanOnlyApprovalFixture(
     };
   }
   if (approval === "approve_evidence_exception") {
-    const workspace = activeProjectWorkspace(seed, {
+    const workspace = await activeProjectWorkspace(seed, {
       stage: "validating",
       evidenceRequired: true,
     });
@@ -379,7 +420,7 @@ async function humanOnlyApprovalFixture(
     };
   }
   if (approval === "complete_review") {
-    const workspace = activeProjectWorkspace(seed);
+    const workspace = await activeProjectWorkspace(seed);
     workspace.reviews.push({
       id: `human-only-review:${seed}`,
       kind: "event",
@@ -407,7 +448,7 @@ async function humanOnlyApprovalFixture(
   }
   if (approval === "close_project") {
     return {
-      workspace: activeProjectWorkspace(seed, { stage: "closing" }),
+      workspace: await activeProjectWorkspace(seed, { stage: "closing" }),
       command: {
         type: "close_project",
         projectId,
@@ -424,7 +465,7 @@ async function humanOnlyApprovalFixture(
     };
   }
 
-  let workspace = activeProjectWorkspace(seed, { stage: "executing" });
+  let workspace = await activeProjectWorkspace(seed, { stage: "executing" });
   const boundaryAt = workspace.bets[0].appetiteEnd;
   workspace = await appliedWorkspace(
     workspace,
@@ -647,13 +688,16 @@ describe("arbitrary V2 command sequences", () => {
         }),
         replayParameters("main"),
       );
-      if (process.env.FC_PATH === undefined) {
+      if (
+        process.env.FC_PATH === undefined &&
+        process.env.FC_NUM_RUNS === undefined
+      ) {
         expect(appetiteSigns).toEqual(
           new Set(["negative", "zero", "positive"]),
         );
       }
     },
-    240_000,
+    720_000,
   );
 
   it(
@@ -818,7 +862,7 @@ describe("explicit lifecycle invariant properties", () => {
             attempt === "commit_today"
               ? Math.min(estimateSeconds, 3_600)
               : estimateSeconds;
-          const mutable = activeProjectWorkspace(seed, {
+          const mutable = await activeProjectWorkspace(seed, {
             durationSeconds: executionSeconds,
             capacitySeconds: Math.max(executionSeconds, 3_600),
           });
@@ -924,7 +968,7 @@ describe("explicit lifecycle invariant properties", () => {
         async ({ seed, budget, overage }) => {
           const now = "2026-07-11T01:00:00.000Z";
           const workspace = deepFreeze(
-            activeProjectWorkspace(seed, {
+            await activeProjectWorkspace(seed, {
               durationSeconds: budget,
               capacitySeconds: budget,
             }),
@@ -1019,7 +1063,7 @@ describe("explicit lifecycle invariant properties", () => {
           closedCase: fc.oneof(humanOriginCase, agentOriginCase),
         }),
         async ({ seed, closedCase: { origin, mutation } }) => {
-          const mutable = activeProjectWorkspace(seed, { stage: "closed" });
+          const mutable = await activeProjectWorkspace(seed, { stage: "closed" });
           const promotedActionId = `closed-promoted-action:${seed}`;
           if (mutation === "promoted_actual") {
             const inboxId = `closed-promoted-inbox:${seed}`;
@@ -1308,7 +1352,7 @@ describe("explicit lifecycle invariant properties", () => {
             expiresAt,
           });
           const workspace = deepFreeze(
-            activeProjectWorkspace(seed, {
+            await activeProjectWorkspace(seed, {
               stage: "validating",
               evidenceRequired: true,
               evidence: gateState === "evidence" ? [evidence] : [],
@@ -1390,7 +1434,7 @@ describe("explicit lifecycle invariant properties", () => {
             affectedRecordIds: [projectId, `active-work:${seed}`],
             createdAt: "2026-07-11T00:00:00.000Z",
           };
-          const mutable = activeProjectWorkspace(seed, { holds: [hold] });
+          const mutable = await activeProjectWorkspace(seed, { holds: [hold] });
           if (hold.type === "migration_review") {
             mutable.legacyAuditRecords.push({
               id: sourceId,

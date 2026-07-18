@@ -180,6 +180,23 @@ function activeWorkspace(
   });
 }
 
+async function planlessValidationRequestedBeforeExpiry(): Promise<WorkspaceV2> {
+  const workspace = activeWorkspace("planning");
+  delete workspace.projects[0].activePlanVersionId;
+  workspace.planVersions = [];
+  return applied(
+    await executeCommand(
+      workspace,
+      { type: "request_validation", projectId: "project-1" },
+      context({
+        commandId: "request-validation-before-expiry",
+        expectedRevision: workspace.revision,
+        now: MIDPOINT,
+      }),
+    ),
+  ).workspace;
+}
+
 function twoExpiredProjectsWorkspace(): WorkspaceV2 {
   const workspace = activeWorkspace("executing");
   const secondBrief: DirectionBrief = {
@@ -411,6 +428,303 @@ describe("material Direction edits", () => {
       });
     },
   );
+
+  it("requires an authoritative expiry boundary before post-expiry validation satisfaction", async () => {
+    const workspace = await planlessValidationRequestedBeforeExpiry();
+
+    const result = rejected(
+      await executeCommand(
+        workspace,
+        { type: "satisfy_validation", projectId: "project-1" },
+        context({
+          commandId: "satisfy-without-expiry-boundary",
+          expectedRevision: workspace.revision,
+          now: APPETITE_END,
+        }),
+      ),
+    );
+
+    expect(result.rejection).toMatchObject({
+      code: "ILLEGAL_LIFECYCLE_TRANSITION",
+      gate: "project:project-1:appetite_boundary",
+      permittedNextCommand: "record_bet_boundary",
+    });
+    expect(result.workspace).toBe(workspace);
+  });
+
+  it("accepts post-expiry satisfaction when expiry was recorded after validation entry", async () => {
+    const validating = await planlessValidationRequestedBeforeExpiry();
+    const expired = applied(
+      await executeCommand(
+        validating,
+        {
+          type: "record_bet_boundary",
+          projectId: "project-1",
+          boundary: "expired",
+          triggerKey: "bet-1:expired",
+        },
+        systemContext(APPETITE_END, {
+          commandId: "record-expiry-after-validation-entry",
+          expectedRevision: validating.revision,
+        }),
+      ),
+    );
+    expect(
+      expired.receipt.diff.some(({ field }) => field === "stage"),
+    ).toBe(false);
+
+    const result = applied(
+      await executeCommand(
+        expired.workspace,
+        { type: "satisfy_validation", projectId: "project-1" },
+        context({
+          commandId: "satisfy-after-authoritative-expiry",
+          expectedRevision: expired.workspace.revision,
+          now: APPETITE_END,
+        }),
+      ),
+    );
+
+    expect(result.workspace.projects[0].stage).toBe("closing");
+  });
+
+  it("revalidates the expiry receipt before closing after post-expiry satisfaction", async () => {
+    const validating = await planlessValidationRequestedBeforeExpiry();
+    const expired = applied(
+      await executeCommand(
+        validating,
+        {
+          type: "record_bet_boundary",
+          projectId: "project-1",
+          boundary: "expired",
+          triggerKey: "bet-1:expired",
+        },
+        systemContext(APPETITE_END, {
+          commandId: "record-expiry-before-close",
+          expectedRevision: validating.revision,
+        }),
+      ),
+    );
+    const closing = applied(
+      await executeCommand(
+        expired.workspace,
+        { type: "satisfy_validation", projectId: "project-1" },
+        context({
+          commandId: "satisfy-expired-before-close",
+          expectedRevision: expired.workspace.revision,
+          now: APPETITE_END,
+        }),
+      ),
+    ).workspace;
+    closing.commandReceipts = closing.commandReceipts.filter(
+      ({ commandId }) => commandId !== "record-expiry-before-close",
+    );
+
+    const result = rejected(
+      await executeCommand(
+        closing,
+        {
+          type: "close_project",
+          projectId: "project-1",
+          decision: {
+            id: "close-with-deleted-expiry-receipt",
+            projectId: "project-1",
+            successComparison: "The target evidence was achieved.",
+            outcome: "achieved",
+            keyLearning: "Closure must retain its boundary authority.",
+            unfinishedDisposition: "historical_incomplete",
+          },
+        },
+        context({
+          commandId: "reject-close-with-deleted-expiry-receipt",
+          expectedRevision: closing.revision,
+          now: APPETITE_END,
+        }),
+      ),
+    );
+
+    expect(result.rejection).toMatchObject({
+      code: "SYNC_CONFLICT",
+      gate: "project:project-1:appetite_boundary",
+      permittedNextCommand: "resolve_sync_conflict",
+    });
+    expect(result.workspace).toBe(closing);
+  });
+
+  it("rejects Close when a current-Bet expiry hold is forged after pre-expiry satisfaction", async () => {
+    const validating = await planlessValidationRequestedBeforeExpiry();
+    const closing = applied(
+      await executeCommand(
+        validating,
+        { type: "satisfy_validation", projectId: "project-1" },
+        context({
+          commandId: "satisfy-before-forged-expiry-hold",
+          expectedRevision: validating.revision,
+          now: REBET_AT,
+        }),
+      ),
+    ).workspace;
+    closing.projects[0].holds.push({
+      type: "rebet_required",
+      sourceId: BET.id,
+      affectedRecordIds: ["project-1", BET.id],
+      createdAt: APPETITE_END,
+    });
+
+    const result = rejected(
+      await executeCommand(
+        closing,
+        {
+          type: "close_project",
+          projectId: "project-1",
+          decision: {
+            id: "close-with-forged-expiry-hold",
+            projectId: "project-1",
+            successComparison: "Validation completed before the appetite ended.",
+            outcome: "achieved",
+            keyLearning: "A hold without authority cannot be cleared by Close.",
+            unfinishedDisposition: "historical_incomplete",
+          },
+        },
+        context({
+          commandId: "reject-close-with-forged-expiry-hold",
+          expectedRevision: closing.revision,
+          now: APPETITE_END,
+        }),
+      ),
+    );
+
+    expect(result.rejection).toMatchObject({
+      code: "SYNC_CONFLICT",
+      gate: "project:project-1:appetite_boundary",
+      permittedNextCommand: "resolve_sync_conflict",
+    });
+    expect(result.workspace).toBe(closing);
+  });
+
+  it("rejects an exact-looking expiry hold with no receipt that created it", async () => {
+    const workspace = await planlessValidationRequestedBeforeExpiry();
+    workspace.projects[0].holds.push({
+      type: "rebet_required",
+      sourceId: BET.id,
+      affectedRecordIds: ["project-1", BET.id],
+      createdAt: APPETITE_END,
+    });
+
+    const result = rejected(
+      await executeCommand(
+        workspace,
+        {
+          type: "abandon_project",
+          projectId: "project-1",
+          decision: {
+            id: "abandon-forged-expiry-hold",
+            projectId: "project-1",
+            successComparison: "The target evidence was not achieved.",
+            outcome: "abandoned",
+            keyLearning: "A hold without authority cannot close a Project.",
+            unfinishedDisposition: "historical_incomplete",
+          },
+        },
+        context({
+          commandId: "reject-forged-expiry-hold",
+          expectedRevision: workspace.revision,
+          now: APPETITE_END,
+        }),
+      ),
+    );
+
+    expect(result.rejection).toMatchObject({
+      code: "SYNC_CONFLICT",
+      gate: "project:project-1:appetite_boundary",
+      permittedNextCommand: "resolve_sync_conflict",
+    });
+    expect(result.workspace).toBe(workspace);
+  });
+
+  it.each([
+    {
+      name: "payload hash",
+      corrupt(receipt: WorkspaceV2["commandReceipts"][number]) {
+        receipt.payloadHash = "0".repeat(64);
+      },
+    },
+    {
+      name: "authority origin",
+      corrupt(receipt: WorkspaceV2["commandReceipts"][number]) {
+        receipt.origin = "migration";
+      },
+    },
+    {
+      name: "future revision",
+      corrupt(receipt: WorkspaceV2["commandReceipts"][number]) {
+        receipt.baseRevision += 1;
+        receipt.revision += 1;
+      },
+    },
+    {
+      name: "hold diff",
+      corrupt(receipt: WorkspaceV2["commandReceipts"][number]) {
+        const holdsDiff = receipt.diff.find(({ field }) => field === "holds");
+        if (holdsDiff === undefined) throw new Error("Expected holds diff");
+        holdsDiff.after = [];
+      },
+    },
+  ])("rejects abandonment with corrupted expiry $name provenance", async ({ corrupt }) => {
+    const validating = await planlessValidationRequestedBeforeExpiry();
+    const expired = applied(
+      await executeCommand(
+        validating,
+        {
+          type: "record_bet_boundary",
+          projectId: "project-1",
+          boundary: "expired",
+          triggerKey: "bet-1:expired",
+        },
+        systemContext(APPETITE_END, {
+          commandId: "record-expiry-for-corruption",
+          expectedRevision: validating.revision,
+        }),
+      ),
+    ).workspace;
+    const receipt = expired.commandReceipts.find(
+      ({ commandId }) => commandId === "record-expiry-for-corruption",
+    );
+    if (receipt === undefined) throw new Error("Expected expiry receipt");
+    corrupt(receipt);
+    const { receiptHash: _receiptHash, ...receiptBase } = receipt;
+    receipt.receiptHash = stableHashSync(receiptBase as unknown as JsonValue);
+
+    const result = rejected(
+      await executeCommand(
+        expired,
+        {
+          type: "abandon_project",
+          projectId: "project-1",
+          decision: {
+            id: "abandon-corrupted-expiry",
+            projectId: "project-1",
+            successComparison: "The target evidence was not achieved.",
+            outcome: "abandoned",
+            keyLearning: "Corrupt authority must fail closed.",
+            unfinishedDisposition: "historical_incomplete",
+          },
+        },
+        context({
+          commandId: "reject-corrupted-expiry",
+          expectedRevision: expired.revision,
+          now: APPETITE_END,
+        }),
+      ),
+    );
+
+    expect(result.rejection).toMatchObject({
+      code: "SYNC_CONFLICT",
+      gate: "project:project-1:appetite_boundary",
+      permittedNextCommand: "resolve_sync_conflict",
+    });
+    expect(result.workspace).toBe(expired);
+  });
 
   it.each([
     {
@@ -1264,9 +1578,12 @@ describe("Bet appetite boundary", () => {
   });
 
   it("allows a human to abandon at expiry only with a structured close decision", async () => {
+    const planning = activeWorkspace("planning");
+    delete planning.projects[0].activePlanVersionId;
+    planning.planVersions = [];
     const expired = applied(
       await executeCommand(
-        activeWorkspace("executing"),
+        planning,
         {
           type: "record_bet_boundary",
           projectId: "project-1",
