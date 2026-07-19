@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { canDeleteEmptyProject, removeEmptyProjectFromWorkspace } from "./projectLifecycle";
+import { canDeleteEmptyProject, removeEmptyProjectFromWorkspace, withProjectRestored } from "./projectLifecycle";
 import { sampleWorkspace } from "./sampleData";
 import type { WorkspaceSnapshot } from "./types";
 
@@ -8,6 +8,21 @@ function cloneWorkspace(): WorkspaceSnapshot {
 }
 
 describe("project lifecycle cleanup", () => {
+  it("restores an archived project without changing its lifecycle status", () => {
+    const project = {
+      ...cloneWorkspace().projects[0],
+      status: "paused" as const,
+      archived: true,
+      archivedAt: "2026-07-18T00:00:00.000Z"
+    };
+
+    const restored = withProjectRestored(project);
+
+    expect(restored.status).toBe("paused");
+    expect(restored.archived).toBeUndefined();
+    expect(restored.archivedAt).toBeUndefined();
+  });
+
   it("does not delete projects that still have work items", () => {
     const workspace = cloneWorkspace();
 

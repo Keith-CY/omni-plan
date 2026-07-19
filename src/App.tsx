@@ -2,6 +2,7 @@ import {
   AlertTriangle,
   ArrowRightLeft,
   Archive,
+  ArchiveRestore,
   BarChart3,
   CalendarClock,
   ChevronLeft,
@@ -68,7 +69,8 @@ import {
   removeEmptyProjectFromWorkspace,
   selectableProjectStatuses,
   withProjectArchived,
-  withProjectLifecycleStatus
+  withProjectLifecycleStatus,
+  withProjectRestored
 } from "./domain/projectLifecycle";
 import {
   detectCrossProjectOverload,
@@ -157,7 +159,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
-import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
+import { Sheet, SheetClose, SheetContent, SheetDescription, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
@@ -821,7 +823,9 @@ function RoutedApp() {
   }, [sidebarCollapsed]);
   const suppressNextAutoPushRef = useRef(false);
   const view = route.view;
-  const selectedProject = workspace.projects.find((project) => project.id === route.selectedProjectId) ?? workspace.projects[0];
+  const selectedProject = workspace.projects.find((project) => project.id === route.selectedProjectId) ??
+    workspace.projects.find((project) => !isProjectArchived(project)) ??
+    workspace.projects[0];
   const selectedProjectId = selectedProject?.id ?? defaultProjectId;
   const selectedProjectName = selectedProject?.name ?? "No project";
 
@@ -1548,6 +1552,35 @@ function RoutedApp() {
     setWorkspace(nextWorkspace);
     saveWorkspaceImmediately(nextWorkspace);
     pushWorkspaceSoon("Project archived; syncing workspace now.");
+  };
+
+  const restoreProject = (projectId: string) => {
+    const previous = workspaceRef.current;
+    const project = previous.projects.find((candidate) => candidate.id === projectId);
+    if (!project || !isProjectArchived(project)) return;
+    const previousArchivedAt = project.archivedAt;
+    const nextProject = withProjectRestored(project);
+    const nextWorkspace = {
+      ...previous,
+      projects: previous.projects.map((candidate) => candidate.id === projectId ? nextProject : candidate),
+      changeSets: [
+        createChangeSet(
+          projectId,
+          `Restore ${project.name}`,
+          "Returned the archived project to the active portfolio without changing its lifecycle status.",
+          [
+            { entity: "Project", entityId: projectId, field: "archived", before: true, after: false },
+            { entity: "Project", entityId: projectId, field: "archivedAt", before: previousArchivedAt ?? null, after: null }
+          ],
+          previous.changeSets.length
+        ),
+        ...previous.changeSets
+      ]
+    };
+    workspaceRef.current = nextWorkspace;
+    setWorkspace(nextWorkspace);
+    saveWorkspaceImmediately(nextWorkspace);
+    pushWorkspaceSoon("Project restored; syncing workspace now.");
   };
 
   const deleteEmptyProject = (projectId: string) => {
@@ -2328,6 +2361,7 @@ function RoutedApp() {
             gates={model.gates}
             overloads={model.overloads}
             onProjectCreate={createProject}
+            onProjectRestore={restoreProject}
           />
         )}
         {view === "project" && selectedProject && selectedSchedule && (
@@ -2365,6 +2399,7 @@ function RoutedApp() {
             onProjectWorkFinish={finishProjectWork}
             onProjectComplete={completeProject}
             onProjectArchive={archiveProject}
+            onProjectRestore={restoreProject}
             onProjectDelete={deleteEmptyProject}
             onBaselineCapture={() => captureBaseline(selectedProject.id, selectedSchedule)}
             onChangeSetStatus={setChangeSetStatus}
@@ -2555,13 +2590,134 @@ function EmptyWorkspacePanel({ onProjectCreate }: { onProjectCreate: (values: Pr
   );
 }
 
+function ArchivedProjectsSheet({
+  projects,
+  onRestore
+}: {
+  projects: Project[];
+  onRestore: (projectId: string) => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [announcement, setAnnouncement] = useState("");
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const archivedProjects = [...projects]
+    .filter(isProjectArchived)
+    .sort((left, right) => (
+      (right.archivedAt ?? "").localeCompare(left.archivedAt ?? "") ||
+      left.name.localeCompare(right.name)
+    ));
+  const normalizedQuery = query.trim().toLocaleLowerCase();
+  const filteredProjects = normalizedQuery
+    ? archivedProjects.filter((project) => project.name.toLocaleLowerCase().includes(normalizedQuery))
+    : archivedProjects;
+  const resultAnnouncement = announcement || `${filteredProjects.length} archived project${filteredProjects.length === 1 ? "" : "s"} found.`;
+
+  return (
+    <Sheet>
+      <SheetTrigger asChild>
+        <Button
+          type="button"
+          size="icon"
+          variant="outline"
+          aria-label={`Browse archived projects (${archivedProjects.length})`}
+          title={`${archivedProjects.length} archived project${archivedProjects.length === 1 ? "" : "s"}`}
+        >
+          <Archive />
+        </Button>
+      </SheetTrigger>
+      <SheetContent className="flex w-[94vw] flex-col overflow-hidden pb-[max(1.25rem,env(safe-area-inset-bottom))] pt-[max(1.25rem,env(safe-area-inset-top))] sm:max-w-lg">
+        <SheetHeader>
+          <SheetTitle className="text-balance">Archived projects</SheetTitle>
+          <SheetDescription className="text-pretty">Open a project without restoring it, or return it to the active portfolio.</SheetDescription>
+        </SheetHeader>
+        <div className="mt-4 grid min-h-0 flex-1 gap-3">
+          <label>
+            <span className="text-sm font-medium">Search</span>
+            <Input
+              ref={searchInputRef}
+              className="mt-2"
+              value={query}
+              onChange={(event) => {
+                setQuery(event.target.value);
+                setAnnouncement("");
+              }}
+              placeholder="Search archived projects"
+              aria-label="Search archived projects"
+            />
+          </label>
+          <p className="sr-only" role="status">{resultAnnouncement}</p>
+          {!archivedProjects.length ? (
+            <div className="grid place-items-center gap-3 rounded-lg border border-dashed p-6 text-center">
+              <Archive className="h-5 w-5 text-muted-foreground" aria-hidden="true" />
+              <p className="text-pretty text-sm text-muted-foreground">Archive is empty.</p>
+              <SheetClose asChild>
+                <Button type="button" variant="outline">Close</Button>
+              </SheetClose>
+            </div>
+          ) : filteredProjects.length ? (
+            <ul className="grid min-h-0 content-start gap-2 overflow-y-auto pr-1" aria-label="Archived projects">
+              {filteredProjects.map((project) => (
+                <li key={project.id} className="flex items-center justify-between gap-3 rounded-lg border bg-background p-3">
+                  <div className="min-w-0">
+                    <strong className="block break-words text-sm">{project.name}</strong>
+                    <div className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+                      <Badge variant="outline" className="iconBadge" title={`Lifecycle status: ${projectLifecycleStatus(project)}`}><Workflow />{projectLifecycleStatus(project)}</Badge>
+                      <span className="tabular-nums">{project.archivedAt ? project.archivedAt.slice(0, 10) : "Date unknown"}</span>
+                    </div>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-1.5">
+                    <Button asChild type="button" size="icon" variant="outline" title="Open archived project">
+                      <a href={hashForRoute({ view: "project", selectedProjectId: project.id })} aria-label={`Open archived project ${project.name}`}>
+                        <PanelRight />
+                      </a>
+                    </Button>
+                    <Button
+                      type="button"
+                      size="icon"
+                      onClick={() => {
+                        searchInputRef.current?.focus();
+                        setAnnouncement(`${project.name} restored to the active portfolio.`);
+                        onRestore(project.id);
+                      }}
+                      aria-label={`Restore project ${project.name}`}
+                      title="Restore project"
+                    >
+                      <ArchiveRestore />
+                    </Button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <div className="grid place-items-center gap-3 rounded-lg border border-dashed p-6 text-center">
+              <p className="text-pretty text-sm text-muted-foreground">No archived project matches this search.</p>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => {
+                  setQuery("");
+                  setAnnouncement("");
+                  searchInputRef.current?.focus();
+                }}
+              >
+                <CircleSlash2 />Clear search
+              </Button>
+            </div>
+          )}
+        </div>
+      </SheetContent>
+    </Sheet>
+  );
+}
+
 function PortfolioDashboard({
   projects,
   schedules,
   health,
   gates,
   overloads,
-  onProjectCreate
+  onProjectCreate,
+  onProjectRestore
 }: {
   projects: Project[];
   schedules: ScheduleResult[];
@@ -2569,6 +2725,7 @@ function PortfolioDashboard({
   gates: AuditGate[];
   overloads: ReturnType<typeof detectCrossProjectOverload>;
   onProjectCreate: (values: ProjectCreateValues) => void;
+  onProjectRestore: (projectId: string) => void;
 }) {
   const [shapeUpOpen, setShapeUpOpen] = useState(false);
   const sorted = [...projects].sort((a, b) => {
@@ -2577,7 +2734,7 @@ function PortfolioDashboard({
     return right - left;
   });
   const planningProjects = sorted.filter((project) => !isProjectArchived(project));
-  const visibleProjects = planningProjects.length ? planningProjects : sorted;
+  const visibleProjects = planningProjects;
   const focusStackPage = usePagedItems(visibleProjects, 8);
   const planningProjectIds = new Set(planningProjects.map((project) => project.id));
   const planningSchedules = schedules.filter((schedule) => planningProjectIds.has(schedule.projectId));
@@ -2616,9 +2773,26 @@ function PortfolioDashboard({
               <Badge variant="success" className="iconBadge" title="No overloads"><CalendarClock />0</Badge>
             </div>
           </div>
-          <CreateProjectSheet onCreate={onProjectCreate} />
+          <div className="flex items-center gap-2">
+            <ArchivedProjectsSheet projects={projects} onRestore={onProjectRestore} />
+            <CreateProjectSheet onCreate={onProjectCreate} />
+          </div>
         </div>
-        <EmptyWorkspacePanel onProjectCreate={onProjectCreate} />
+        {projects.length ? (
+          <Card className="border-dashed">
+            <CardHeader className="compactCardHeader">
+              <div className="cardHeaderLine">
+                <CardTitle className="flex items-center gap-2 text-balance"><Archive className="h-4 w-4" /> No active projects</CardTitle>
+                <Badge variant="outline" className="iconBadge" title={`${projects.length} archived projects`}><Archive />{projects.length}</Badge>
+              </div>
+            </CardHeader>
+            <CardContent>
+              <p className="max-w-xl text-pretty text-sm text-muted-foreground">Restore a project from the archive or create a new project to resume active planning.</p>
+            </CardContent>
+          </Card>
+        ) : (
+          <EmptyWorkspacePanel onProjectCreate={onProjectCreate} />
+        )}
       </section>
     );
   }
@@ -2632,7 +2806,8 @@ function PortfolioDashboard({
     .filter(({ item, projectId }) => planningProjectIds.has(projectId) && item.workItem.kind !== "phase" && item.workItem.percentComplete < 100 && scheduleTiming(item) === "Overdue");
   const staleEvidenceProjects = health.filter((item) => planningProjectIds.has(item.projectId) && (item.evidenceFreshnessDays === undefined || item.evidenceFreshnessDays >= 5));
   const criticalFocus = focusSchedule?.items.filter((item) => item.isCritical && item.workItem.kind !== "phase").length ?? 0;
-  const portfolioRisk = Math.round(health.reduce((sum, item) => sum + item.riskScore, 0) / Math.max(1, health.length));
+  const planningHealth = health.filter((item) => planningProjectIds.has(item.projectId));
+  const portfolioRisk = Math.round(planningHealth.reduce((sum, item) => sum + item.riskScore, 0) / Math.max(1, planningHealth.length));
   const matrixBaseItems = visibleProjects.map((project, index) => ({
     index,
     project,
@@ -2681,7 +2856,10 @@ function PortfolioDashboard({
             <Badge variant={overloads.length ? "warning" : "success"} className="iconBadge" title="Attention overloads"><CalendarClock />{overloads.length}</Badge>
           </div>
         </div>
-        <CreateProjectSheet onCreate={onProjectCreate} />
+        <div className="flex items-center gap-2">
+          <ArchivedProjectsSheet projects={projects} onRestore={onProjectRestore} />
+          <CreateProjectSheet onCreate={onProjectCreate} />
+        </div>
       </div>
 
       <Card id="shape-up-streams">
@@ -2937,7 +3115,7 @@ function PortfolioDashboard({
           </div>
         </CardHeader>
         <CardContent>
-          <SignalList gates={gates.slice(0, 7)} compact />
+          <SignalList gates={gates.filter((gate) => planningProjectIds.has(gate.projectId)).slice(0, 7)} compact />
         </CardContent>
       </Card>
     </section>
@@ -3021,6 +3199,7 @@ function ProjectWorkspace({
   onProjectWorkFinish,
   onProjectComplete,
   onProjectArchive,
+  onProjectRestore,
   onProjectDelete,
   onBaselineCapture,
   onChangeSetStatus,
@@ -3062,6 +3241,7 @@ function ProjectWorkspace({
   onProjectWorkFinish: (projectId: string) => void;
   onProjectComplete: (projectId: string) => void;
   onProjectArchive: (projectId: string) => void;
+  onProjectRestore: (projectId: string) => void;
   onProjectDelete: (projectId: string) => void;
   onBaselineCapture: () => void;
   onChangeSetStatus: (changeSetId: string, status: ChangeSet["status"]) => void;
@@ -3076,6 +3256,19 @@ function ProjectWorkspace({
   const latestEvidence = [...evidence].sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
   const shapeUpLocked = isShapeUpProject(project) && !isShapeUpBet(project);
   const shapeUpGanttEmpty = isShapeUpBet(project) && schedule.items.length === 0;
+  const scheduledWorkItemIds = new Set(schedule.items.map((item) => item.workItem.id));
+  const generatedShapeUpScopeTitles = new Set(project.shapeUpPitch?.scopes.map((scope) => `Scope: ${scope.title}`) ?? []);
+  const projectArchived = isProjectArchived(project);
+  const projectSelectorProjects = projects.filter((candidate) => !isProjectArchived(candidate) || candidate.id === project.id);
+  const parkedWorkItems = isShapeUpProject(project) ? workItems
+    .filter((item) => (
+      !scheduledWorkItemIds.has(item.id) &&
+      !isAutomaticRecurringWorkItem(item) &&
+      !item.isShapeUpCycleMarker &&
+      !(item.kind === "phase" && item.shapeUpScopeId && generatedShapeUpScopeTitles.has(item.title)) &&
+      item.percentComplete < 100
+    ))
+    .sort((left, right) => left.outline.localeCompare(right.outline, undefined, { numeric: true })) : [];
   const canDeleteProject = workItems.length === 0 && !recurringOccurrences.some((occurrence) => occurrence.projectId === project.id);
   const [dailyDraft, setDailyDraft] = useState({
     northStar: project.northStar,
@@ -3099,7 +3292,7 @@ function ProjectWorkspace({
                 label="Project"
                 value={project.id}
                 onChange={onProjectChange}
-                options={projects.map((candidate) => ({ value: candidate.id, label: candidate.name }))}
+                options={projectSelectorProjects.map((candidate) => ({ value: candidate.id, label: candidate.name }))}
                 testId="project-selector"
               />
               <NativeSelectField
@@ -3108,24 +3301,32 @@ function ProjectWorkspace({
                 onChange={(value) => onProjectStatusUpdate(project.id, value as ProjectStatus)}
                 options={projectStatuses.map((status) => ({ value: status, label: status }))}
                 testId="project-status-selector"
+                disabled={projectArchived}
               />
             </div>
             <div className="flex flex-wrap gap-2">
               <Badge variant="secondary" className="iconBadge" title="Project mode"><Workflow />{project.mode}</Badge>
-              {isProjectArchived(project) && <Badge variant="outline" className="iconBadge" title="Archived"><Archive />archived</Badge>}
+              {projectArchived && <Badge variant="outline" className="iconBadge" title="Archived project is read-only"><Lock />read only</Badge>}
               <Badge variant="outline" className="iconBadge" title="Horizon"><CalendarClock />{project.horizon.slice(5, 10)}</Badge>
               <Badge variant={blockingGate ? "destructive" : "success"} className="iconBadge" title={blockingGate?.reason ?? "No blocker"}>{blockingGate ? <Lock /> : <CheckCircle2 />}{blockingGate ? "gate" : "clear"}</Badge>
             </div>
             <div className="projectDailyActions">
-              <ProjectAdvancedSheet
-                project={project}
-                onProjectDetailsUpdate={onProjectDetailsUpdate}
-                onDirectionCardUpdate={onDirectionCardUpdate}
-                onShapeUpPitchUpdate={onShapeUpPitchUpdate}
-                onShapeUpBetApprove={onShapeUpBetApprove}
-                onShapeUpConvert={onShapeUpConvert}
-              />
-              {canDeleteProject && (
+              {projectArchived && (
+                <Button type="button" variant="outline" size="icon" onClick={() => onProjectRestore(project.id)} aria-label={`Restore project ${project.name}`} title="Restore project">
+                  <ArchiveRestore />
+                </Button>
+              )}
+              {!projectArchived && (
+                <ProjectAdvancedSheet
+                  project={project}
+                  onProjectDetailsUpdate={onProjectDetailsUpdate}
+                  onDirectionCardUpdate={onDirectionCardUpdate}
+                  onShapeUpPitchUpdate={onShapeUpPitchUpdate}
+                  onShapeUpBetApprove={onShapeUpBetApprove}
+                  onShapeUpConvert={onShapeUpConvert}
+                />
+              )}
+              {canDeleteProject && !projectArchived && (
                 <Button type="button" variant="destructive" size="icon" onClick={() => onProjectDelete(project.id)} aria-label="Delete empty project" title="Delete empty project" data-testid="project-delete-empty">
                   <Trash2 />
                 </Button>
@@ -3137,6 +3338,7 @@ function ProjectWorkspace({
             className="projectOutcomeForm"
             onSubmit={(event) => {
               event.preventDefault();
+              if (projectArchived) return;
               onProjectDetailsUpdate(project.id, dailyDraft);
             }}
           >
@@ -3148,6 +3350,7 @@ function ProjectWorkspace({
                 onChange={(event) => setDailyDraft((current) => ({ ...current, currentOutcome: event.target.value }))}
                 placeholder="Current visible result"
                 autoComplete="off"
+                disabled={projectArchived}
               />
             </label>
             <label>
@@ -3158,9 +3361,10 @@ function ProjectWorkspace({
                 onChange={(event) => setDailyDraft((current) => ({ ...current, northStar: event.target.value }))}
                 placeholder="Why this project matters"
                 autoComplete="off"
+                disabled={projectArchived}
               />
             </label>
-            <Button type="submit" size="icon" disabled={!dailyDirty} title="Save project summary" aria-label="Save project summary">
+            <Button type="submit" size="icon" disabled={projectArchived || !dailyDirty} title={projectArchived ? "Restore this project before editing." : "Save project summary"} aria-label="Save project summary">
               <Save />
             </Button>
           </form>
@@ -3183,12 +3387,13 @@ function ProjectWorkspace({
           <TabsTrigger value="reports">Reports</TabsTrigger>
         </TabsList>
         <TabsContent value="plan" className="grid gap-4 xl:grid-cols-[minmax(320px,0.78fr)_minmax(0,1.22fr)]">
+          <fieldset disabled={projectArchived} aria-disabled={projectArchived || undefined} className="contents">
           <Card>
             <CardHeader className="compactCardHeader">
               <div className="cardHeaderLine">
                 <CardTitle className="flex items-center gap-2"><Workflow className="h-4 w-4" /> Outline</CardTitle>
                 <div className="cardHeaderBadges">
-                  <Badge variant="outline" className="iconBadge" title="Work items"><Layers3 />{schedule.items.length}</Badge>
+                  <Badge variant="outline" className="iconBadge" title="Scheduled work items"><Layers3 />{schedule.items.length}</Badge>
                   <Badge variant={gates.length ? "warning" : "success"} className="iconBadge" title="Open gates"><Lock />{gates.length}</Badge>
                 </div>
               </div>
@@ -3199,17 +3404,37 @@ function ProjectWorkspace({
                 items={schedule.items.map((item) => item.workItem)}
                 onCreate={onWorkItemCreate}
               />
-              <OutlineTable
+              {schedule.items.length > 0 && (
+                <OutlineTable
+                  projectId={project.id}
+                  items={schedule.items}
+                  gates={gates}
+                  evidence={evidence}
+                  projects={projects}
+                  allWorkItems={allWorkItems}
+                  onMoveItem={(workItemId, values) => onWorkItemMove(project.id, workItemId, values)}
+                  onFinishItem={(item) => {
+                    const plannedHours = Math.max(1, formatAssignmentHours(item) || Math.round(item.workItem.durationSeconds / 3600));
+                    onActualRecord(project.id, item.workItem.id, {
+                      percentComplete: 100,
+                      actualWorkHours: plannedHours,
+                      remainingWorkHours: 0,
+                      actualCost: plannedHours,
+                      markFinished: true
+                    });
+                  }}
+                />
+              )}
+              <ParkedWorkSection
                 projectId={project.id}
-                items={schedule.items}
-                gates={gates}
-                evidence={evidence}
+                items={parkedWorkItems}
                 projects={projects}
                 allWorkItems={allWorkItems}
                 onMoveItem={(workItemId, values) => onWorkItemMove(project.id, workItemId, values)}
                 onFinishItem={(item) => {
-                  const plannedHours = Math.max(1, formatAssignmentHours(item) || Math.round(item.workItem.durationSeconds / 3600));
-                  onActualRecord(project.id, item.workItem.id, {
+                  const plannedWorkSeconds = item.assignmentIds.reduce((sum, assignment) => sum + assignment.effortSeconds, 0) || item.durationSeconds;
+                  const plannedHours = Math.max(1, Math.round(plannedWorkSeconds / 3600));
+                  onActualRecord(project.id, item.id, {
                     percentComplete: 100,
                     actualWorkHours: plannedHours,
                     remainingWorkHours: 0,
@@ -3289,7 +3514,7 @@ function ProjectWorkspace({
           </Card>
           <ProjectCompletionPanel
             project={project}
-            items={schedule.items.map((item) => item.workItem)}
+            items={workItems}
             gates={gates}
             evidence={evidence}
             onFinishWork={() => onProjectWorkFinish(project.id)}
@@ -3297,8 +3522,10 @@ function ProjectWorkspace({
             onArchive={() => onProjectArchive(project.id)}
           />
         </div>
+          </fieldset>
       </TabsContent>
         <TabsContent id="recurring" value="recurring">
+          <fieldset disabled={projectArchived} aria-disabled={projectArchived || undefined} className="contents">
           <Card>
             <CardHeader className="compactCardHeader">
               <div className="cardHeaderLine">
@@ -3320,8 +3547,10 @@ function ProjectWorkspace({
               />
             </CardContent>
           </Card>
+          </fieldset>
         </TabsContent>
         <TabsContent value="evidence">
+          <fieldset disabled={projectArchived} aria-disabled={projectArchived || undefined} className="contents">
           <Card>
             <CardHeader className="compactCardHeader">
               <div className="cardHeaderLine">
@@ -3330,12 +3559,14 @@ function ProjectWorkspace({
               </div>
             </CardHeader>
             <CardContent className="space-y-4">
-              <EvidenceComposer projectId={project.id} items={schedule.items.map((item) => item.workItem)} onCreate={onEvidenceCreate} />
+              <EvidenceComposer projectId={project.id} items={workItems.filter((item) => !isAutomaticRecurringWorkItem(item))} onCreate={onEvidenceCreate} />
               <EvidenceList evidence={evidence} />
             </CardContent>
           </Card>
+          </fieldset>
         </TabsContent>
         <TabsContent value="audit">
+          <fieldset disabled={projectArchived} aria-disabled={projectArchived || undefined} className="contents">
           <Card>
             <CardHeader className="compactCardHeader">
               <div className="cardHeaderLine">
@@ -3347,8 +3578,10 @@ function ProjectWorkspace({
               <SignalList gates={gates} onClear={onGateClear} compact />
             </CardContent>
           </Card>
+          </fieldset>
         </TabsContent>
         <TabsContent value="baselines">
+          <fieldset disabled={projectArchived} aria-disabled={projectArchived || undefined} className="contents">
           <Card>
             <CardHeader>
               <div className="flex flex-wrap items-start justify-between gap-3">
@@ -3375,8 +3608,10 @@ function ProjectWorkspace({
               <BaselineTable baseline={baseline} items={schedule.items} />
             </CardContent>
           </Card>
+          </fieldset>
         </TabsContent>
         <TabsContent value="reports">
+          <fieldset disabled={projectArchived} aria-disabled={projectArchived || undefined} className="contents">
           <Card>
             <CardHeader className="compactCardHeader">
               <div className="cardHeaderLine">
@@ -3390,6 +3625,7 @@ function ProjectWorkspace({
               <SummaryTile label="Evidence freshness" value={formatFreshness(health?.evidenceFreshnessDays)} detail="Latest linked evidence" />
             </CardContent>
           </Card>
+          </fieldset>
         </TabsContent>
       </Tabs>
     </section>
@@ -5895,19 +6131,20 @@ function AgentCenter({
   onAuditDecisionSave: (decision: AuditDecision, reason: string) => void;
 }) {
   const secretVault = useMemo(() => new BrowserEncryptedSecretVault(), []);
-  const [auditProjectId, setAuditProjectId] = useState(() => workspace.projects[0]?.id ?? defaultProjectId);
+  const auditProjects = workspace.projects.filter((project) => !isProjectArchived(project));
+  const [auditProjectId, setAuditProjectId] = useState(() => auditProjects[0]?.id ?? defaultProjectId);
   const [aiBusy, setAiBusy] = useState(false);
   const idleAgentNotice = "No agent action has run yet.";
   const [notice, setNotice] = useState(idleAgentNotice);
   const aiProvider = settings.aiProviders[0] ?? defaultCustomAiProviderSettings;
-  const auditProject = workspace.projects.find((project) => project.id === auditProjectId) ?? workspace.projects[0];
+  const auditProject = auditProjects.find((project) => project.id === auditProjectId) ?? auditProjects[0];
   const auditSchedule = schedules.find((schedule) => schedule.projectId === auditProject?.id) ?? (auditProject ? scheduleShapeUpAwareProject(auditProject, workspace.workItems, workspace.dependencies) : undefined);
   const aiProviderReady = Boolean(aiProvider.baseUrl.trim() && aiProvider.model.trim() && aiProvider.apiKeySecretId);
-  const agentProjectId = auditProject?.id ?? workspace.projects[0]?.id ?? defaultProjectId;
+  const agentProjectId = auditProject?.id ?? defaultProjectId;
 
   useEffect(() => {
-    if (!workspace.projects.some((project) => project.id === auditProjectId)) {
-      setAuditProjectId(workspace.projects[0]?.id ?? defaultProjectId);
+    if (!workspace.projects.some((project) => project.id === auditProjectId && !isProjectArchived(project))) {
+      setAuditProjectId(workspace.projects.find((project) => !isProjectArchived(project))?.id ?? defaultProjectId);
     }
   }, [workspace.projects, auditProjectId]);
 
@@ -6035,8 +6272,9 @@ function AgentCenter({
             label="Audit project"
             value={auditProject?.id ?? ""}
             onChange={setAuditProjectId}
-            options={workspace.projects.map((project) => ({ value: project.id, label: project.name }))}
+            options={auditProjects.map((project) => ({ value: project.id, label: project.name }))}
             testId="ai-audit-project"
+            disabled={!auditProjects.length}
           />
           <div className="flex items-end gap-2">
             <IconActionButton label={aiBusy ? "Running AI audit" : "Run AI audit"} type="button" onClick={() => void runAiAudit()} disabled={aiBusy || !aiProviderReady || !auditProject || !auditSchedule}>
@@ -6098,7 +6336,8 @@ function Settings({
   const [notice, setNotice] = useState(idleSettingsNotice);
   const [savedSecretCount, setSavedSecretCount] = useState(() => secretVault.listEncrypted().length);
   const [syncBusy, setSyncBusy] = useState(false);
-  const [evidenceProjectId, setEvidenceProjectId] = useState(() => workspace.projects[0]?.id ?? defaultProjectId);
+  const evidenceProjects = workspace.projects.filter((project) => !isProjectArchived(project));
+  const [evidenceProjectId, setEvidenceProjectId] = useState(() => evidenceProjects[0]?.id ?? defaultProjectId);
   const [evidenceWorkItemId, setEvidenceWorkItemId] = useState<string>("project");
   const [expandedPanels, setExpandedPanels] = useState<Set<SettingsPanelId>>(() => new Set());
   const [workspaceTimeZoneDraft, setWorkspaceTimeZoneDraft] = useState(workspace.timeZone);
@@ -6106,7 +6345,7 @@ function Settings({
   const aiSecret = aiDraft.apiKeySecretId ? secretVault.readEncrypted(aiDraft.apiKeySecretId) : undefined;
   const gitHubReady = Boolean(githubDraft.owner.trim() && githubDraft.repo.trim() && githubDraft.tokenSecretId);
   const firebaseReady = firebaseSettingsReady(firebaseDraft);
-  const evidenceProject = workspace.projects.find((project) => project.id === evidenceProjectId) ?? workspace.projects[0];
+  const evidenceProject = evidenceProjects.find((project) => project.id === evidenceProjectId) ?? evidenceProjects[0];
   const evidenceWorkItems = workspace.workItems.filter((item) => item.projectId === evidenceProject?.id && item.kind !== "phase");
   const rememberedPassphraseStatus = rememberedPassphraseSavedAt
     ? `saved ${rememberedPassphraseSavedAt.slice(0, 19).replace("T", " ")}`
@@ -6166,10 +6405,19 @@ function Settings({
   ]);
 
   useEffect(() => {
-    if (!workspace.projects.some((project) => project.id === evidenceProjectId)) {
-      setEvidenceProjectId(workspace.projects[0]?.id ?? defaultProjectId);
+    if (!workspace.projects.some((project) => project.id === evidenceProjectId && !isProjectArchived(project))) {
+      setEvidenceProjectId(workspace.projects.find((project) => !isProjectArchived(project))?.id ?? defaultProjectId);
     }
   }, [workspace.projects, evidenceProjectId]);
+
+  useEffect(() => {
+    if (
+      evidenceWorkItemId !== "project" &&
+      !workspace.workItems.some((item) => item.id === evidenceWorkItemId && item.projectId === evidenceProject?.id)
+    ) {
+      setEvidenceWorkItemId("project");
+    }
+  }, [workspace.workItems, evidenceProject?.id, evidenceWorkItemId]);
 
   useEffect(() => {
     setWorkspaceTimeZoneDraft(workspace.timeZone);
@@ -6723,8 +6971,9 @@ function Settings({
                 label="Evidence project"
                 value={evidenceProject?.id ?? ""}
                 onChange={setEvidenceProjectId}
-                options={workspace.projects.map((project) => ({ value: project.id, label: project.name }))}
+                options={evidenceProjects.map((project) => ({ value: project.id, label: project.name }))}
                 testId="github-evidence-project"
+                disabled={!evidenceProjects.length}
               />
               <NativeSelectField
                 label="Link to work item"
@@ -6734,7 +6983,7 @@ function Settings({
                 testId="github-evidence-work-item"
               />
               <div className="flex items-end">
-                <Button type="button" onClick={() => void importGitHubEvidence()} disabled={syncBusy || !gitHubReady}>Import PR evidence</Button>
+                <Button type="button" onClick={() => void importGitHubEvidence()} disabled={syncBusy || !gitHubReady || !evidenceProject}>Import PR evidence</Button>
               </div>
             </div>
           </div>
@@ -7617,6 +7866,82 @@ function matrixDecisionLabel(decision: MatrixDecision) {
   if (decision === "audit") return "Audit";
   if (decision === "push") return "Push";
   return "Watch";
+}
+
+function ParkedWorkSection({
+  projectId,
+  items,
+  projects,
+  allWorkItems,
+  onMoveItem,
+  onFinishItem
+}: {
+  projectId: string;
+  items: WorkItem[];
+  projects: Project[];
+  allWorkItems: WorkItem[];
+  onMoveItem: (workItemId: string, values: WorkItemMoveValues) => void;
+  onFinishItem: (item: WorkItem) => void;
+}) {
+  if (!items.length) return null;
+
+  return (
+    <section className="grid gap-2 rounded-lg border bg-muted/20 p-3" aria-labelledby={`parked-work-${projectId}`}>
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div className="min-w-0">
+          <h4 id={`parked-work-${projectId}`} className="text-sm font-semibold">Parked work</h4>
+          <p className="text-xs text-muted-foreground">Stored in this project but outside the current execution plan.</p>
+        </div>
+        <Badge variant="outline" className="iconBadge" title={`${items.length} parked work items`}><Archive />{items.length}</Badge>
+      </div>
+      <ul
+        className="grid max-h-80 gap-1.5 overflow-y-auto pr-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        aria-label="Parked work items"
+        tabIndex={0}
+      >
+        {items.map((item) => {
+          const canFinish = item.kind !== "phase";
+          return (
+            <li key={item.id} className="flex items-center justify-between gap-2 rounded-md border bg-background px-2.5 py-2">
+              <div className="min-w-0">
+                <strong className="block break-words text-sm">{item.title}</strong>
+                <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+                  <span>{item.outline}</span>
+                  <span aria-hidden="true">·</span>
+                  <span>{item.kind}</span>
+                </div>
+              </div>
+              <div className="flex shrink-0 items-center gap-1.5">
+                <MoveWorkItemSheet
+                  projectId={projectId}
+                  item={item}
+                  projects={projects}
+                  allWorkItems={allWorkItems}
+                  onMove={onMoveItem}
+                />
+                {canFinish ? (
+                  <Button
+                    type="button"
+                    size="icon"
+                    variant="outline"
+                    onClick={() => onFinishItem(item)}
+                    aria-label={`Mark ${item.title} done`}
+                    title="Mark done"
+                  >
+                    <CheckCircle2 />
+                  </Button>
+                ) : (
+                  <span className="inline-flex h-9 w-9 items-center justify-center text-muted-foreground" role="img" aria-label="Phase progress follows child work" title="Phase progress follows child work">
+                    <CheckCircle2 size={16} />
+                  </span>
+                )}
+              </div>
+            </li>
+          );
+        })}
+      </ul>
+    </section>
+  );
 }
 
 function MoveWorkItemSheet({

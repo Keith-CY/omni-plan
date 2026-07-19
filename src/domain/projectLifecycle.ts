@@ -113,3 +113,7 @@ export function withProjectArchived(project: Project, archivedAt: string): Proje
     archivedAt
   };
 }
+
+export function withProjectRestored(project: Project): Project {
+  return withProjectLifecycleStatus(project, projectLifecycleStatus(project));
+}
