@@ -15,6 +15,7 @@ import {
   FileDown,
   FileJson,
   FileText,
+  GitCommitHorizontal,
   GitPullRequest,
   Home,
   Inbox,
@@ -171,6 +172,8 @@ type CalendarEventKind = "scheduled" | "recurring";
 
 const now = new Date().toISOString();
 const asOfLabel = `As of ${now.slice(0, 10)}`;
+const buildCommit = __BUILD_COMMIT__.trim() || "unknown";
+const buildCommitShort = buildCommit === "unknown" ? buildCommit : buildCommit.slice(0, 7);
 const defaultProjectId = "workspace";
 const views = new Set<View>(["portfolio", "project", "calendar", "today", "audit", "reports", "agent", "settings"]);
 const daySeconds = 24 * 60 * 60;
@@ -2287,7 +2290,7 @@ function RoutedApp() {
       <aside
         data-collapsed={sidebarCollapsed ? "true" : "false"}
         className={cn(
-          "desktopSidebar fixed inset-y-0 left-0 z-30 hidden border-r bg-card/95 py-4 shadow-sm backdrop-blur lg:block",
+          "desktopSidebar fixed inset-y-0 left-0 z-30 hidden flex-col border-r bg-card/95 pb-[max(1rem,env(safe-area-inset-bottom))] pt-[max(1rem,env(safe-area-inset-top))] shadow-sm backdrop-blur lg:flex",
           sidebarCollapsed ? "w-20 px-2" : "w-64 px-3"
         )}
       >
@@ -2336,6 +2339,21 @@ function RoutedApp() {
           <div>{openHardGateCount ? `${openHardGateCount} hard gates require review` : "Audit clear"}</div>
         </div>
         )}
+        <Separator className="mb-3 mt-auto" />
+        <div
+          className={cn(
+            "flex min-h-9 items-center rounded-md border bg-muted/20 text-xs text-muted-foreground",
+            sidebarCollapsed ? "justify-center px-2" : "justify-between gap-2 px-3"
+          )}
+          aria-label={buildCommit === "unknown" ? "Build commit unavailable" : `Build commit ${buildCommit}`}
+          title={buildCommit === "unknown" ? "Build commit unavailable" : `Build commit ${buildCommit}`}
+        >
+          <span className="flex min-w-0 items-center gap-2">
+            <GitCommitHorizontal className="size-4 shrink-0" aria-hidden="true" />
+            {!sidebarCollapsed && <span>commit</span>}
+          </span>
+          {!sidebarCollapsed && <code className="truncate font-mono tabular-nums text-foreground">{buildCommitShort}</code>}
+        </div>
       </aside>
 
       <div className={cn("desktopContent", sidebarCollapsed ? "lg:pl-20" : "lg:pl-64")}>
