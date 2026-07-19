@@ -5445,6 +5445,10 @@ function CalendarView({
                     className={cn("calendarDay", !inMonth && "outsideMonth", isSelected && "selected", isToday && "today")}
                     role="gridcell"
                     aria-selected={isSelected}
+                    onClick={(event) => {
+                      if ((event.target as HTMLElement).closest?.("a, button")) return;
+                      setSelectedDay(day);
+                    }}
                   >
                     <button
                       type="button"

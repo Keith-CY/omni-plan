@@ -2155,6 +2155,7 @@ input:focus-visible {
   padding: 8px;
   background: var(--surface);
   color: var(--ink);
+  cursor: pointer;
   text-align: left;
   transition: border-color 160ms ease, background 160ms ease, box-shadow 160ms ease;
 }
