@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { moveWorkItemToProject } from "./workItems";
+import {
+  calendarWorkItemStartValues,
+  moveWorkItemToProject,
+  updateWorkItemStartConstraint,
+  workItemStartConstraintValues
+} from "./workItems";
 import { createEmptyWorkspace } from "./workspace";
 import type { Project, WorkItem, WorkspaceSnapshot } from "./types";
 
@@ -142,5 +147,93 @@ describe("work item moves", () => {
     expect(result?.workspace.baselines[0].plannedStartByItem).toEqual({ "w-other": start });
     expect(result?.workspace.recurringOccurrences.find((entry) => entry.id === "occ-future")?.projectId).toBe("p-target");
     expect(result?.workspace.recurringOccurrences.find((entry) => entry.id === "occ-past")?.projectId).toBe("p-source");
+  });
+});
+
+describe("work item start constraints", () => {
+  it("defaults calendar-created work to a fixed start on the selected day", () => {
+    expect(calendarWorkItemStartValues("2026-07-20")).toEqual({
+      constraintMode: "fixedStart",
+      constraintDate: "2026-07-20"
+    });
+  });
+
+  it.each(["Asia/Tokyo", "America/Los_Angeles"])("keeps ordinary plan dates on July 20 independently of the automatic-occurrence zone %s", (_timeZone) => {
+    const original = item("w-date", "p-source", "1", "Dated task");
+    const updated = updateWorkItemStartConstraint(original, {
+      constraintMode: "fixedStart",
+      constraintDate: "2026-07-20"
+    });
+
+    expect(updated.constraint).toEqual({ fixedStart: "2026-07-20T00:00:00.000Z" });
+    expect(workItemStartConstraintValues(updated, "2026-07-01")).toEqual({
+      constraintMode: "fixedStart",
+      constraintDate: "2026-07-20"
+    });
+  });
+
+  it("replaces the previous start mode, removes a conflicting fixed finish, and does not mutate the item", () => {
+    const original: WorkItem = {
+      ...item("w-replace", "p-source", "1", "Replace constraint"),
+      constraint: {
+        fixedStart: "2026-07-18T15:00:00.000Z",
+        noLaterThan: "2026-07-31T14:59:00.000Z",
+        fixedFinish: "2026-07-30T15:00:00.000Z"
+      }
+    };
+    const originalConstraint = original.constraint;
+
+    const updated = updateWorkItemStartConstraint(original, {
+      constraintMode: "noEarlierThan",
+      constraintDate: "2026-07-20"
+    });
+
+    expect(updated).not.toBe(original);
+    expect(updated.constraint).not.toBe(originalConstraint);
+    expect(updated.constraint).toEqual({
+      noEarlierThan: "2026-07-20T00:00:00.000Z",
+      noLaterThan: "2026-07-31T14:59:00.000Z"
+    });
+    expect(original.constraint).toEqual({
+      fixedStart: "2026-07-18T15:00:00.000Z",
+      noLaterThan: "2026-07-31T14:59:00.000Z",
+      fixedFinish: "2026-07-30T15:00:00.000Z"
+    });
+  });
+
+  it("clears only start constraints while retaining a finish constraint", () => {
+    const original: WorkItem = {
+      ...item("w-clear-start", "p-source", "1", "Clear start"),
+      constraint: {
+        noEarlierThan: "2026-07-19T15:00:00.000Z",
+        noLaterThan: "2026-07-31T14:59:00.000Z"
+      }
+    };
+
+    const updated = updateWorkItemStartConstraint(original, {
+      constraintMode: "none",
+      constraintDate: "2026-07-20"
+    });
+
+    expect(updated.constraint).toEqual({ noLaterThan: "2026-07-31T14:59:00.000Z" });
+    expect(workItemStartConstraintValues(updated, "2026-07-20")).toEqual({
+      constraintMode: "none",
+      constraintDate: "2026-07-20"
+    });
+  });
+
+  it("removes the constraint object when clearing its only value", () => {
+    const original: WorkItem = {
+      ...item("w-clear-all", "p-source", "1", "Clear all"),
+      constraint: { fixedStart: "2026-07-19T15:00:00.000Z" }
+    };
+
+    const updated = updateWorkItemStartConstraint(original, {
+      constraintMode: "none",
+      constraintDate: "2026-07-20"
+    });
+
+    expect(updated).not.toHaveProperty("constraint");
+    expect(original.constraint).toEqual({ fixedStart: "2026-07-19T15:00:00.000Z" });
   });
 });

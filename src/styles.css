@@ -2291,6 +2291,17 @@ input:focus-visible {
   gap: 8px;
 }
 
+.calendarAgendaRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: stretch;
+  gap: 6px;
+}
+
+.calendarAgendaRow > button {
+  align-self: center;
+}
+
 .monthEventSheetList {
   margin-top: 16px;
 }
@@ -4171,7 +4182,7 @@ button.todayItem {
   display: flex;
   align-items: center;
   gap: 6px;
-  min-width: 78px;
+  min-width: 116px;
 }
 
 .outlineActionCell > button {
@@ -4180,6 +4191,12 @@ button.todayItem {
 }
 
 .moveWorkItemForm {
+  display: grid;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.workItemScheduleForm {
   display: grid;
   gap: 12px;
   margin-top: 16px;

@@ -1,4 +1,62 @@
 import type { Id, WorkItem, WorkspaceSnapshot } from "./types";
+import { zonedDateTimeToIso } from "./time";
+
+export type WorkItemStartConstraintMode = "none" | "noEarlierThan" | "fixedStart";
+
+export interface WorkItemStartConstraintValues {
+  constraintMode: WorkItemStartConstraintMode;
+  constraintDate: string;
+}
+
+export function calendarWorkItemStartValues(selectedDay: string): WorkItemStartConstraintValues {
+  return {
+    constraintMode: "fixedStart",
+    constraintDate: selectedDay
+  };
+}
+
+export function workItemStartConstraintValues(
+  item: WorkItem,
+  fallbackDate: string
+): WorkItemStartConstraintValues {
+  if (item.constraint?.fixedStart) {
+    return {
+      constraintMode: "fixedStart",
+      constraintDate: item.constraint.fixedStart.slice(0, 10)
+    };
+  }
+  if (item.constraint?.noEarlierThan) {
+    return {
+      constraintMode: "noEarlierThan",
+      constraintDate: item.constraint.noEarlierThan.slice(0, 10)
+    };
+  }
+  return {
+    constraintMode: "none",
+    constraintDate: fallbackDate
+  };
+}
+
+export function updateWorkItemStartConstraint(
+  item: WorkItem,
+  values: WorkItemStartConstraintValues
+): WorkItem {
+  const constraint = {
+    ...(item.constraint?.noLaterThan ? { noLaterThan: item.constraint.noLaterThan } : {}),
+    ...(values.constraintMode === "none" && item.constraint?.fixedFinish ? { fixedFinish: item.constraint.fixedFinish } : {}),
+    ...(values.constraintMode === "fixedStart"
+      ? { fixedStart: zonedDateTimeToIso(values.constraintDate, "00:00", "UTC") }
+      : values.constraintMode === "noEarlierThan"
+        ? { noEarlierThan: zonedDateTimeToIso(values.constraintDate, "00:00", "UTC") }
+        : {})
+  };
+
+  if (Object.keys(constraint).length > 0) {
+    return { ...item, constraint };
+  }
+  const { constraint: _constraint, ...withoutConstraint } = item;
+  return withoutConstraint;
+}
 
 export interface MoveWorkItemInput {
   workItemId: Id;

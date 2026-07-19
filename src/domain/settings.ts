@@ -1,7 +1,7 @@
 import type { ProviderSecret } from "./types";
 import type { SecretVaultStorage } from "./secrets";
 
-const SETTINGS_STORAGE_KEY = "omni-plan-personal.settings.v1";
+export const APP_SETTINGS_STORAGE_KEY = "omni-plan-personal.settings.v1";
 
 export interface GitHubSyncSettings {
   owner: string;
@@ -88,7 +88,7 @@ export class BrowserAppSettingsRepository {
   constructor(private readonly storage: SecretVaultStorage = localStorage) {}
 
   load(): AppSettings {
-    const raw = this.storage.getItem(SETTINGS_STORAGE_KEY);
+    const raw = this.storage.getItem(APP_SETTINGS_STORAGE_KEY);
     if (!raw) return defaultAppSettings;
     const parsed = JSON.parse(raw) as AppSettings;
     if (parsed.schemaVersion !== 1) {
@@ -103,7 +103,7 @@ export class BrowserAppSettingsRepository {
   }
 
   save(settings: AppSettings): void {
-    this.storage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(settings));
+    this.storage.setItem(APP_SETTINGS_STORAGE_KEY, JSON.stringify(settings));
   }
 }
 

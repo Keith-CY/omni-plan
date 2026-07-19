@@ -95,6 +95,7 @@ import {
   shapeUpScopeStatus
 } from "./domain/shapeUp";
 import {
+  APP_SETTINGS_STORAGE_KEY,
   BrowserAppSettingsRepository,
   defaultCustomAiProviderSettings,
   providerSecretSummary,
@@ -103,8 +104,14 @@ import {
   type FirebaseSyncSettings,
   type GitHubSyncSettings
 } from "./domain/settings";
-import { BrowserWorkspaceRepository, browserWorkspaceStorageStatus } from "./domain/storage";
-import { moveWorkItemToProject } from "./domain/workItems";
+import { BrowserWorkspaceRepository, browserWorkspaceStorageStatus, workspaceFingerprint } from "./domain/storage";
+import {
+  calendarWorkItemStartValues,
+  moveWorkItemToProject,
+  updateWorkItemStartConstraint,
+  workItemStartConstraintValues,
+  type WorkItemStartConstraintValues
+} from "./domain/workItems";
 import {
   buildChangeEnvelopePath,
   buildGitHubSyncPaths,
@@ -239,7 +246,7 @@ interface ProjectDetailsPatch {
   reviewCadenceDays?: number;
 }
 
-interface WorkItemCreateValues {
+interface WorkItemCreateValues extends WorkItemStartConstraintValues {
   title: string;
   description: string;
   kind: WorkItemKind;
@@ -247,8 +254,6 @@ interface WorkItemCreateValues {
   durationDays: number;
   effortHours: number;
   attention: "deep" | "medium" | "shallow";
-  constraintMode: "none" | "noEarlierThan" | "fixedStart";
-  constraintDate: string;
   percentComplete: number;
   evidenceRequired: boolean;
   isKeyTask: boolean;
@@ -305,6 +310,7 @@ interface DependencyCreateValues {
 
 interface CalendarEvent {
   id: string;
+  workItemId?: string;
   kind: CalendarEventKind;
   projectId: string;
   projectName: string;
@@ -438,6 +444,18 @@ function uniqueId(prefix: string, seed: string, existingIds: Iterable<string>) {
 
 function firebaseSettingsReady(settings: FirebaseSyncSettings) {
   return Boolean(settings.projectId.trim() && settings.apiKey.trim() && settings.workspaceId.trim());
+}
+
+function firebaseSyncConfigurationMatches(left: FirebaseSyncSettings, right: FirebaseSyncSettings) {
+  return left.projectId.trim() === right.projectId.trim()
+    && left.apiKey.trim() === right.apiKey.trim()
+    && (left.databaseId.trim() || "(default)") === (right.databaseId.trim() || "(default)")
+    && (left.collectionPath.trim() || "omniPlanSync") === (right.collectionPath.trim() || "omniPlanSync")
+    && (left.workspaceId.trim() || "personal") === (right.workspaceId.trim() || "personal")
+    && (left.deviceId.trim() || "current-device") === (right.deviceId.trim() || "current-device")
+    && left.autoSyncEnabled === right.autoSyncEnabled
+    && left.autoSyncIntervalSeconds === right.autoSyncIntervalSeconds
+    && left.autoPushDebounceSeconds === right.autoPushDebounceSeconds;
 }
 
 function firebaseConfigFromSettings(settings: FirebaseSyncSettings): FirebaseE2eeSyncConfig {
@@ -820,6 +838,13 @@ function RoutedApp() {
   const autoSyncBusyRef = useRef(false);
   const autoPushTimerRef = useRef<number | undefined>();
   const firebaseSessionRef = useRef<FirebaseAnonymousSession | undefined>();
+  const suppressNextLocalSaveFingerprintRef = useRef<string>();
+  const suppressNextAutoPushFingerprintRef = useRef<string>();
+  const localWorkspaceConflictRef = useRef(false);
+  const localWorkspaceConflictGenerationRef = useRef(0);
+  const firebaseSettingsConflictRef = useRef(false);
+  const firebaseSettingsConflictGenerationRef = useRef(0);
+  const pendingFirebaseSyncIntentRef = useRef<"poll" | "push">();
 
   useEffect(() => {
     writeSidebarCollapsedPreference(sidebarCollapsed);
@@ -875,9 +900,23 @@ function RoutedApp() {
   }, [rememberedPassphraseVault]);
 
   const saveAppSettings = useCallback((nextSettings: AppSettings) => {
-    settingsRepository.save(nextSettings);
-    appSettingsRef.current = nextSettings;
-    setAppSettings(nextSettings);
+    const currentSettings = appSettingsRef.current;
+    let safeSettings = nextSettings;
+    if (firebaseSettingsConflictRef.current) {
+      const durableSettings = settingsRepository.load();
+      if (firebaseSyncConfigurationMatches(nextSettings.firebaseSync, currentSettings.firebaseSync)) {
+        safeSettings = { ...nextSettings, firebaseSync: durableSettings.firebaseSync };
+      }
+      firebaseSettingsConflictRef.current = false;
+    }
+    if (!firebaseSyncConfigurationMatches(currentSettings.firebaseSync, safeSettings.firebaseSync)) {
+      firebaseSettingsConflictGenerationRef.current += 1;
+      firebaseSessionRef.current = undefined;
+      if (autoPushTimerRef.current) window.clearTimeout(autoPushTimerRef.current);
+    }
+    settingsRepository.save(safeSettings);
+    appSettingsRef.current = safeSettings;
+    setAppSettings(safeSettings);
   }, [settingsRepository]);
 
   const rememberSessionPassphrase = useCallback(async () => {
@@ -908,6 +947,14 @@ function RoutedApp() {
   }, [saveAppSettings]);
 
   const runFirebaseAutoSync = useCallback(async (intent: "poll" | "push") => {
+    if (localWorkspaceConflictRef.current) {
+      setAutoSyncStatus({ state: "conflict", message: "Cross-tab workspace conflict. Reload this tab to use the latest stored version before syncing." });
+      return;
+    }
+    if (firebaseSettingsConflictRef.current) {
+      setAutoSyncStatus({ state: "conflict", message: "Sync settings changed in another tab. Reload before editing Settings or syncing this tab." });
+      return;
+    }
     const settings = appSettingsRef.current.firebaseSync;
     if (!settings.autoSyncEnabled) {
       setAutoSyncStatus({ state: "disabled", message: "Auto sync is off." });
@@ -922,18 +969,58 @@ function RoutedApp() {
       setAutoSyncStatus({ state: "locked", message: "Auto sync is enabled but locked. Enter the workspace passphrase in Settings." });
       return;
     }
-    if (autoSyncBusyRef.current) return;
+    if (autoSyncBusyRef.current) {
+      if (intent === "push" || !pendingFirebaseSyncIntentRef.current) pendingFirebaseSyncIntentRef.current = intent;
+      return;
+    }
 
     autoSyncBusyRef.current = true;
     const startedAt = timestamp();
+    const workspaceFingerprintAtStart = workspaceFingerprint(workspaceRef.current);
+    const workspaceConflictGenerationAtStart = localWorkspaceConflictGenerationRef.current;
+    const settingsConflictGenerationAtStart = firebaseSettingsConflictGenerationRef.current;
+    const hardSyncInvalidationMessage = () => {
+      if (localWorkspaceConflictRef.current || localWorkspaceConflictGenerationRef.current !== workspaceConflictGenerationAtStart) {
+        return "Cross-tab workspace conflict. The in-flight sync was cancelled; reload this tab before syncing.";
+      }
+      if (
+        firebaseSettingsConflictRef.current
+        || firebaseSettingsConflictGenerationRef.current !== settingsConflictGenerationAtStart
+        || !firebaseSyncConfigurationMatches(settings, appSettingsRef.current.firebaseSync)
+      ) {
+        return "Sync settings changed while this run was in progress. The stale sync was cancelled; reload before editing Settings.";
+      }
+      return undefined;
+    };
+    const stopForHardInvalidation = () => {
+      const message = hardSyncInvalidationMessage();
+      if (!message) return false;
+      setAutoSyncStatus({ state: "conflict", message, lastRunAt: startedAt });
+      return true;
+    };
+    const workspaceChangedDuringSync = () => workspaceFingerprint(workspaceRef.current) !== workspaceFingerprintAtStart;
+    const stopForWorkspaceChange = () => {
+      if (!workspaceChangedDuringSync()) return false;
+      pendingFirebaseSyncIntentRef.current = "push";
+      setAutoSyncStatus({
+        state: "pending",
+        message: "The workspace changed during sync. The stale run was cancelled and the latest workspace is queued.",
+        lastRunAt: startedAt
+      });
+      return true;
+    };
     setAutoSyncStatus({ state: "syncing", message: intent === "push" ? "Auto sync is preparing encrypted push." : "Auto sync is checking Firebase.", lastRunAt: startedAt });
 
     try {
       const client = new FirebaseE2eeSyncClient(firebaseConfigFromSettings(settings));
       const session = firebaseSessionRef.current ?? await client.signInAnonymously();
+      if (stopForHardInvalidation() || stopForWorkspaceChange()) return;
       firebaseSessionRef.current = session;
       const manifest = await client.readManifest(session);
-      const localChecksum = await workspacePlaintextChecksum(workspaceRef.current);
+      if (stopForHardInvalidation() || stopForWorkspaceChange()) return;
+      const syncWorkspace = workspaceRef.current;
+      const localChecksum = await workspacePlaintextChecksum(syncWorkspace);
+      if (stopForHardInvalidation() || stopForWorkspaceChange()) return;
       const latestSettings = appSettingsRef.current.firebaseSync;
       const localDirty = latestSettings.lastSyncedChecksum
         ? localChecksum !== latestSettings.lastSyncedChecksum
@@ -951,11 +1038,14 @@ function RoutedApp() {
       }
 
       if (remoteAdvanced) {
+        if (stopForHardInvalidation() || stopForWorkspaceChange()) return;
         const result = await client.pullWorkspaceSnapshot(passphrase, session);
+        if (stopForHardInvalidation() || stopForWorkspaceChange()) return;
+        const pulledChecksum = await workspacePlaintextChecksum(result.workspace);
+        if (stopForHardInvalidation() || stopForWorkspaceChange()) return;
         suppressNextAutoPushRef.current = true;
         workspaceRef.current = result.workspace;
         setWorkspace(result.workspace);
-        const pulledChecksum = await workspacePlaintextChecksum(result.workspace);
         updateFirebaseSyncSettings({
           lastSyncedRevision: result.manifest.latestRevision,
           lastSyncedChecksum: pulledChecksum,
@@ -971,13 +1061,24 @@ function RoutedApp() {
       }
 
       if (!manifest || localDirty || (intent === "push" && !latestSettings.lastSyncedRevision)) {
-        const result = await client.pushWorkspaceSnapshot(workspaceRef.current, passphrase, session, manifest);
-        const pushedChecksum = await workspacePlaintextChecksum(workspaceRef.current);
+        if (stopForHardInvalidation() || stopForWorkspaceChange()) return;
+        const result = await client.pushWorkspaceSnapshot(syncWorkspace, passphrase, session, manifest);
+        if (stopForHardInvalidation()) return;
         updateFirebaseSyncSettings({
           lastSyncedRevision: result.manifest.latestRevision,
-          lastSyncedChecksum: pushedChecksum,
+          lastSyncedChecksum: localChecksum,
           lastPushedAt: result.manifest.updatedAt
         });
+        if (workspaceChangedDuringSync()) {
+          pendingFirebaseSyncIntentRef.current = "push";
+          setAutoSyncStatus({
+            state: "pending",
+            message: "A newer local change arrived during push; the latest workspace is queued for sync.",
+            lastRunAt: startedAt,
+            lastPushedAt: result.manifest.updatedAt
+          });
+          return;
+        }
         setAutoSyncStatus({
           state: "ready",
           message: `Auto-pushed Firebase revision ${result.manifest.latestRevision.slice(0, 12)}.`,
@@ -993,6 +1094,7 @@ function RoutedApp() {
         lastRunAt: startedAt
       });
     } catch (error) {
+      if (stopForHardInvalidation()) return;
       setAutoSyncStatus({
         state: "error",
         message: `Auto sync failed: ${error instanceof Error ? error.message : "unknown error"}`,
@@ -1000,11 +1102,23 @@ function RoutedApp() {
       });
     } finally {
       autoSyncBusyRef.current = false;
+      const pendingIntent = pendingFirebaseSyncIntentRef.current;
+      pendingFirebaseSyncIntentRef.current = undefined;
+      if (pendingIntent && !localWorkspaceConflictRef.current && !firebaseSettingsConflictRef.current) {
+        window.setTimeout(() => void runFirebaseAutoSync(pendingIntent), 0);
+      }
     }
   }, [updateFirebaseSyncSettings]);
 
   const saveWorkspaceImmediately = useCallback((nextWorkspace: WorkspaceSnapshot) => {
     workspaceRef.current = nextWorkspace;
+    if (localWorkspaceConflictRef.current) {
+      setWorkspacePersistence((current) => ({
+        ...current,
+        status: "Cross-tab conflict: local edits are held in this tab but are not being saved. Reload to use the latest stored version."
+      }));
+      return;
+    }
     const savedAt = new Date().toISOString();
     void workspaceRepository.save(nextWorkspace).then(() => {
       setWorkspacePersistence((current) => ({ ...current, status: "Saved to browser local workspace", lastSavedAt: savedAt }));
@@ -1014,6 +1128,7 @@ function RoutedApp() {
   }, [workspaceRepository]);
 
   const pushWorkspaceSoon = useCallback((reason: string) => {
+    if (localWorkspaceConflictRef.current || firebaseSettingsConflictRef.current) return;
     const settings = appSettingsRef.current.firebaseSync;
     if (!settings.autoSyncEnabled || !firebaseSettingsReady(settings) || !sessionPassphraseRef.current.trim()) return;
     if (autoPushTimerRef.current) window.clearTimeout(autoPushTimerRef.current);
@@ -1044,10 +1159,13 @@ function RoutedApp() {
     void workspaceRepository.load().then((storedWorkspace) => {
       if (!active) return;
       if (storedWorkspace) {
+        workspaceRef.current = storedWorkspace;
         setWorkspace(storedWorkspace);
         setWorkspacePersistence({ loaded: true, status: "Loaded from browser local workspace", lastSavedAt: "" });
       } else {
-        setWorkspace(createEmptyWorkspace());
+        const emptyWorkspace = createEmptyWorkspace();
+        workspaceRef.current = emptyWorkspace;
+        setWorkspace(emptyWorkspace);
         setWorkspacePersistence({ loaded: true, status: "No local workspace saved yet", lastSavedAt: "" });
       }
     }).catch((error: unknown) => {
@@ -1059,8 +1177,97 @@ function RoutedApp() {
     };
   }, [workspaceRepository]);
 
+  useEffect(() => workspaceRepository.subscribe(
+    () => workspaceRef.current,
+    (change) => {
+      if (change.decision === "apply") {
+        suppressNextLocalSaveFingerprintRef.current = change.fingerprint;
+        suppressNextAutoPushFingerprintRef.current = change.fingerprint;
+        workspaceRef.current = change.snapshot;
+        setWorkspace(change.snapshot);
+        setWorkspacePersistence((current) => ({
+          ...current,
+          status: "Updated from another browser tab",
+          lastSavedAt: new Date().toISOString()
+        }));
+        return;
+      }
+      if (change.decision === "conflict") {
+        localWorkspaceConflictRef.current = true;
+        localWorkspaceConflictGenerationRef.current += 1;
+        if (autoPushTimerRef.current) window.clearTimeout(autoPushTimerRef.current);
+        setWorkspacePersistence((current) => ({
+          ...current,
+          status: "Cross-tab conflict: this tab kept its local edits and paused saving. Reload to use the latest stored version."
+        }));
+        setAutoSyncStatus({
+          state: "conflict",
+          message: "Cross-tab workspace conflict. Local save and Firebase auto-sync are paused until this tab reloads."
+        });
+      }
+    }
+  ), [workspaceRepository]);
+
+  useEffect(() => {
+    const receiveSharedSettings = (event: StorageEvent) => {
+      if (event.key !== APP_SETTINGS_STORAGE_KEY || !event.newValue || localWorkspaceConflictRef.current) return;
+      try {
+        const storedSettings = settingsRepository.load();
+        const currentSettings = appSettingsRef.current;
+        const currentFirebase = currentSettings.firebaseSync;
+        const storedFirebase = storedSettings.firebaseSync;
+        if (!firebaseSyncConfigurationMatches(currentFirebase, storedFirebase)) {
+          firebaseSettingsConflictRef.current = true;
+          firebaseSettingsConflictGenerationRef.current += 1;
+          if (autoPushTimerRef.current) window.clearTimeout(autoPushTimerRef.current);
+          setAutoSyncStatus({
+            state: "conflict",
+            message: "Sync settings changed in another tab. Reload before editing Settings or syncing this tab."
+          });
+          return;
+        }
+        if (!storedFirebase.lastSyncedChecksum) return;
+        const observedWorkspace = workspaceRef.current;
+        const observedFingerprint = workspaceFingerprint(observedWorkspace);
+        void workspacePlaintextChecksum(observedWorkspace).then((currentChecksum) => {
+          if (localWorkspaceConflictRef.current || workspaceFingerprint(workspaceRef.current) !== observedFingerprint) return;
+          if (storedFirebase.lastSyncedChecksum !== currentChecksum) return;
+          const latestSettings = appSettingsRef.current;
+          const latestFirebase = latestSettings.firebaseSync;
+          if (!firebaseSyncConfigurationMatches(latestFirebase, storedFirebase)) return;
+          const nextSettings: AppSettings = {
+            ...latestSettings,
+            firebaseSync: {
+              ...latestFirebase,
+              lastSyncedRevision: storedFirebase.lastSyncedRevision,
+              lastSyncedChecksum: storedFirebase.lastSyncedChecksum,
+              lastPulledAt: storedFirebase.lastPulledAt,
+              lastPushedAt: storedFirebase.lastPushedAt,
+              updatedAt: storedFirebase.updatedAt
+            }
+          };
+          appSettingsRef.current = nextSettings;
+          setAppSettings(nextSettings);
+        }).catch(() => undefined);
+      } catch {
+        // Keep the current valid settings if another tab writes an unreadable payload.
+      }
+    };
+    window.addEventListener("storage", receiveSharedSettings);
+    return () => window.removeEventListener("storage", receiveSharedSettings);
+  }, [settingsRepository]);
+
   useEffect(() => {
     if (!workspacePersistence.loaded) return;
+    if (localWorkspaceConflictRef.current) return;
+    const fingerprint = workspaceFingerprint(workspace);
+    if (suppressNextLocalSaveFingerprintRef.current) {
+      if (suppressNextLocalSaveFingerprintRef.current === fingerprint) {
+        suppressNextLocalSaveFingerprintRef.current = undefined;
+        return;
+      }
+      suppressNextLocalSaveFingerprintRef.current = undefined;
+    }
     const savedAt = new Date().toISOString();
     void workspaceRepository.save(workspace).then(() => {
       setWorkspacePersistence((current) => ({ ...current, status: "Saved to browser local workspace", lastSavedAt: savedAt }));
@@ -1099,6 +1306,14 @@ function RoutedApp() {
 
   useEffect(() => {
     const settings = appSettings.firebaseSync;
+    if (localWorkspaceConflictRef.current) {
+      setAutoSyncStatus({ state: "conflict", message: "Cross-tab workspace conflict. Reload this tab to use the latest stored version before syncing." });
+      return;
+    }
+    if (firebaseSettingsConflictRef.current) {
+      setAutoSyncStatus({ state: "conflict", message: "Sync settings changed in another tab. Reload before editing Settings or syncing this tab." });
+      return;
+    }
     if (!settings.autoSyncEnabled) {
       setAutoSyncStatus({ state: "disabled", message: "Auto sync is off." });
       return;
@@ -1133,8 +1348,17 @@ function RoutedApp() {
 
   useEffect(() => {
     if (!workspacePersistence.loaded) return;
+    if (localWorkspaceConflictRef.current || firebaseSettingsConflictRef.current) return;
     const settings = appSettings.firebaseSync;
     if (!settings.autoSyncEnabled || !firebaseSettingsReady(settings) || !sessionPassphrase.trim()) return;
+    const fingerprint = workspaceFingerprint(workspace);
+    if (suppressNextAutoPushFingerprintRef.current) {
+      if (suppressNextAutoPushFingerprintRef.current === fingerprint) {
+        suppressNextAutoPushFingerprintRef.current = undefined;
+        return;
+      }
+      suppressNextAutoPushFingerprintRef.current = undefined;
+    }
     if (suppressNextAutoPushRef.current) {
       suppressNextAutoPushRef.current = false;
       return;
@@ -1631,7 +1855,7 @@ function RoutedApp() {
       const durationSeconds = values.kind === "milestone" ? 0 : daysToSeconds(values.durationDays);
       const resourceId = previous.resources[0]?.id;
       const parent = values.parentId ? previous.workItems.find((item) => item.id === values.parentId) : undefined;
-      const workItem: WorkItem = {
+      const workItem = updateWorkItemStartConstraint({
         id,
         projectId,
         parentId: values.parentId || undefined,
@@ -1641,11 +1865,6 @@ function RoutedApp() {
         outline: nextOutline(previous.workItems, projectId, values.parentId),
         durationSeconds,
         estimate: { mostLikelySeconds: durationSeconds },
-        constraint: values.constraintMode === "fixedStart"
-          ? { fixedStart: toUtcStart(values.constraintDate) }
-          : values.constraintMode === "noEarlierThan"
-            ? { noEarlierThan: toUtcStart(values.constraintDate) }
-            : undefined,
         assignmentIds: resourceId && values.kind !== "milestone" ? [{ resourceId, attention: values.attention, effortSeconds: hoursToSeconds(values.effortHours) }] : [],
         percentComplete: clamp(values.percentComplete, 0, 100),
         evidenceRequired: values.evidenceRequired,
@@ -1653,7 +1872,7 @@ function RoutedApp() {
         isScopeExpansion: values.isScopeExpansion,
         isFastDelivery: values.isFastDelivery,
         shapeUpScopeId: parent?.shapeUpScopeId
-      };
+      } satisfies WorkItem, values);
       return {
         ...previous,
         workItems: [...previous.workItems, workItem],
@@ -1669,6 +1888,34 @@ function RoutedApp() {
         ]
       };
     });
+  };
+
+  const updateWorkItemSchedule = (projectId: string, workItemId: string, values: WorkItemStartConstraintValues) => {
+    const previous = workspaceRef.current;
+    const current = previous.workItems.find((item) => item.id === workItemId && item.projectId === projectId);
+    if (!current || current.repeatRule) return;
+
+    const nextItem = updateWorkItemStartConstraint(current, values);
+    if (JSON.stringify(current.constraint ?? null) === JSON.stringify(nextItem.constraint ?? null)) return;
+
+    const nextWorkspace: WorkspaceSnapshot = {
+      ...previous,
+      workItems: previous.workItems.map((item) => item.id === workItemId ? nextItem : item),
+      changeSets: [
+        createChangeSet(
+          projectId,
+          `Update schedule for ${current.title}`,
+          "Changed the work item's start-date constraint.",
+          [{ entity: "WorkItem", entityId: workItemId, field: "constraint", before: current.constraint ?? null, after: nextItem.constraint ?? null }],
+          previous.changeSets.length
+        ),
+        ...previous.changeSets
+      ]
+    };
+    workspaceRef.current = nextWorkspace;
+    setWorkspace(nextWorkspace);
+    saveWorkspaceImmediately(nextWorkspace);
+    pushWorkspaceSoon("Work item schedule changed; syncing workspace now.");
   };
 
   const moveWorkItem = (sourceProjectId: string, workItemId: string, values: WorkItemMoveValues) => {
@@ -2408,6 +2655,7 @@ function RoutedApp() {
             onShapeUpBetApprove={approveShapeUpBet}
             onShapeUpConvert={convertProjectToShapeUp}
             onWorkItemCreate={createWorkItem}
+            onWorkItemScheduleUpdate={updateWorkItemSchedule}
             onWorkItemMove={moveWorkItem}
             onWorkItemRepeatRuleUpdate={updateWorkItemRepeatRule}
             onAutomaticRuleStop={stopAutomaticRule}
@@ -2452,6 +2700,9 @@ function RoutedApp() {
             workspace={workspace}
             schedules={model.schedules}
             currentTime={clockNow}
+            selectedProjectId={selectedProjectId}
+            onWorkItemCreate={createWorkItem}
+            onWorkItemScheduleUpdate={updateWorkItemSchedule}
             onOccurrenceSkip={skipAutomaticOccurrence}
             onOccurrenceReschedule={rescheduleAutomaticOccurrence}
             onOccurrenceException={reportAutomaticOccurrenceException}
@@ -2518,6 +2769,7 @@ function RoutedApp() {
             onRememberPassphrase={rememberSessionPassphrase}
             onForgetRememberedPassphrase={forgetRememberedPassphrase}
             autoSyncStatus={autoSyncStatus}
+            syncBlockedByExternalChange={localWorkspaceConflictRef.current || firebaseSettingsConflictRef.current}
             workspacePersistence={workspacePersistence}
             onWorkspaceTimeZoneChange={updateWorkspaceTimeZone}
             onWorkspaceImport={(nextWorkspace) => setWorkspace(nextWorkspace)}
@@ -3208,6 +3460,7 @@ function ProjectWorkspace({
   onShapeUpBetApprove,
   onShapeUpConvert,
   onWorkItemCreate,
+  onWorkItemScheduleUpdate,
   onWorkItemMove,
   onWorkItemRepeatRuleUpdate,
   onAutomaticRuleStop,
@@ -3250,6 +3503,7 @@ function ProjectWorkspace({
   onShapeUpBetApprove: (projectId: string) => void;
   onShapeUpConvert: (projectId: string) => void;
   onWorkItemCreate: (projectId: string, values: WorkItemCreateValues) => void;
+  onWorkItemScheduleUpdate: (projectId: string, workItemId: string, values: WorkItemStartConstraintValues) => void;
   onWorkItemMove: (sourceProjectId: string, workItemId: string, values: WorkItemMoveValues) => void;
   onWorkItemRepeatRuleUpdate: (projectId: string, workItemId: string, repeatRule?: RepeatRule, description?: string) => void;
   onAutomaticRuleStop: (workItemId: string) => void;
@@ -3430,6 +3684,9 @@ function ProjectWorkspace({
                   evidence={evidence}
                   projects={projects}
                   allWorkItems={allWorkItems}
+                  timeZone={timeZone}
+                  currentTime={currentTime}
+                  onScheduleItem={(workItemId, values) => onWorkItemScheduleUpdate(project.id, workItemId, values)}
                   onMoveItem={(workItemId, values) => onWorkItemMove(project.id, workItemId, values)}
                   onFinishItem={(item) => {
                     const plannedHours = Math.max(1, formatAssignmentHours(item) || Math.round(item.workItem.durationSeconds / 3600));
@@ -3448,6 +3705,9 @@ function ProjectWorkspace({
                 items={parkedWorkItems}
                 projects={projects}
                 allWorkItems={allWorkItems}
+                timeZone={timeZone}
+                currentTime={currentTime}
+                onScheduleItem={(workItemId, values) => onWorkItemScheduleUpdate(project.id, workItemId, values)}
                 onMoveItem={(workItemId, values) => onWorkItemMove(project.id, workItemId, values)}
                 onFinishItem={(item) => {
                   const plannedWorkSeconds = item.assignmentIds.reduce((sum, assignment) => sum + assignment.effortSeconds, 0) || item.durationSeconds;
@@ -4647,11 +4907,19 @@ function RecurrenceModeIcon() {
 function WorkItemComposer({
   projectId,
   items,
-  onCreate
+  onCreate,
+  initialStartValues,
+  triggerLabel = "Add",
+  triggerAriaLabel,
+  contextDescription
 }: {
   projectId: string;
   items: WorkItem[];
   onCreate: (projectId: string, values: WorkItemCreateValues) => void;
+  initialStartValues?: WorkItemStartConstraintValues;
+  triggerLabel?: string;
+  triggerAriaLabel?: string;
+  contextDescription?: string;
 }) {
   const [open, setOpen] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
@@ -4663,8 +4931,8 @@ function WorkItemComposer({
     durationDays: 1,
     effortHours: 2,
     attention: "deep",
-    constraintMode: "none",
-    constraintDate: now.slice(0, 10),
+    constraintMode: initialStartValues?.constraintMode ?? "none",
+    constraintDate: initialStartValues?.constraintDate ?? now.slice(0, 10),
     percentComplete: 0,
     evidenceRequired: false,
     isKeyTask: false,
@@ -4673,6 +4941,10 @@ function WorkItemComposer({
   });
   const update = (patch: Partial<WorkItemCreateValues>) => setDraft((current) => ({ ...current, ...patch }));
   const parentOptions = items.filter((item) => item.kind === "phase");
+  useEffect(() => {
+    if (!open || !initialStartValues) return;
+    setDraft((current) => ({ ...current, ...initialStartValues }));
+  }, [open, initialStartValues?.constraintMode, initialStartValues?.constraintDate]);
   const submitWorkItem = () => {
     if (!draft.title.trim()) return;
     onCreate(projectId, draft);
@@ -4698,12 +4970,12 @@ function WorkItemComposer({
       if (!nextOpen) setAdvancedOpen(false);
     }}>
       <SheetTrigger asChild>
-        <Button type="button" size="sm" className="outlineAddButton"><Plus />Add</Button>
+        <Button type="button" size="sm" className="outlineAddButton" aria-label={triggerAriaLabel}><Plus />{triggerLabel}</Button>
       </SheetTrigger>
       <SheetContent className="w-[92vw] overflow-y-auto sm:max-w-2xl">
         <SheetHeader>
           <SheetTitle>Add work item</SheetTitle>
-          <SheetDescription>{items.length} items in this project</SheetDescription>
+          <SheetDescription>{contextDescription ?? `${items.length} items in this project`}</SheetDescription>
         </SheetHeader>
         <form
           className="workItemSheetForm"
@@ -4719,6 +4991,7 @@ function WorkItemComposer({
               <Badge variant="secondary" className="iconBadge" title="Kind"><Workflow />{draft.kind}</Badge>
               <Badge variant="outline" className="iconBadge" title="Duration"><CalendarClock />{draft.durationDays}d</Badge>
               <Badge variant="outline" className="iconBadge" title="Effort"><Timer />{draft.effortHours}h</Badge>
+              {draft.constraintMode !== "none" && <Badge variant="outline" className="iconBadge" title="Start date"><CalendarClock />{draft.constraintDate}</Badge>}
               <Button type="button" variant="outline" size="sm" onClick={() => setAdvancedOpen((current) => !current)} aria-expanded={advancedOpen}>
                 <SettingsIcon />
                 Advanced
@@ -4772,7 +5045,9 @@ function WorkItemComposer({
                   ]}
                   testId="work-item-constraint-mode"
                 />
-                <SettingsInput label="Constraint date" name={`constraint-date-${projectId}`} value={draft.constraintDate} onChange={(value) => update({ constraintDate: value })} placeholder="2026-07-01" autoComplete="off" />
+                {draft.constraintMode !== "none" && (
+                  <SettingsInput label="Constraint date" name={`constraint-date-${projectId}`} value={draft.constraintDate} onChange={(value) => update({ constraintDate: value })} placeholder="2026-07-01" autoComplete="off" type="date" required />
+                )}
               </div>
               <div className="mt-3 flex flex-wrap gap-3 text-sm">
                 <ToggleField label="Evidence required" checked={draft.evidenceRequired} onChange={(checked) => update({ evidenceRequired: checked })} />
@@ -4995,6 +5270,9 @@ function CalendarView({
   workspace,
   schedules,
   currentTime,
+  selectedProjectId,
+  onWorkItemCreate,
+  onWorkItemScheduleUpdate,
   onOccurrenceSkip,
   onOccurrenceReschedule,
   onOccurrenceException
@@ -5002,6 +5280,9 @@ function CalendarView({
   workspace: WorkspaceSnapshot;
   schedules: ScheduleResult[];
   currentTime: string;
+  selectedProjectId: string;
+  onWorkItemCreate: (projectId: string, values: WorkItemCreateValues) => void;
+  onWorkItemScheduleUpdate: (projectId: string, workItemId: string, values: WorkItemStartConstraintValues) => void;
 } & AutomaticOccurrenceHandlers) {
   const { projects, workItems, timeZone } = workspace;
   const [monthStart, setMonthStart] = useState(() => monthStartKey(currentTime, timeZone));
@@ -5018,15 +5299,19 @@ function CalendarView({
   const recurringRules = buildRecurringRules(workspace, currentTime);
   const eventsByDay = new Map<string, CalendarEvent[]>();
   for (const event of events) {
-    const day = zonedDateKey(event.start, timeZone);
+    const day = calendarEventDateKey(event, timeZone);
     eventsByDay.set(day, [...(eventsByDay.get(day) ?? []), event]);
   }
-  const monthEvents = events.filter((event) => isSameCalendarMonth(zonedDateKey(event.start, timeZone), monthStart));
+  const monthEvents = events.filter((event) => isSameCalendarMonth(calendarEventDateKey(event, timeZone), monthStart));
   const selectedEvents = eventsByDay.get(selectedDay) ?? [];
   const monthEventPage = usePagedItems(monthEvents, 10);
   const recurringRulePage = usePagedItems(recurringRules, 12);
   const activeProjectCount = projects.filter((project) => !isProjectArchived(project)).length;
+  const calendarProject = projects.find((project) => project.id === selectedProjectId && !isProjectArchived(project))
+    ?? projects.find((project) => !isProjectArchived(project));
+  const calendarProjectItems = calendarProject ? workItems.filter((item) => item.projectId === calendarProject.id) : [];
   const selectedLabel = new Intl.DateTimeFormat("en", { day: "2-digit", month: "short", timeZone: "UTC", weekday: "short" }).format(new Date(`${selectedDay}T00:00:00.000Z`));
+  const selectedLongLabel = new Intl.DateTimeFormat("en", { dateStyle: "long", timeZone: "UTC" }).format(new Date(`${selectedDay}T00:00:00.000Z`));
 
   const changeMonth = (offset: number) => {
     const nextMonth = addCalendarMonths(monthStart, offset);
@@ -5159,12 +5444,14 @@ function CalendarView({
                     key={day}
                     className={cn("calendarDay", !inMonth && "outsideMonth", isSelected && "selected", isToday && "today")}
                     role="gridcell"
+                    aria-selected={isSelected}
                   >
                     <button
                       type="button"
                       className="calendarDaySelector"
                       onClick={() => setSelectedDay(day)}
                       aria-label={`${day}, ${dayEvents.length} event${dayEvents.length === 1 ? "" : "s"}`}
+                      aria-pressed={isSelected}
                     >
                       <span className="calendarDayTop">
                       <strong>{Number(day.slice(8, 10))}</strong>
@@ -5212,14 +5499,41 @@ function CalendarView({
         </Card>
 
         <Card>
-          <CardHeader className="pb-3">
-            <CardTitle className="flex items-center gap-2"><PanelRight className="h-4 w-4" /> {selectedLabel}</CardTitle>
-            <CardDescription>{selectedEvents.length ? `${selectedEvents.length} scheduled item${selectedEvents.length === 1 ? "" : "s"}` : "No work starts on this day."}</CardDescription>
+          <CardHeader className="flex-row items-start justify-between gap-3 pb-3">
+            <div>
+              <CardTitle className="flex items-center gap-2"><PanelRight className="h-4 w-4" /> {selectedLabel}</CardTitle>
+              <CardDescription>{selectedEvents.length ? `${selectedEvents.length} scheduled item${selectedEvents.length === 1 ? "" : "s"}` : "No work starts on this day."}</CardDescription>
+            </div>
+            {calendarProject && (
+              <WorkItemComposer
+                projectId={calendarProject.id}
+                items={calendarProjectItems}
+                onCreate={onWorkItemCreate}
+                initialStartValues={calendarWorkItemStartValues(selectedDay)}
+                triggerLabel="Add work item"
+                triggerAriaLabel={`Add work item on ${selectedLongLabel} to ${calendarProject.name}`}
+                contextDescription={`${calendarProject.name} · fixed start ${selectedLongLabel}`}
+              />
+            )}
           </CardHeader>
           <CardContent className="calendarAgenda">
-            {selectedEvents.length ? selectedEvents.map((event) => (
-              <CalendarAgendaEvent key={event.id} event={event} timeZone={timeZone} onOccurrenceOpen={openOccurrence} />
-            )) : (
+            {selectedEvents.length ? selectedEvents.map((event) => {
+              const scheduledWorkItem = event.workItemId ? workItems.find((item) => item.id === event.workItemId) : undefined;
+              return (
+                <div key={event.id} className="calendarAgendaRow">
+                  <CalendarAgendaEvent event={event} timeZone={timeZone} onOccurrenceOpen={openOccurrence} />
+                  {event.kind === "scheduled" && scheduledWorkItem && (
+                    <WorkItemScheduleSheet
+                      item={scheduledWorkItem}
+                      timeZone={timeZone}
+                      fallbackDate={selectedDay}
+                      scheduledStart={event.start}
+                      onSave={(values) => onWorkItemScheduleUpdate(event.projectId, scheduledWorkItem.id, values)}
+                    />
+                  )}
+                </div>
+              );
+            }) : (
               <div className="emptyState">
                 <CalendarClock />
                 <span>No calendar event starts here.</span>
@@ -5269,6 +5583,7 @@ function buildCalendarEvents(
       if (item.start < windowStart || item.start >= windowEnd) continue;
       events.push({
         id: `scheduled-${item.workItem.id}`,
+        workItemId: item.workItem.id,
         kind: "scheduled",
         projectId: project.id,
         projectName: project.name,
@@ -5313,6 +5628,10 @@ function buildCalendarEvents(
   return events.sort((a, b) => a.start.localeCompare(b.start) || a.projectName.localeCompare(b.projectName) || a.title.localeCompare(b.title));
 }
 
+function calendarEventDateKey(event: CalendarEvent, timeZone: string) {
+  return event.kind === "scheduled" ? event.start.slice(0, 10) : zonedDateKey(event.start, timeZone);
+}
+
 function buildRecurringRules(workspace: WorkspaceSnapshot, currentTime: string): CalendarRecurringRule[] {
   const { projects, workItems } = workspace;
   const projectById = new Map(projects.map((project) => [project.id, project]));
@@ -5344,6 +5663,9 @@ function buildRecurringRules(workspace: WorkspaceSnapshot, currentTime: string):
 }
 
 function CalendarAgendaEvent({ event, timeZone, onOccurrenceOpen }: { event: CalendarEvent; timeZone: string; onOccurrenceOpen: (occurrence: RecurringOccurrence) => void }) {
+  const formatEventDateTime = event.kind === "scheduled"
+    ? formatShortDateTime
+    : (value: string) => formatShortDateTimeInZone(value, timeZone);
   const content = (
     <>
       <div className="calendarAgendaIcon">
@@ -5359,7 +5681,7 @@ function CalendarAgendaEvent({ event, timeZone, onOccurrenceOpen }: { event: Cal
           {event.status === "skipped" && <CircleSlash2 aria-label="Skipped" />}
         </div>
         <span>{event.projectName}</span>
-        <em>{formatShortDateTimeInZone(event.start, timeZone)} / {formatShortDateTimeInZone(event.finish, timeZone)}</em>
+        <em>{formatEventDateTime(event.start)} / {formatEventDateTime(event.finish)}</em>
       </div>
     </>
   );
@@ -6320,6 +6642,7 @@ function Settings({
   onRememberPassphrase,
   onForgetRememberedPassphrase,
   autoSyncStatus,
+  syncBlockedByExternalChange,
   workspacePersistence,
   onWorkspaceTimeZoneChange,
   onWorkspaceImport,
@@ -6336,6 +6659,7 @@ function Settings({
   onRememberPassphrase: () => Promise<{ savedAt: string }>;
   onForgetRememberedPassphrase: () => Promise<void>;
   autoSyncStatus: AutoSyncStatus;
+  syncBlockedByExternalChange: boolean;
   workspacePersistence: { loaded: boolean; status: string; lastSavedAt: string };
   onWorkspaceTimeZoneChange: (timeZone: string) => void;
   onWorkspaceImport: (workspace: WorkspaceSnapshot) => void;
@@ -6400,6 +6724,17 @@ function Settings({
       setNotice(`Forget passphrase failed: ${error instanceof Error ? error.message : "unknown error"}`);
     }
   };
+
+  useEffect(() => {
+    setFirebaseDraft(settings.firebaseSync);
+  }, [
+    settings.firebaseSync.projectId,
+    settings.firebaseSync.apiKey,
+    settings.firebaseSync.databaseId,
+    settings.firebaseSync.collectionPath,
+    settings.firebaseSync.workspaceId,
+    settings.firebaseSync.deviceId
+  ]);
 
   useEffect(() => {
     setFirebaseDraft((current) => ({
@@ -6593,6 +6928,10 @@ function Settings({
   };
 
   const testFirebaseSync = async () => {
+    if (syncBlockedByExternalChange) {
+      setNotice("Another tab changed the workspace or sync settings. Reload this tab before using Firebase controls.");
+      return;
+    }
     if (!firebaseReady) {
       setNotice("Set Firebase Project ID, Web API key, and Workspace ID before testing.");
       return;
@@ -6614,6 +6953,10 @@ function Settings({
   };
 
   const pushFirebaseWorkspace = async () => {
+    if (syncBlockedByExternalChange) {
+      setNotice("Another tab changed the workspace or sync settings. Reload this tab before pushing to Firebase.");
+      return;
+    }
     if (!firebaseReady) {
       setNotice("Save Firebase sync settings before pushing.");
       return;
@@ -6652,6 +6995,10 @@ function Settings({
   };
 
   const pullFirebaseWorkspace = async () => {
+    if (syncBlockedByExternalChange) {
+      setNotice("Another tab changed the workspace or sync settings. Reload this tab before pulling from Firebase.");
+      return;
+    }
     if (!firebaseReady) {
       setNotice("Save Firebase sync settings before pulling.");
       return;
@@ -6822,14 +7169,24 @@ function Settings({
       : autoSyncStatus.state === "error" || autoSyncStatus.state === "conflict"
         ? "Needs review"
         : "Ready";
-  const syncPrimaryLabel = !firebaseReady ? "Configure sync" : syncLocked ? "Unlock" : syncBusy ? "Syncing" : "Sync now";
+  const syncPrimaryLabel = syncBlockedByExternalChange
+    ? "Reload"
+    : !firebaseReady
+      ? "Configure sync"
+      : syncLocked
+        ? "Unlock"
+        : syncBusy
+          ? "Syncing"
+          : "Sync now";
   const syncBadgeVariant = syncStatus === "Ready" ? "success" : syncStatus === "Needs review" ? "destructive" : "warning";
   const syncStatusIcon = syncStatus === "Ready" ? <CheckCircle2 /> : syncStatus === "Locked" ? <Lock /> : <AlertTriangle />;
-  const syncPrimaryIcon = !firebaseReady
-    ? <SettingsIcon />
-    : syncLocked
-      ? <KeyRound />
-      : <RefreshCw className={syncBusy ? "animate-spin" : undefined} />;
+  const syncPrimaryIcon = syncBlockedByExternalChange
+    ? <RefreshCw />
+    : !firebaseReady
+      ? <SettingsIcon />
+      : syncLocked
+        ? <KeyRound />
+        : <RefreshCw className={syncBusy ? "animate-spin" : undefined} />;
 
   const hasSecretDependency = savedSecretCount > 0 || firebaseReady || Boolean(aiDraft.apiKeySecretId || githubDraft.tokenSecretId);
   const secretsStatus = sessionPassphrase.trim() ? "Unlocked" : hasSecretDependency ? "Locked" : "No saved secrets";
@@ -6878,7 +7235,9 @@ function Settings({
         primaryActionIcon={syncPrimaryIcon}
         primaryDisabled={syncBusy}
         onPrimaryAction={() => {
-          if (!firebaseReady) {
+          if (syncBlockedByExternalChange) {
+            window.location.reload();
+          } else if (!firebaseReady) {
             openPanel("sync");
           } else if (syncLocked) {
             openPanel("secrets");
@@ -6902,9 +7261,9 @@ function Settings({
               <SettingsRow label="Last push / pull" value={`${firebaseDraft.lastPushedAt ? firebaseDraft.lastPushedAt.slice(0, 19).replace("T", " ") : "never"} / ${firebaseDraft.lastPulledAt ? firebaseDraft.lastPulledAt.slice(0, 19).replace("T", " ") : "never"}`} />
             </div>
             <div className="mt-3 flex flex-wrap gap-2">
-              <Button type="button" variant="outline" onClick={() => void testFirebaseSync()} disabled={syncBusy || !firebaseReady}>Test Firebase</Button>
-              <Button type="button" variant="outline" onClick={() => void pullFirebaseWorkspace()} disabled={syncBusy || !firebaseReady}>Pull latest workspace</Button>
-              <Button type="button" onClick={() => void pushFirebaseWorkspace()} disabled={syncBusy || !firebaseReady}>Push encrypted workspace</Button>
+              <Button type="button" variant="outline" onClick={() => void testFirebaseSync()} disabled={syncBusy || !firebaseReady || syncBlockedByExternalChange}>Test Firebase</Button>
+              <Button type="button" variant="outline" onClick={() => void pullFirebaseWorkspace()} disabled={syncBusy || !firebaseReady || syncBlockedByExternalChange}>Pull latest workspace</Button>
+              <Button type="button" onClick={() => void pushFirebaseWorkspace()} disabled={syncBusy || !firebaseReady || syncBlockedByExternalChange}>Push encrypted workspace</Button>
               <Badge variant="outline">{firebaseE2eeSyncStatus.conflictPolicy}</Badge>
             </div>
             <form className="mt-4 space-y-4 rounded-lg border bg-background p-3" onSubmit={saveFirebaseSync}>
@@ -7891,6 +8250,9 @@ function ParkedWorkSection({
   items,
   projects,
   allWorkItems,
+  timeZone,
+  currentTime,
+  onScheduleItem,
   onMoveItem,
   onFinishItem
 }: {
@@ -7898,6 +8260,9 @@ function ParkedWorkSection({
   items: WorkItem[];
   projects: Project[];
   allWorkItems: WorkItem[];
+  timeZone: string;
+  currentTime: string;
+  onScheduleItem: (workItemId: string, values: WorkItemStartConstraintValues) => void;
   onMoveItem: (workItemId: string, values: WorkItemMoveValues) => void;
   onFinishItem: (item: WorkItem) => void;
 }) {
@@ -7930,6 +8295,14 @@ function ParkedWorkSection({
                 </div>
               </div>
               <div className="flex shrink-0 items-center gap-1.5">
+                {item.kind !== "phase" && !item.repeatRule && (
+                  <WorkItemScheduleSheet
+                    item={item}
+                    timeZone={timeZone}
+                    fallbackDate={zonedDateKey(currentTime, timeZone)}
+                    onSave={(values) => onScheduleItem(item.id, values)}
+                  />
+                )}
                 <MoveWorkItemSheet
                   projectId={projectId}
                   item={item}
@@ -7959,6 +8332,91 @@ function ParkedWorkSection({
         })}
       </ul>
     </section>
+  );
+}
+
+function WorkItemScheduleSheet({
+  item,
+  timeZone,
+  fallbackDate,
+  scheduledStart,
+  onSave
+}: {
+  item: WorkItem;
+  timeZone: string;
+  fallbackDate: string;
+  scheduledStart?: string;
+  onSave: (values: WorkItemStartConstraintValues) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState<WorkItemStartConstraintValues>(() => workItemStartConstraintValues(item, fallbackDate));
+  const dateError = draft.constraintMode !== "none" && !/^\d{4}-\d{2}-\d{2}$/.test(draft.constraintDate);
+
+  useEffect(() => {
+    if (!open) return;
+    setDraft(workItemStartConstraintValues(item, fallbackDate));
+  }, [open, item, timeZone, fallbackDate]);
+
+  return (
+    <Sheet open={open} onOpenChange={setOpen}>
+      <SheetTrigger asChild>
+        <Button type="button" size="icon" variant="outline" aria-label={`Edit schedule for ${item.title}`} title="Edit schedule">
+          <CalendarClock />
+        </Button>
+      </SheetTrigger>
+      <SheetContent className="w-[92vw] overflow-y-auto sm:max-w-md">
+        <SheetHeader>
+          <SheetTitle>Edit start date</SheetTitle>
+          <SheetDescription>{item.outline} {item.title}</SheetDescription>
+        </SheetHeader>
+        <form
+          className="workItemScheduleForm"
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (dateError) return;
+            onSave(draft);
+            setOpen(false);
+          }}
+        >
+          {scheduledStart && (
+            <div className="moveWorkItemNote">
+              <CalendarClock size={14} />
+              <span>Currently scheduled for {formatShortDateTime(scheduledStart)}.</span>
+            </div>
+          )}
+          <NativeSelectField
+            label="Start constraint"
+            value={draft.constraintMode}
+            onChange={(value) => setDraft((current) => ({ ...current, constraintMode: value as WorkItemStartConstraintValues["constraintMode"] }))}
+            options={[
+              { value: "none", label: "None" },
+              { value: "noEarlierThan", label: "No earlier than" },
+              { value: "fixedStart", label: "Fixed start" }
+            ]}
+          />
+          {draft.constraintMode !== "none" && (
+            <>
+              <SettingsInput
+                label="Start date"
+                name={`schedule-date-${item.id}`}
+                value={draft.constraintDate}
+                onChange={(constraintDate) => setDraft((current) => ({ ...current, constraintDate }))}
+                placeholder="2026-07-20"
+                autoComplete="off"
+                type="date"
+                required
+                invalid={dateError}
+                describedBy={dateError ? `schedule-date-error-${item.id}` : undefined}
+              />
+              {dateError && <p id={`schedule-date-error-${item.id}`} className="text-sm text-destructive" role="alert">Choose a valid date.</p>}
+            </>
+          )}
+          <div className="flex justify-end">
+            <Button type="submit" disabled={dateError}><Save />Save date</Button>
+          </div>
+        </form>
+      </SheetContent>
+    </Sheet>
   );
 }
 
@@ -8066,6 +8524,9 @@ function OutlineTable({
   evidence,
   projects,
   allWorkItems,
+  timeZone,
+  currentTime,
+  onScheduleItem,
   onMoveItem,
   onFinishItem
 }: {
@@ -8075,6 +8536,9 @@ function OutlineTable({
   evidence: Evidence[];
   projects: Project[];
   allWorkItems: WorkItem[];
+  timeZone: string;
+  currentTime: string;
+  onScheduleItem: (workItemId: string, values: WorkItemStartConstraintValues) => void;
   onMoveItem: (workItemId: string, values: WorkItemMoveValues) => void;
   onFinishItem: (item: ScheduledItem) => void;
 }) {
@@ -8130,6 +8594,15 @@ function OutlineTable({
                   </TableCell>
                   <TableCell>
                     <div className="outlineActionCell">
+                      {item.workItem.kind !== "phase" && !item.workItem.repeatRule && (
+                        <WorkItemScheduleSheet
+                          item={item.workItem}
+                          timeZone={timeZone}
+                          fallbackDate={zonedDateKey(currentTime, timeZone)}
+                          scheduledStart={item.start}
+                          onSave={(values) => onScheduleItem(item.workItem.id, values)}
+                        />
+                      )}
                       <MoveWorkItemSheet
                         projectId={projectId}
                         item={item.workItem}
