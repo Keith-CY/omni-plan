@@ -8,7 +8,8 @@
     "build": "tsc && vite build",
     "test": "vitest run",
     "test:watch": "vitest",
-    "preview": "vite preview --host 127.0.0.1"
+    "preview": "vite preview --host 127.0.0.1",
+    "workspace:migrate": "bun scripts/migrate-workspace.ts"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "^1.1.18",

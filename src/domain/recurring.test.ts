@@ -454,7 +454,10 @@ function automaticRule(patch: Partial<NonNullable<WorkItem["repeatRule"]>> = {})
 
 function recurringWorkspace(item: WorkItem): WorkspaceSnapshot {
   return {
+    schemaVersion: 3,
     timeZone: "UTC",
+    todos: [],
+    conversionHistory: [],
     projects: [{
       id: item.projectId,
       name: "Recurring project",

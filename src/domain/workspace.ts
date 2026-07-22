@@ -2,7 +2,10 @@ import type { WorkspaceSnapshot } from "./types";
 
 export function createEmptyWorkspace(): WorkspaceSnapshot {
   return {
+    schemaVersion: 3,
     timeZone: resolvedTimeZone(),
+    todos: [],
+    conversionHistory: [],
     projects: [],
     workItems: [],
     recurringOccurrences: [],

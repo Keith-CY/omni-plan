@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { evaluateAuditGates } from "./audit";
-import { buildShapeUpBet, createShapeUpPitch, scheduleShapeUpAwareProject } from "./shapeUp";
+import {
+  buildShapeUpBet,
+  createShapeUpPitch,
+  isExecutableWorkItem,
+  scheduleShapeUpAwareProject,
+  unlockShapeUpTasksForBet
+} from "./shapeUp";
 import type { Project, ShapeUpScope, WorkItem } from "./types";
 
 const day = 24 * 60 * 60;
@@ -80,6 +86,92 @@ describe("Shape Up workflow", () => {
     const schedule = scheduleShapeUpAwareProject(project, [uphillTask, downhillTask, marker], []);
 
     expect(schedule.items.map((entry) => entry.workItem.id).sort()).toEqual(["w-downhill", "w-marker"]);
+  });
+
+  it("clears the pre-Bet lock from existing tasks in confirmed scopes only", () => {
+    const confirmedScope = shapeScope("scope-confirmed", 20);
+    const proposedScope = { ...shapeScope("scope-proposed", 20), confirmed: false };
+    const pitch = createShapeUpPitch({
+      problem: "Existing Todo-derived tasks must unlock with the accepted Bet.",
+      scopes: [confirmedScope, proposedScope],
+      now: "2026-07-04T00:00:00.000Z"
+    });
+    const project: Project = {
+      ...baseProject(),
+      status: "active",
+      shapeUpPitch: {
+        ...pitch,
+        bet: buildShapeUpBet({ ...baseProject(), shapeUpPitch: pitch }, "decision-bet", "2026-07-04T00:00:00.000Z")
+      }
+    };
+    const confirmedTask = { ...item("w-confirmed", project.id, "Confirmed", confirmedScope.id), shapeUpLocked: true };
+    const proposedTask = { ...item("w-proposed", project.id, "Proposed", proposedScope.id), shapeUpLocked: true };
+    const otherProjectTask = { ...item("w-other", "p-other", "Other", confirmedScope.id), shapeUpLocked: true };
+    const confirmedPhase = {
+      ...item("w-phase", project.id, "Phase", confirmedScope.id),
+      kind: "phase" as const,
+      shapeUpLocked: true
+    };
+    const workItems = [confirmedTask, proposedTask, otherProjectTask, confirmedPhase];
+
+    const unlocked = unlockShapeUpTasksForBet(project, workItems);
+
+    expect(unlocked.find(({ id }) => id === confirmedTask.id)?.shapeUpLocked).toBeUndefined();
+    expect(unlocked.find(({ id }) => id === proposedTask.id)?.shapeUpLocked).toBe(true);
+    expect(unlocked.find(({ id }) => id === otherProjectTask.id)?.shapeUpLocked).toBe(true);
+    expect(unlocked.find(({ id }) => id === confirmedPhase.id)?.shapeUpLocked).toBe(true);
+    expect(confirmedTask.shapeUpLocked).toBe(true);
+  });
+
+  it("does not unlock tasks until the Bet is active", () => {
+    const scope = shapeScope("scope-confirmed", 20);
+    const project: Project = {
+      ...baseProject(),
+      shapeUpPitch: createShapeUpPitch({
+        problem: "The task must stay locked before approval.",
+        scopes: [scope],
+        now: "2026-07-04T00:00:00.000Z"
+      })
+    };
+    const locked = { ...item("w-locked", project.id, "Locked", scope.id), shapeUpLocked: true };
+
+    expect(unlockShapeUpTasksForBet(project, [locked])).toEqual([locked]);
+  });
+
+  it("does not let a post-Bet scope confirmation bypass the accepted task boundary", () => {
+    const acceptedScope = shapeScope("scope-accepted", 70);
+    const excludedScope = { ...shapeScope("scope-excluded", 20), confirmed: false };
+    const pitch = createShapeUpPitch({
+      problem: "Only accepted scope may execute.",
+      scopes: [acceptedScope, excludedScope],
+      now: "2026-07-04T00:00:00.000Z"
+    });
+    const betProject: Project = {
+      ...baseProject(),
+      status: "active",
+      shapeUpPitch: {
+        ...pitch,
+        bet: buildShapeUpBet({ ...baseProject(), shapeUpPitch: pitch }, "decision-bet", "2026-07-04T00:00:00.000Z")
+      }
+    };
+    const excludedTask = {
+      ...item("w-excluded", betProject.id, "Excluded", excludedScope.id),
+      shapeUpLocked: true
+    };
+    const [stillLocked] = unlockShapeUpTasksForBet(betProject, [excludedTask]);
+    const editedAfterBet: Project = {
+      ...betProject,
+      shapeUpPitch: {
+        ...betProject.shapeUpPitch!,
+        scopes: betProject.shapeUpPitch!.scopes.map((scope) =>
+          scope.id === excludedScope.id ? { ...scope, confirmed: true, hillPosition: 80 } : scope
+        )
+      }
+    };
+
+    expect(stillLocked.shapeUpLocked).toBe(true);
+    expect(isExecutableWorkItem(editedAfterBet, stillLocked)).toBe(false);
+    expect(scheduleShapeUpAwareProject(editedAfterBet, [stillLocked], []).items).toEqual([]);
   });
 
   it("opens a circuit breaker gate after an active bet expires", () => {

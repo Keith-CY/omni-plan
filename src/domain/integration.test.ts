@@ -12,6 +12,7 @@ import {
   decryptFirebaseWorkspaceSnapshotEnvelope,
   decryptSyncPayload,
   FirebaseE2eeSyncClient,
+  FirebaseSyncConflictError,
   githubSyncCommitMessage,
   GitHubPrivateRepoSyncClient,
   GitHubSyncConflictError
@@ -25,7 +26,7 @@ describe("workspace, GitHub, and secrets", () => {
 
     expect(imported.projects).toHaveLength(sampleWorkspace.projects.length);
     expect(imported.workItems).toHaveLength(sampleWorkspace.workItems.length);
-    expect(JSON.parse(payload).schemaVersion).toBe(2);
+    expect(JSON.parse(payload).schemaVersion).toBe(3);
     expect(imported.timeZone).toBe("Asia/Tokyo");
     expect(imported.recurringOccurrences).toEqual([]);
   });
@@ -53,7 +54,7 @@ describe("workspace, GitHub, and secrets", () => {
     expect(rule?.id).toBe(`repeat-${imported.workItems[1].id}`);
   });
 
-  it("round-trips automatic occurrence history in schema 2", () => {
+  it("round-trips automatic occurrence history in schema 3", () => {
     const repository = new BrowserWorkspaceRepository();
     const occurrence = {
       id: "occ-repeat-transfer-20260718090000000",
@@ -293,6 +294,7 @@ describe("workspace, GitHub, and secrets", () => {
     const decrypted = await decryptSyncPayload<typeof sampleWorkspace>(envelope.payload, "correct horse");
 
     expect(envelope.revision).toHaveLength(64);
+    expect(envelope.workspaceSchemaVersion).toBe(3);
     expect(JSON.stringify(envelope)).not.toContain(sampleWorkspace.projects[0].name);
     expect(decrypted.projects[0].name).toBe(sampleWorkspace.projects[0].name);
     await expect(decryptSyncPayload(envelope.payload, "wrong horse")).rejects.toThrow();
@@ -334,6 +336,8 @@ describe("workspace, GitHub, and secrets", () => {
       "2026-07-08T00:00:00.000Z"
     );
     const manifest = createFirebaseE2eeManifest(config, envelope);
+    const manifestUpdateTime = "2026-07-08T00:00:30.000Z";
+    const versionedManifest = { ...manifest, firestoreUpdateTime: manifestUpdateTime };
     const calls: Array<{ url: string; init: RequestInit }> = [];
     const fetcher = async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
@@ -353,7 +357,10 @@ describe("workspace, GitHub, and secrets", () => {
       if (url.endsWith("/omniPlanSync/personal/manifest/current")) {
         return {
           ok: true,
-          json: async () => ({ fields: { manifestJson: { stringValue: JSON.stringify(manifest) } } })
+          json: async () => ({
+            updateTime: manifestUpdateTime,
+            fields: { manifestJson: { stringValue: JSON.stringify(manifest) } }
+          })
         } as Response;
       }
       if (url.endsWith("/omniPlanSync/personal/snapshots/latest")) {
@@ -366,16 +373,285 @@ describe("workspace, GitHub, and secrets", () => {
     };
     const client = new FirebaseE2eeSyncClient(config, fetcher as typeof fetch);
     const session = await client.signInAnonymously();
-    const push = await client.pushWorkspaceSnapshot(sampleWorkspace, "correct horse", session, manifest);
+    const push = await client.pushWorkspaceSnapshot(sampleWorkspace, "correct horse", session, versionedManifest);
     const pull = await client.pullWorkspaceSnapshot("correct horse", session);
-    const commitBody = JSON.stringify(JSON.parse(calls.find((call) => call.url.endsWith(":commit"))?.init.body as string));
+    const commitBody = JSON.parse(calls.find((call) => call.url.endsWith(":commit"))?.init.body as string) as {
+      writes: Array<{ update: { name: string; fields: Record<string, unknown> }; currentDocument?: { exists?: boolean; updateTime?: string } }>;
+    };
+    const opWrite = commitBody.writes.find((write) => write.update.name.includes("/ops/"));
+    const manifestWrite = commitBody.writes.find((write) => write.update.name.endsWith("/manifest/current"));
 
     expect(session.idToken).toBe("firebase-id-token");
     expect(push.envelope.revision).toHaveLength(64);
+    expect(push.envelope.workspaceSchemaVersion).toBe(3);
+    expect(push.manifest.workspaceSchemaVersion).toBe(3);
+    expect(push.manifest.minimumClientWorkspaceSchemaVersion).toBe(3);
     expect(pull.workspace.projects).toHaveLength(sampleWorkspace.projects.length);
+    expect(pull.manifest.firestoreUpdateTime).toBe(manifestUpdateTime);
+    expect(JSON.stringify(pull.manifest)).not.toContain("firestoreUpdateTime");
     expect(calls.some((call) => call.url.includes("/documents:commit"))).toBe(true);
-    expect(commitBody).not.toContain(sampleWorkspace.projects[0].name);
-    expect(commitBody).toContain("envelopeJson");
+    expect(JSON.stringify(commitBody)).not.toContain(sampleWorkspace.projects[0].name);
+    expect(JSON.stringify(commitBody)).toContain("envelopeJson");
+    expect(opWrite?.currentDocument).toEqual({ exists: false });
+    expect(manifestWrite?.currentDocument).toEqual({ updateTime: manifestUpdateTime });
+    expect(JSON.stringify(manifestWrite?.update.fields.manifestJson)).not.toContain("firestoreUpdateTime");
+  });
+
+  it("uses create-only preconditions for the first Firebase manifest and operation", async () => {
+    const config = {
+      projectId: "firebase-project",
+      apiKey: "firebase-web-api-key",
+      databaseId: "(default)",
+      collectionPath: "omniPlanSync",
+      workspaceId: "personal",
+      deviceId: "first-device"
+    };
+    let commitBody: {
+      writes: Array<{ update: { name: string }; currentDocument?: { exists?: boolean; updateTime?: string } }>;
+    } | undefined;
+    const fetcher = async (_input: RequestInfo | URL, init?: RequestInit) => {
+      commitBody = JSON.parse(init?.body as string) as typeof commitBody;
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ commitTime: "2026-07-22T00:00:00.000Z" })
+      } as Response;
+    };
+    const client = new FirebaseE2eeSyncClient(config, fetcher as typeof fetch);
+
+    await client.pushWorkspaceSnapshot(
+      sampleWorkspace,
+      "correct horse",
+      { idToken: "firebase-id-token", localId: "anonymous-user" }
+    );
+
+    const opWrite = commitBody?.writes.find((write) => write.update.name.includes("/ops/"));
+    const manifestWrite = commitBody?.writes.find((write) => write.update.name.endsWith("/manifest/current"));
+    expect(opWrite?.currentDocument).toEqual({ exists: false });
+    expect(manifestWrite?.currentDocument).toEqual({ exists: false });
+  });
+
+  it("refuses to update an existing Firebase manifest without its Firestore version", async () => {
+    const config = {
+      projectId: "firebase-project",
+      apiKey: "firebase-web-api-key",
+      databaseId: "(default)",
+      collectionPath: "omniPlanSync",
+      workspaceId: "personal",
+      deviceId: "stale-device"
+    };
+    const envelope = await createFirebaseWorkspaceSnapshotEnvelope(
+      sampleWorkspace,
+      { workspaceId: config.workspaceId, deviceId: "base-device" },
+      undefined,
+      "correct horse",
+      "2026-07-22T00:00:00.000Z"
+    );
+    const previousManifest = createFirebaseE2eeManifest(config, envelope);
+    let networkCalls = 0;
+    const client = new FirebaseE2eeSyncClient(config, (async () => {
+      networkCalls += 1;
+      return { ok: false, status: 500, json: async () => ({}) } as Response;
+    }) as unknown as typeof fetch);
+
+    await expect(client.pushWorkspaceSnapshot(
+      sampleWorkspace,
+      "correct horse",
+      { idToken: "firebase-id-token", localId: "anonymous-user" },
+      previousManifest
+    )).rejects.toBeInstanceOf(FirebaseSyncConflictError);
+    expect(networkCalls).toBe(0);
+  });
+
+  it("allows only one concurrent Firebase push from the same manifest version", async () => {
+    const baseConfig = {
+      projectId: "firebase-project",
+      apiKey: "firebase-web-api-key",
+      databaseId: "(default)",
+      collectionPath: "omniPlanSync",
+      workspaceId: "personal"
+    };
+    const baseEnvelope = await createFirebaseWorkspaceSnapshotEnvelope(
+      sampleWorkspace,
+      { workspaceId: "personal", deviceId: "base-device" },
+      undefined,
+      "correct horse",
+      "2026-07-22T00:00:00.000Z"
+    );
+    const initialUpdateTime = "2026-07-22T00:00:01.000Z";
+    const baseManifest = {
+      ...createFirebaseE2eeManifest({ ...baseConfig, deviceId: "base-device" }, baseEnvelope),
+      firestoreUpdateTime: initialUpdateTime
+    };
+    let currentUpdateTime = initialUpdateTime;
+    let successfulCommits = 0;
+    const fetcher = async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const body = JSON.parse(init?.body as string) as {
+        writes: Array<{ update: { name: string }; currentDocument?: { updateTime?: string } }>;
+      };
+      const manifestWrite = body.writes.find((write) => write.update.name.endsWith("/manifest/current"));
+      if (manifestWrite?.currentDocument?.updateTime !== currentUpdateTime) {
+        return {
+          ok: false,
+          status: 409,
+          json: async () => ({ error: { status: "ABORTED", message: "stale manifest updateTime" } })
+        } as Response;
+      }
+      successfulCommits += 1;
+      currentUpdateTime = "2026-07-22T00:00:02.000Z";
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ commitTime: currentUpdateTime })
+      } as Response;
+    };
+    const session = { idToken: "firebase-id-token", localId: "anonymous-user" };
+    const firstClient = new FirebaseE2eeSyncClient({ ...baseConfig, deviceId: "device-a" }, fetcher as typeof fetch);
+    const secondClient = new FirebaseE2eeSyncClient({ ...baseConfig, deviceId: "device-b" }, fetcher as typeof fetch);
+
+    const results = await Promise.allSettled([
+      firstClient.pushWorkspaceSnapshot(sampleWorkspace, "correct horse", session, baseManifest),
+      secondClient.pushWorkspaceSnapshot(sampleWorkspace, "correct horse", session, baseManifest)
+    ]);
+
+    expect(successfulCommits).toBe(1);
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    const rejected = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+    expect(rejected?.reason).toBeInstanceOf(FirebaseSyncConflictError);
+  });
+
+  it("maps Firestore FAILED_PRECONDITION responses to Firebase sync conflicts", async () => {
+    const config = {
+      projectId: "firebase-project",
+      apiKey: "firebase-web-api-key",
+      databaseId: "(default)",
+      collectionPath: "omniPlanSync",
+      workspaceId: "personal",
+      deviceId: "stale-device"
+    };
+    const envelope = await createFirebaseWorkspaceSnapshotEnvelope(
+      sampleWorkspace,
+      { workspaceId: config.workspaceId, deviceId: "base-device" },
+      undefined,
+      "correct horse",
+      "2026-07-22T00:00:00.000Z"
+    );
+    const previousManifest = {
+      ...createFirebaseE2eeManifest(config, envelope),
+      firestoreUpdateTime: "2026-07-22T00:00:01.000Z"
+    };
+    const client = new FirebaseE2eeSyncClient(config, (async () => ({
+      ok: false,
+      status: 400,
+      json: async () => ({ error: { status: "FAILED_PRECONDITION", message: "manifest changed" } })
+    } as Response)) as unknown as typeof fetch);
+
+    await expect(client.pushWorkspaceSnapshot(
+      sampleWorkspace,
+      "correct horse",
+      { idToken: "firebase-id-token", localId: "anonymous-user" },
+      previousManifest
+    )).rejects.toBeInstanceOf(FirebaseSyncConflictError);
+  });
+
+  it.each([
+    {
+      label: "manifest workspace schema",
+      versions: { workspaceSchemaVersion: 4, minimumClientWorkspaceSchemaVersion: 3 }
+    },
+    {
+      label: "minimum client workspace schema",
+      versions: { workspaceSchemaVersion: 3, minimumClientWorkspaceSchemaVersion: 4 }
+    }
+  ])("rejects a future Firebase $label before reading ciphertext", async ({ versions }) => {
+    const config = {
+      projectId: "firebase-project",
+      apiKey: "firebase-web-api-key",
+      databaseId: "(default)",
+      collectionPath: "omniPlanSync",
+      workspaceId: "personal",
+      deviceId: "legacy-client"
+    };
+    const manifest = {
+      schemaVersion: 1 as const,
+      ...versions,
+      provider: "firebase-firestore-e2ee" as const,
+      workspaceId: "personal",
+      latestRevision: "future-revision",
+      updatedAt: "2026-07-22T00:00:00.000Z",
+      updatedByDeviceId: "future-client",
+      snapshotDocumentPath: "omniPlanSync/personal/snapshots/latest",
+      heads: {}
+    };
+    let snapshotReads = 0;
+    const fetcher = async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/omniPlanSync/personal/manifest/current")) {
+        return {
+          ok: true,
+          json: async () => ({ fields: { manifestJson: { stringValue: JSON.stringify(manifest) } } })
+        } as Response;
+      }
+      snapshotReads += 1;
+      return { ok: false, status: 500, json: async () => ({}) } as Response;
+    };
+    const client = new FirebaseE2eeSyncClient(config, fetcher as typeof fetch);
+
+    await expect(client.readManifest({
+      idToken: "firebase-id-token",
+      localId: "anonymous-user"
+    })).rejects.toThrow(/future workspace schema 4/);
+    expect(snapshotReads).toBe(0);
+  });
+
+  it("rejects a push based on a future Firebase manifest before encrypting or writing", async () => {
+    const config = {
+      projectId: "firebase-project",
+      apiKey: "firebase-web-api-key",
+      databaseId: "(default)",
+      collectionPath: "omniPlanSync",
+      workspaceId: "personal",
+      deviceId: "legacy-client"
+    };
+    let networkCalls = 0;
+    const client = new FirebaseE2eeSyncClient(config, (async () => {
+      networkCalls += 1;
+      return { ok: false, status: 500, json: async () => ({}) } as Response;
+    }) as unknown as typeof fetch);
+
+    await expect(client.pushWorkspaceSnapshot(
+      sampleWorkspace,
+      "correct horse",
+      { idToken: "firebase-id-token", localId: "anonymous-user" },
+      {
+        schemaVersion: 1,
+        workspaceSchemaVersion: 4,
+        minimumClientWorkspaceSchemaVersion: 4,
+        provider: "firebase-firestore-e2ee",
+        workspaceId: "personal",
+        latestRevision: "future-revision",
+        updatedAt: "2026-07-22T00:00:00.000Z",
+        updatedByDeviceId: "future-client",
+        snapshotDocumentPath: "omniPlanSync/personal/snapshots/latest",
+        heads: {}
+      }
+    )).rejects.toThrow(/future workspace schema 4/);
+    expect(networkCalls).toBe(0);
+  });
+
+  it("rejects a future Firebase snapshot envelope before decrypting it", async () => {
+    const envelope = await createFirebaseWorkspaceSnapshotEnvelope(
+      sampleWorkspace,
+      { workspaceId: "personal", deviceId: "macbook" },
+      undefined,
+      "correct horse",
+      "2026-07-08T00:00:00.000Z"
+    );
+
+    await expect(decryptFirebaseWorkspaceSnapshotEnvelope({
+      ...envelope,
+      workspaceSchemaVersion: 4
+    }, "correct horse")).rejects.toThrow(/future workspace schema 4/);
   });
 
   it("keeps default sync fetch calls bound for Safari", async () => {

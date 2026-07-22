@@ -77,6 +77,31 @@ export function confirmedShapeUpScopes(project: Project): ShapeUpScope[] {
   return project.shapeUpPitch?.scopes.filter((scope) => scope.confirmed && scope.title.trim()) ?? [];
 }
 
+/**
+ * A confirmed Bet releases only existing tasks assigned to confirmed scopes.
+ * Proposed scopes, other projects, and non-task planning records remain locked.
+ */
+export function unlockShapeUpTasksForBet(project: Project, workItems: WorkItem[]): WorkItem[] {
+  if (!isShapeUpBet(project)) return workItems;
+  const confirmedScopeIds = new Set(confirmedShapeUpScopes(project).map(({ id }) => id));
+  if (!confirmedScopeIds.size) return workItems;
+
+  return workItems.map((item) => {
+    if (
+      item.projectId !== project.id ||
+      item.kind !== "task" ||
+      !item.shapeUpScopeId ||
+      !confirmedScopeIds.has(item.shapeUpScopeId) ||
+      item.shapeUpLocked === undefined
+    ) {
+      return item;
+    }
+    const unlocked = { ...item };
+    delete unlocked.shapeUpLocked;
+    return unlocked;
+  });
+}
+
 export function canBetShapeUpProject(project: Project): boolean {
   return Boolean(project.shapeUpPitch && project.status === "waiting" && isShapeUpPitchComplete(project.shapeUpPitch));
 }
@@ -119,6 +144,7 @@ export function isExecutableWorkItem(project: Project, item: WorkItem): boolean 
   if (!project.shapeUpPitch) return true;
   if (!isShapeUpBet(project)) return false;
   if (item.isShapeUpCycleMarker) return true;
+  if (item.shapeUpLocked === true) return false;
   if (!item.shapeUpScopeId) return false;
   const scope = project.shapeUpPitch.scopes.find((candidate) => candidate.id === item.shapeUpScopeId);
   return isShapeUpScopeDownhill(scope);

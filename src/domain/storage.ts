@@ -1,10 +1,17 @@
 import type { WorkspaceSnapshot } from "./types";
 import { normalizeWorkspaceSnapshot } from "./projectLifecycle";
+import {
+  CURRENT_WORKSPACE_SCHEMA_VERSION,
+  downgradeWorkspaceToSchema2,
+  migrateWorkspaceToSchema3,
+  type WorkspaceMigrationReport
+} from "./workspaceMigration";
 
 export interface WorkspaceRepository {
   load(): Promise<WorkspaceSnapshot | undefined>;
   save(snapshot: WorkspaceSnapshot): Promise<void>;
   exportWorkspace(snapshot: WorkspaceSnapshot): string;
+  exportRollbackWorkspace(snapshot: WorkspaceSnapshot): string;
   importWorkspace(payload: string): WorkspaceSnapshot;
   subscribe(
     getCurrentSnapshot: () => WorkspaceSnapshot | undefined,
@@ -12,7 +19,9 @@ export interface WorkspaceRepository {
   ): () => void;
 }
 
-export const WORKSPACE_STORAGE_KEY = "omni-plan-personal.workspace.v1";
+export const WORKSPACE_STORAGE_KEY = "omni-plan-personal.workspace.v3";
+export const LEGACY_WORKSPACE_STORAGE_KEY = "omni-plan-personal.workspace.v1";
+export const MIGRATION_BACKUP_STORAGE_KEY = "omni-plan-personal.workspace.migration-backup.v2";
 
 export interface WorkspaceStorage {
   getItem(key: string): string | null;
@@ -147,11 +156,8 @@ function sha256(value: string): string {
 
 function parseWorkspaceEnvelope(payload: string): WorkspaceEnvelope {
   const parsed = JSON.parse(payload) as unknown;
-  if (!parsed || typeof parsed !== "object") throw new Error("Invalid workspace payload");
-  const envelope = parsed as Partial<WorkspaceEnvelope>;
-  if (envelope.schemaVersion !== 1 && envelope.schemaVersion !== 2) {
-    throw new Error(`Unsupported workspace schema version ${String(envelope.schemaVersion)}`);
-  }
+  const migrated = migrateWorkspaceToSchema3(parsed);
+  const envelope = migrated.envelope as WorkspaceEnvelope;
   if (envelope.baseFingerprint !== undefined && typeof envelope.baseFingerprint !== "string") {
     throw new Error("Workspace base fingerprint is invalid");
   }
@@ -241,6 +247,7 @@ export class BrowserWorkspaceRepository implements WorkspaceRepository {
   private readonly injectedStorage?: WorkspaceStorage;
   private readonly injectedEventSource?: WorkspaceStorageEventSource;
   private lastKnownFingerprint?: string;
+  private lastMigration?: WorkspaceMigrationReport;
 
   constructor(options: BrowserWorkspaceRepositoryOptions = {}) {
     this.injectedStorage = options.storage;
@@ -248,10 +255,33 @@ export class BrowserWorkspaceRepository implements WorkspaceRepository {
   }
 
   async load(): Promise<WorkspaceSnapshot | undefined> {
-    const raw = (this.injectedStorage ?? browserStorage()).getItem(WORKSPACE_STORAGE_KEY);
+    const storage = this.injectedStorage ?? browserStorage();
+    const currentRaw = storage.getItem(WORKSPACE_STORAGE_KEY);
+    const legacyRaw = currentRaw ? null : storage.getItem(LEGACY_WORKSPACE_STORAGE_KEY);
+    const raw = currentRaw ?? legacyRaw;
     if (!raw) return undefined;
-    const snapshot = this.importWorkspace(raw);
+    if (legacyRaw && !storage.getItem(MIGRATION_BACKUP_STORAGE_KEY)) {
+      storage.setItem(MIGRATION_BACKUP_STORAGE_KEY, legacyRaw);
+    }
+    const parsed = JSON.parse(raw) as unknown;
+    const sourceSchemaVersion = typeof parsed === "object" && parsed !== null && "schemaVersion" in parsed
+      ? (parsed as { schemaVersion?: unknown }).schemaVersion
+      : undefined;
+    const requiresSchemaMigration = sourceSchemaVersion === 1 || sourceSchemaVersion === 2;
+    if (requiresSchemaMigration && !storage.getItem(MIGRATION_BACKUP_STORAGE_KEY)) {
+      storage.setItem(MIGRATION_BACKUP_STORAGE_KEY, raw);
+    }
+    const migrated = migrateWorkspaceToSchema3(parsed);
+    this.lastMigration = migrated.report;
+    const snapshot = normalizeWorkspaceSnapshot(migrated.snapshot as WorkspaceSnapshot);
     this.lastKnownFingerprint = workspaceFingerprint(snapshot);
+    if (legacyRaw || requiresSchemaMigration) {
+      storage.setItem(WORKSPACE_STORAGE_KEY, JSON.stringify({
+        ...migrated.envelope,
+        schemaVersion: CURRENT_WORKSPACE_SCHEMA_VERSION,
+        snapshot
+      }, null, 2));
+    }
     return snapshot;
   }
 
@@ -263,11 +293,24 @@ export class BrowserWorkspaceRepository implements WorkspaceRepository {
 
   exportWorkspace(snapshot: WorkspaceSnapshot): string {
     return JSON.stringify({
-      schemaVersion: 2,
+      schemaVersion: CURRENT_WORKSPACE_SCHEMA_VERSION,
       exportedAt: new Date().toISOString(),
       baseFingerprint: this.lastKnownFingerprint,
       snapshot: normalizeWorkspaceSnapshot(snapshot)
     }, null, 2);
+  }
+
+  exportRollbackWorkspace(snapshot: WorkspaceSnapshot): string {
+    const downgraded = downgradeWorkspaceToSchema2({
+      schemaVersion: CURRENT_WORKSPACE_SCHEMA_VERSION,
+      exportedAt: new Date().toISOString(),
+      snapshot: normalizeWorkspaceSnapshot(snapshot)
+    });
+    return JSON.stringify(downgraded.envelope, null, 2);
+  }
+
+  migrationReport(): WorkspaceMigrationReport | undefined {
+    return this.lastMigration ? structuredClone(this.lastMigration) : undefined;
   }
 
   importWorkspace(payload: string): WorkspaceSnapshot {
@@ -299,6 +342,6 @@ export const browserWorkspaceStorageStatus = {
   implemented: true,
   engine: "Browser local workspace store",
   sourceOfTruth: "Browser local DB for this preview",
-  backupPolicy: "Manual encrypted export/import for transfer; GitHub sync handles cross-device ChangeSets",
-  persistence: "Automatic save after local workspace edits"
+  backupPolicy: "Workspace exports are plaintext JSON. Store them on encrypted disk; Firebase sync remains end-to-end encrypted.",
+  persistence: "Schema 3 saves to a new key; the legacy schema 1/2 key is retained as a local rollback source."
 };

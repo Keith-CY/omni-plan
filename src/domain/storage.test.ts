@@ -3,6 +3,8 @@ import { sampleWorkspace } from "./sampleData";
 import { workspacePlaintextChecksum } from "./sync";
 import {
   BrowserWorkspaceRepository,
+  LEGACY_WORKSPACE_STORAGE_KEY,
+  MIGRATION_BACKUP_STORAGE_KEY,
   resolveIncomingWorkspaceChange,
   WORKSPACE_STORAGE_KEY,
   workspaceFingerprint,
@@ -46,7 +48,127 @@ function renamedWorkspace(name: string) {
   };
 }
 
+function legacyWorkspacePayload(schemaVersion: 1 | 2): string {
+  const snapshot = JSON.parse(JSON.stringify(sampleWorkspace)) as Record<string, unknown>;
+  delete snapshot.schemaVersion;
+  delete snapshot.todos;
+  delete snapshot.conversionHistory;
+  if (schemaVersion === 1) {
+    delete snapshot.timeZone;
+    delete snapshot.recurringOccurrences;
+  }
+  return JSON.stringify({
+    schemaVersion,
+    exportedAt: "2026-07-22T00:00:00.000Z",
+    snapshot
+  });
+}
+
+function workspaceWithOpenTodo() {
+  return {
+    ...sampleWorkspace,
+    todos: [{
+      id: "todo-rollback-visible",
+      title: "Visible after rollback",
+      note: "This Todo must become a schema 2 task.",
+      tags: ["migration"],
+      flagged: true,
+      estimatedSeconds: 1800,
+      checklist: [{ id: "check-rollback", title: "Verify task", completed: false }],
+      status: "open" as const,
+      capturedAt: "2026-07-22T00:00:00.000Z",
+      updatedAt: "2026-07-22T01:00:00.000Z",
+      inbox: true
+    }]
+  };
+}
+
 describe("browser workspace cross-tab storage", () => {
+  it.each([1, 2] as const)("backs up and promotes a schema %s local workspace to schema 3", async (schemaVersion) => {
+    const storage = new MemoryStorage();
+    const legacyPayload = legacyWorkspacePayload(schemaVersion);
+    storage.setItem(LEGACY_WORKSPACE_STORAGE_KEY, legacyPayload);
+    const repository = new BrowserWorkspaceRepository({ storage });
+
+    const loaded = await repository.load();
+    const promoted = JSON.parse(storage.getItem(WORKSPACE_STORAGE_KEY)!) as {
+      schemaVersion: number;
+      snapshot: { schemaVersion: number; timeZone: string; todos: unknown[]; conversionHistory: unknown[] };
+    };
+
+    expect(storage.getItem(MIGRATION_BACKUP_STORAGE_KEY)).toBe(legacyPayload);
+    expect(promoted.schemaVersion).toBe(3);
+    expect(promoted.snapshot.schemaVersion).toBe(3);
+    expect(promoted.snapshot.todos).toEqual([]);
+    expect(promoted.snapshot.conversionHistory).toEqual([]);
+    expect(promoted.snapshot.timeZone).toBe(schemaVersion === 1 ? "UTC" : "Asia/Tokyo");
+    expect(loaded?.schemaVersion).toBe(3);
+    expect(repository.migrationReport()).toMatchObject({
+      direction: "upgrade",
+      fromSchemaVersion: schemaVersion,
+      toSchemaVersion: 3
+    });
+  });
+
+  it("writes the recovery copy before rejecting an invalid legacy migration", async () => {
+    const storage = new MemoryStorage();
+    const envelope = JSON.parse(legacyWorkspacePayload(2)) as {
+      snapshot: { dependencies: Array<{ toId: string }> };
+    };
+    envelope.snapshot.dependencies[0].toId = "missing-work-item";
+    const invalidPayload = JSON.stringify(envelope);
+    storage.setItem(LEGACY_WORKSPACE_STORAGE_KEY, invalidPayload);
+    const repository = new BrowserWorkspaceRepository({ storage });
+
+    await expect(repository.load()).rejects.toThrow("integrity validation");
+    expect(storage.getItem(MIGRATION_BACKUP_STORAGE_KEY)).toBe(invalidPayload);
+    expect(storage.getItem(WORKSPACE_STORAGE_KEY)).toBeNull();
+  });
+
+  it("exports the complete schema 3 envelope", () => {
+    const repository = new BrowserWorkspaceRepository();
+    const workspace = workspaceWithOpenTodo();
+    const envelope = JSON.parse(repository.exportWorkspace(workspace)) as {
+      schemaVersion: number;
+      exportedAt: string;
+      snapshot: typeof workspace;
+    };
+
+    expect(envelope.schemaVersion).toBe(3);
+    expect(envelope.snapshot.schemaVersion).toBe(3);
+    expect(envelope.snapshot.todos).toEqual(workspace.todos);
+    expect(envelope.snapshot.conversionHistory).toEqual(sampleWorkspace.conversionHistory);
+    expect(Date.parse(envelope.exportedAt)).not.toBeNaN();
+  });
+
+  it("exports a schema 2 rollback file with every open Todo visible as a task", () => {
+    const repository = new BrowserWorkspaceRepository();
+    const workspace = workspaceWithOpenTodo();
+    const envelope = JSON.parse(repository.exportRollbackWorkspace(workspace)) as {
+      schemaVersion: number;
+      snapshot: Record<string, unknown> & {
+        timeZone: string;
+        projects: Array<{ id: string }>;
+        workItems: Array<{ id: string; projectId: string; title: string; description?: string; percentComplete: number; sourceTodoId?: string }>;
+      };
+    };
+
+    expect(envelope.schemaVersion).toBe(2);
+    expect(envelope.snapshot.schemaVersion).toBeUndefined();
+    expect(envelope.snapshot.todos).toBeUndefined();
+    expect(envelope.snapshot.conversionHistory).toBeUndefined();
+    expect(envelope.snapshot.timeZone).toBe("Asia/Tokyo");
+    expect(envelope.snapshot.projects).toContainEqual(expect.objectContaining({ id: "p-schema3-todo-rollback" }));
+    expect(envelope.snapshot.workItems).toContainEqual(expect.objectContaining({
+      id: "todo-rollback-visible",
+      projectId: "p-schema3-todo-rollback",
+      title: "Visible after rollback",
+      description: "This Todo must become a schema 2 task.",
+      percentComplete: 0,
+      sourceTodoId: "todo-rollback-visible"
+    }));
+  });
+
   it("uses the same canonical SHA-256 workspace fingerprint as encrypted sync", async () => {
     expect(workspaceFingerprint(sampleWorkspace)).toBe(await workspacePlaintextChecksum(sampleWorkspace));
   });

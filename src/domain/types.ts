@@ -4,6 +4,10 @@ export type Seconds = number;
 
 export type ProjectStatus = "active" | "waiting" | "paused" | "done" | "archived";
 export type ProjectMode = "explore" | "build" | "ship" | "maintain";
+export type PlanningMethod = "omniplan" | "shape-up";
+export type OmniPlanStage = "plan" | "execute" | "review" | "close";
+export type ShapeUpStage = "shape" | "bet" | "build" | "cool-down" | "close";
+export type ProjectStage = OmniPlanStage | ShapeUpStage;
 export type WorkItemKind = "phase" | "task" | "milestone" | "hammock";
 export type DependencyType = "FS" | "SS" | "FF" | "SF";
 export type AttentionKind = "deep" | "medium" | "shallow";
@@ -15,6 +19,47 @@ export type RepeatExecutionMode = "manual" | "automatic";
 export type RepeatEndMode = "count" | "until" | "never";
 export type RecurringOccurrenceStatus = "scheduled" | "occurred" | "exception" | "skipped";
 export type RecurringSettlementSource = "on-time" | "system-catch-up" | "manual";
+export type TodoStatus = "open" | "completed";
+export type ConversionType = "todo_to_task" | "task_to_todo" | "todo_to_project";
+
+export interface TodoChecklistItem {
+  id: Id;
+  title: string;
+  completed: boolean;
+}
+
+export interface Todo {
+  id: Id;
+  title: string;
+  note?: string;
+  tags: string[];
+  flagged: boolean;
+  estimatedSeconds?: Seconds;
+  deferUntil?: ISODate;
+  dueAt?: ISODate;
+  repeatRule?: RepeatRule;
+  /** Number of occurrences already acknowledged for this repeating Todo. */
+  repeatCompletedCount?: number;
+  /** Completion boundary used by after-previous-finish recurrence. */
+  lastRepeatCompletedAt?: ISODate;
+  checklist: TodoChecklistItem[];
+  plannedForDate?: string;
+  status: TodoStatus;
+  completedAt?: ISODate;
+  capturedAt: ISODate;
+  updatedAt: ISODate;
+  inbox: boolean;
+}
+
+export interface ConversionHistoryEntry {
+  id: Id;
+  type: ConversionType;
+  itemId: Id;
+  projectId?: Id;
+  occurredAt: ISODate;
+  /** Audit-only names of project-specific data discarded by the conversion. */
+  discardedFields: string[];
+}
 
 export interface DirectionCard {
   targetUser: string;
@@ -40,6 +85,10 @@ export interface Project {
   currentOutcome: string;
   horizon: ISODate;
   start: ISODate;
+  /** Optional only so legacy schema-1/2 records can be normalized into schema 3. */
+  planningMethod?: PlanningMethod;
+  /** Optional only so legacy schema-1/2 records can be normalized into schema 3. */
+  stage?: ProjectStage;
   directionCard?: DirectionCard;
   shapeUpPitch?: ShapeUpPitch;
   reviewCadenceDays: number;
@@ -127,6 +176,13 @@ export interface WorkItem {
   kind: WorkItemKind;
   title: string;
   description?: string;
+  tags?: string[];
+  flagged?: boolean;
+  checklist?: TodoChecklistItem[];
+  plannedForDate?: string;
+  capturedAt?: ISODate;
+  updatedAt?: ISODate;
+  completedAt?: ISODate;
   outline: string;
   durationSeconds: Seconds;
   estimate: Estimate;
@@ -142,6 +198,8 @@ export interface WorkItem {
   hammockFinishId?: Id;
   evidenceRequired?: boolean;
   shapeUpScopeId?: Id;
+  /** A pre-Bet Shape Up task is recorded but cannot enter execution. */
+  shapeUpLocked?: boolean;
   isShapeUpCycleMarker?: boolean;
 }
 
@@ -337,7 +395,10 @@ export interface MonteCarloResult {
 }
 
 export interface WorkspaceSnapshot {
+  schemaVersion: 3;
   timeZone: string;
+  todos: Todo[];
+  conversionHistory: ConversionHistoryEntry[];
   projects: Project[];
   workItems: WorkItem[];
   recurringOccurrences: RecurringOccurrenceRecord[];

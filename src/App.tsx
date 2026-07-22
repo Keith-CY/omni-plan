@@ -10,17 +10,19 @@ import {
   ChevronDown,
   ChevronUp,
   CheckCircle2,
+  Circle,
   CircleSlash2,
   ClipboardCheck,
   FileDown,
   FileJson,
   FileText,
+  Flag,
   GitCommitHorizontal,
   GitPullRequest,
-  Home,
   Inbox,
   KeyRound,
   Layers3,
+  ListTodo,
   Lock,
   Network,
   PanelRight,
@@ -92,7 +94,8 @@ import {
   scheduleShapeUpAwarePortfolio,
   shapeUpAppetiteDays,
   shapeUpMissingBetRequirements,
-  shapeUpScopeStatus
+  shapeUpScopeStatus,
+  unlockShapeUpTasksForBet
 } from "./domain/shapeUp";
 import {
   APP_SETTINGS_STORAGE_KEY,
@@ -113,11 +116,24 @@ import {
   type WorkItemStartConstraintValues
 } from "./domain/workItems";
 import {
+  completeTodo,
+  convertTaskToTodo,
+  convertTodoToProject,
+  convertTodoToTask,
+  createTodo,
+  keepTodo,
+  reopenTodo,
+  selectTodayTodos,
+  taskToTodoImpact,
+  updateTodo
+} from "./domain/todos";
+import {
   buildChangeEnvelopePath,
   buildGitHubSyncPaths,
   createSyncChangeEnvelope,
   createSyncManifest,
   FirebaseE2eeSyncClient,
+  FirebaseSyncConflictError,
   firebaseE2eeSyncStatus,
   githubPrivateRepoSyncStatus,
   githubSyncCommitMessage,
@@ -156,12 +172,13 @@ import type {
   ShapeUpAppetiteKind,
   ShapeUpPitch,
   ShapeUpScope,
+  Todo,
   WorkItem,
   WorkItemKind,
   WorkspaceSnapshot
 } from "./domain/types";
 import { createEmptyWorkspace } from "./domain/workspace";
-import { addSeconds, secondsBetween, startOfDay, zonedDateKey, zonedDateTimeToIso, zonedTimeKey } from "./domain/time";
+import { addSeconds, addZonedCalendarDays, secondsBetween, startOfDay, zonedDateKey, zonedDateTimeToIso, zonedTimeKey } from "./domain/time";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -171,23 +188,31 @@ import { Sheet, SheetClose, SheetContent, SheetDescription, SheetHeader, SheetTi
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
+import {
+  TodosPage,
+  type ConvertTodoToProjectInput as TodosPageConvertToProjectInput,
+  type ConvertTodoToTaskInput as TodosPageConvertToTaskInput,
+  type TodoUpdatePatch
+} from "@/features/todos/TodosPage";
 
-type View = "portfolio" | "project" | "calendar" | "today" | "audit" | "reports" | "agent" | "settings";
+type View = "today" | "todos" | "projects" | "review" | "project" | "calendar" | "portfolio" | "audit" | "reports" | "agent" | "settings";
 type ScheduleTiming = "Overdue" | "Due now" | "Upcoming";
 type MatrixDecision = "narrow" | "audit" | "watch" | "push";
 type CalendarEventKind = "scheduled" | "recurring";
+type OmniPlanStage = "plan" | "execute" | "review" | "close";
 
 const now = new Date().toISOString();
 const asOfLabel = `As of ${now.slice(0, 10)}`;
 const buildCommit = __BUILD_COMMIT__.trim() || "unknown";
 const buildCommitShort = buildCommit === "unknown" ? buildCommit : buildCommit.slice(0, 7);
 const defaultProjectId = "workspace";
-const views = new Set<View>(["portfolio", "project", "calendar", "today", "audit", "reports", "agent", "settings"]);
+const views = new Set<View>(["today", "todos", "projects", "review", "project", "calendar", "portfolio", "audit", "reports", "agent", "settings"]);
 const daySeconds = 24 * 60 * 60;
 const dependencyTypes: DependencyType[] = ["FS", "SS", "FF", "SF"];
 const workItemKinds: WorkItemKind[] = ["phase", "task", "milestone", "hammock"];
 const projectModes: ProjectMode[] = ["explore", "build", "ship", "maintain"];
 const projectStatuses = selectableProjectStatuses;
+const omniPlanStages: OmniPlanStage[] = ["plan", "execute", "review", "close"];
 const auditActions: AuditAction[] = ["Accelerate", "Continue", "Narrow", "Pivot", "Stop"];
 const evidenceKinds: EvidenceKind[] = ["note", "commit", "pr", "ci", "doc", "screenshot", "release", "feedback", "metric", "email", "calendar", "minutes", "booking"];
 const sidebarCollapsedStorageKey = "omni-plan-sidebar-collapsed";
@@ -234,6 +259,7 @@ type DependencyPatch = Partial<Pick<Dependency, "type" | "lagSeconds">>;
 
 interface ProjectCreateValues {
   title: string;
+  planningMethod: "omniplan" | "shape-up";
 }
 
 interface ProjectDetailsPatch {
@@ -379,11 +405,11 @@ function safeDecode(value: string): string | undefined {
 
 function readRoute(): RouteState {
   if (typeof window === "undefined") {
-    return { view: "portfolio", selectedProjectId: defaultProjectId };
+    return { view: "today", selectedProjectId: defaultProjectId };
   }
 
   const [viewRaw, projectRaw, targetRaw] = window.location.hash.replace(/^#\/?/, "").split("/");
-  const view = views.has(viewRaw as View) ? (viewRaw as View) : "portfolio";
+  const view = views.has(viewRaw as View) ? (viewRaw as View) : "today";
   const decodedProject = projectRaw ? safeDecode(projectRaw) : undefined;
   const selectedProjectId = decodedProject || defaultProjectId;
   const target = targetRaw ? safeDecode(targetRaw) : undefined;
@@ -395,7 +421,7 @@ function readRoute(): RouteState {
 }
 
 function routeFromParams(params: Record<string, string | undefined>): RouteState {
-  const view = views.has(params.view as View) ? (params.view as View) : "portfolio";
+  const view = views.has(params.view as View) ? (params.view as View) : "today";
   const selectedProjectId = params.projectId ? safeDecode(params.projectId) ?? defaultProjectId : defaultProjectId;
   return { view, selectedProjectId, target: params.target };
 }
@@ -444,6 +470,24 @@ function uniqueId(prefix: string, seed: string, existingIds: Iterable<string>) {
 
 function firebaseSettingsReady(settings: FirebaseSyncSettings) {
   return Boolean(settings.projectId.trim() && settings.apiKey.trim() && settings.workspaceId.trim());
+}
+
+function workspaceHasUserContent(snapshot: WorkspaceSnapshot) {
+  return snapshot.projects.length > 0
+    || snapshot.todos.length > 0
+    || snapshot.workItems.length > 0
+    || snapshot.recurringOccurrences.length > 0
+    || snapshot.dependencies.length > 0
+    || snapshot.resources.length > 0
+    || snapshot.capacities.length > 0
+    || snapshot.baselines.length > 0
+    || snapshot.actuals.length > 0
+    || snapshot.evidence.length > 0
+    || snapshot.decisions.length > 0
+    || snapshot.changeSets.length > 0
+    || snapshot.auditGates.length > 0
+    || snapshot.auditDecisions.length > 0
+    || snapshot.conversionHistory.length > 0;
 }
 
 function firebaseSyncConfigurationMatches(left: FirebaseSyncSettings, right: FirebaseSyncSettings) {
@@ -801,9 +845,9 @@ async function runContrarianAiAudit({
 export function App() {
   return (
     <Routes>
-      <Route index element={<Navigate to={pathForRoute({ view: "portfolio", selectedProjectId: defaultProjectId })} replace />} />
+      <Route index element={<Navigate to={pathForRoute({ view: "today", selectedProjectId: defaultProjectId })} replace />} />
       <Route path="/:view/:projectId/:target?" element={<RoutedApp />} />
-      <Route path="*" element={<Navigate to={pathForRoute({ view: "portfolio", selectedProjectId: defaultProjectId })} replace />} />
+      <Route path="*" element={<Navigate to={pathForRoute({ view: "today", selectedProjectId: defaultProjectId })} replace />} />
     </Routes>
   );
 }
@@ -817,6 +861,8 @@ function RoutedApp() {
   const rememberedPassphraseVault = useMemo(() => new BrowserRememberedPassphraseVault(), []);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(readSidebarCollapsedPreference);
   const [workspace, setWorkspace] = useState<WorkspaceSnapshot>(() => createEmptyWorkspace());
+  const [quickCaptureOpen, setQuickCaptureOpen] = useState(false);
+  const [quickCaptureForToday, setQuickCaptureForToday] = useState(false);
   const [clockNow, setClockNow] = useState(timestamp);
   const [appSettings, setAppSettings] = useState<AppSettings>(() => settingsRepository.load());
   const [sessionPassphrase, setSessionPassphrase] = useState("");
@@ -828,6 +874,7 @@ function RoutedApp() {
   });
   const [workspacePersistence, setWorkspacePersistence] = useState({
     loaded: false,
+    loadFailed: false,
     status: "Loading local workspace...",
     lastSavedAt: ""
   });
@@ -845,10 +892,21 @@ function RoutedApp() {
   const firebaseSettingsConflictRef = useRef(false);
   const firebaseSettingsConflictGenerationRef = useRef(0);
   const pendingFirebaseSyncIntentRef = useRef<"poll" | "push">();
+  const workspaceLoadSucceededRef = useRef(false);
 
   useEffect(() => {
     writeSidebarCollapsedPreference(sidebarCollapsed);
   }, [sidebarCollapsed]);
+  useEffect(() => {
+    const openQuickCapture = (event: KeyboardEvent) => {
+      if (event.repeat || event.isComposing || !(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "n") return;
+      event.preventDefault();
+      setQuickCaptureForToday(false);
+      setQuickCaptureOpen(true);
+    };
+    window.addEventListener("keydown", openQuickCapture);
+    return () => window.removeEventListener("keydown", openQuickCapture);
+  }, []);
   const suppressNextAutoPushRef = useRef(false);
   const view = route.view;
   const selectedProject = workspace.projects.find((project) => project.id === route.selectedProjectId) ??
@@ -947,6 +1005,10 @@ function RoutedApp() {
   }, [saveAppSettings]);
 
   const runFirebaseAutoSync = useCallback(async (intent: "poll" | "push") => {
+    if (!workspaceLoadSucceededRef.current) {
+      setAutoSyncStatus({ state: "error", message: "Workspace sync is blocked until the local workspace loads successfully." });
+      return;
+    }
     if (localWorkspaceConflictRef.current) {
       setAutoSyncStatus({ state: "conflict", message: "Cross-tab workspace conflict. Reload this tab to use the latest stored version before syncing." });
       return;
@@ -1024,7 +1086,7 @@ function RoutedApp() {
       const latestSettings = appSettingsRef.current.firebaseSync;
       const localDirty = latestSettings.lastSyncedChecksum
         ? localChecksum !== latestSettings.lastSyncedChecksum
-        : intent === "push";
+        : intent === "push" || workspaceHasUserContent(syncWorkspace);
       const remoteRevision = manifest?.latestRevision;
       const remoteAdvanced = Boolean(remoteRevision && remoteRevision !== latestSettings.lastSyncedRevision);
 
@@ -1095,9 +1157,10 @@ function RoutedApp() {
       });
     } catch (error) {
       if (stopForHardInvalidation()) return;
+      const isConflict = error instanceof FirebaseSyncConflictError;
       setAutoSyncStatus({
-        state: "error",
-        message: `Auto sync failed: ${error instanceof Error ? error.message : "unknown error"}`,
+        state: isConflict ? "conflict" : "error",
+        message: `${isConflict ? "Auto sync conflict" : "Auto sync failed"}: ${error instanceof Error ? error.message : "unknown error"}`,
         lastRunAt: startedAt
       });
     } finally {
@@ -1112,6 +1175,7 @@ function RoutedApp() {
 
   const saveWorkspaceImmediately = useCallback((nextWorkspace: WorkspaceSnapshot) => {
     workspaceRef.current = nextWorkspace;
+    if (!workspaceLoadSucceededRef.current) return;
     if (localWorkspaceConflictRef.current) {
       setWorkspacePersistence((current) => ({
         ...current,
@@ -1128,6 +1192,7 @@ function RoutedApp() {
   }, [workspaceRepository]);
 
   const pushWorkspaceSoon = useCallback((reason: string) => {
+    if (!workspaceLoadSucceededRef.current) return;
     if (localWorkspaceConflictRef.current || firebaseSettingsConflictRef.current) return;
     const settings = appSettingsRef.current.firebaseSync;
     if (!settings.autoSyncEnabled || !firebaseSettingsReady(settings) || !sessionPassphraseRef.current.trim()) return;
@@ -1159,18 +1224,23 @@ function RoutedApp() {
     void workspaceRepository.load().then((storedWorkspace) => {
       if (!active) return;
       if (storedWorkspace) {
+        workspaceLoadSucceededRef.current = true;
         workspaceRef.current = storedWorkspace;
         setWorkspace(storedWorkspace);
-        setWorkspacePersistence({ loaded: true, status: "Loaded from browser local workspace", lastSavedAt: "" });
+        setWorkspacePersistence({ loaded: true, loadFailed: false, status: "Loaded from browser local workspace", lastSavedAt: "" });
       } else {
         const emptyWorkspace = createEmptyWorkspace();
+        workspaceLoadSucceededRef.current = true;
         workspaceRef.current = emptyWorkspace;
         setWorkspace(emptyWorkspace);
-        setWorkspacePersistence({ loaded: true, status: "No local workspace saved yet", lastSavedAt: "" });
+        setWorkspacePersistence({ loaded: true, loadFailed: false, status: "No local workspace saved yet", lastSavedAt: "" });
       }
     }).catch((error: unknown) => {
       if (!active) return;
-      setWorkspacePersistence({ loaded: true, status: `Workspace load failed: ${error instanceof Error ? error.message : "unknown error"}`, lastSavedAt: "" });
+      workspaceLoadSucceededRef.current = false;
+      if (autoPushTimerRef.current) window.clearTimeout(autoPushTimerRef.current);
+      setAutoSyncStatus({ state: "error", message: "Workspace sync is blocked because the local workspace could not be loaded." });
+      setWorkspacePersistence({ loaded: false, loadFailed: true, status: `Workspace load failed: ${error instanceof Error ? error.message : "unknown error"}`, lastSavedAt: "" });
     });
     return () => {
       active = false;
@@ -1305,6 +1375,7 @@ function RoutedApp() {
   }, [clockNow, workspace.workItems, workspace.recurringOccurrences, workspacePersistence.loaded]);
 
   useEffect(() => {
+    if (!workspacePersistence.loaded) return;
     const settings = appSettings.firebaseSync;
     if (localWorkspaceConflictRef.current) {
       setAutoSyncStatus({ state: "conflict", message: "Cross-tab workspace conflict. Reload this tab to use the latest stored version before syncing." });
@@ -1343,7 +1414,8 @@ function RoutedApp() {
     appSettings.firebaseSync.autoSyncEnabled,
     appSettings.firebaseSync.autoSyncIntervalSeconds,
     sessionPassphrase,
-    runFirebaseAutoSync
+    runFirebaseAutoSync,
+    workspacePersistence.loaded
   ]);
 
   useEffect(() => {
@@ -1404,6 +1476,119 @@ function RoutedApp() {
     routerNavigate(pathForRoute(nextRoute));
   };
 
+  const openQuickCapture = (planForToday = false) => {
+    setQuickCaptureForToday(planForToday);
+    setQuickCaptureOpen(true);
+  };
+
+  const commitTodoWorkspace = (nextWorkspace: WorkspaceSnapshot, reason: string) => {
+    workspaceRef.current = nextWorkspace;
+    setWorkspace(nextWorkspace);
+    saveWorkspaceImmediately(nextWorkspace);
+    pushWorkspaceSoon(reason);
+  };
+
+  const captureTodo = (titleValue: string, planForToday = false) => {
+    const title = titleValue.trim();
+    if (!title) return;
+    const previous = workspaceRef.current;
+    const createdAt = timestamp();
+    const id = uniqueId("todo", title, [
+      ...previous.todos.map((todo) => todo.id),
+      ...previous.workItems.map((item) => item.id)
+    ]);
+    const todo = createTodo({
+      id,
+      title,
+      ...(planForToday ? { plannedForDate: zonedDateKey(createdAt, previous.timeZone) } : {})
+    }, createdAt);
+    commitTodoWorkspace(
+      { ...previous, schemaVersion: 3, todos: [todo, ...previous.todos] },
+      planForToday ? "Todo added to Today; syncing workspace now." : "Todo captured in Inbox; syncing workspace now."
+    );
+  };
+
+  const updateWorkspaceTodo = (todoId: string, patch: TodoUpdatePatch) => {
+    const previous = workspaceRef.current;
+    const current = previous.todos.find((todo) => todo.id === todoId);
+    if (!current) throw new Error("Todo no longer exists.");
+    const nextTodo = updateTodo(current, patch, timestamp());
+    commitTodoWorkspace(
+      { ...previous, todos: previous.todos.map((todo) => todo.id === todoId ? nextTodo : todo) },
+      "Todo changed; syncing workspace now."
+    );
+  };
+
+  const completeWorkspaceTodo = (todoId: string) => {
+    const previous = workspaceRef.current;
+    const current = previous.todos.find((todo) => todo.id === todoId);
+    if (!current) throw new Error("Todo no longer exists.");
+    const nextTodo = completeTodo(current, timestamp(), previous.timeZone);
+    commitTodoWorkspace(
+      { ...previous, todos: previous.todos.map((todo) => todo.id === todoId ? nextTodo : todo) },
+      current.repeatRule && nextTodo.status === "open"
+        ? "Todo repeat occurrence completed; syncing the next occurrence now."
+        : "Todo completed; syncing workspace now."
+    );
+  };
+
+  const restoreWorkspaceTodo = (todoId: string) => {
+    const previous = workspaceRef.current;
+    const current = previous.todos.find((todo) => todo.id === todoId);
+    if (!current) throw new Error("Todo no longer exists.");
+    const nextTodo = reopenTodo(current, timestamp());
+    commitTodoWorkspace(
+      { ...previous, todos: previous.todos.map((todo) => todo.id === todoId ? nextTodo : todo) },
+      "Todo restored; syncing workspace now."
+    );
+  };
+
+  const keepWorkspaceTodo = (todoId: string) => {
+    const previous = workspaceRef.current;
+    const current = previous.todos.find((todo) => todo.id === todoId);
+    if (!current) throw new Error("Todo no longer exists.");
+    const nextTodo = keepTodo(current, timestamp());
+    commitTodoWorkspace(
+      { ...previous, todos: previous.todos.map((todo) => todo.id === todoId ? nextTodo : todo) },
+      "Todo triaged; syncing workspace now."
+    );
+  };
+
+  const convertWorkspaceTodoToTask = (input: TodosPageConvertToTaskInput) => {
+    const result = convertTodoToTask(workspaceRef.current, { ...input, now: timestamp() });
+    if (!result.ok) throw new Error(result.message);
+    commitTodoWorkspace(result.workspace, "Todo converted to a Project task; syncing workspace now.");
+    window.setTimeout(() => routerNavigate(pathForRoute({ view: "project", selectedProjectId: result.task.projectId })), 0);
+  };
+
+  const convertWorkspaceTodoToProject = (input: TodosPageConvertToProjectInput) => {
+    const result = convertTodoToProject(workspaceRef.current, { ...input, now: timestamp() });
+    if (!result.ok) throw new Error(result.message);
+    commitTodoWorkspace(result.workspace, `Todo converted to a ${input.planningMethod === "shape-up" ? "Shape Up" : "OmniPlan"} Project; syncing workspace now.`);
+    window.setTimeout(() => routerNavigate(pathForRoute({ view: "project", selectedProjectId: result.project.id })), 0);
+  };
+
+  const convertProjectTaskToTodo = (taskId: string) => {
+    const previous = workspaceRef.current;
+    const impact = taskToTodoImpact(previous, taskId);
+    if (impact.requiresConfirmation) {
+      const accepted = window.confirm(`Move this Task to Todos? Project-only data will be permanently removed: ${impact.discardedFields.join(", ")}.`);
+      if (!accepted) return;
+    }
+    const result = convertTaskToTodo(previous, {
+      taskId,
+      confirmedImpact: impact.requiresConfirmation,
+      now: timestamp()
+    });
+    if (!result.ok) throw new Error(result.message);
+    commitTodoWorkspace(result.workspace, "Task converted to a standalone Todo; syncing workspace now.");
+    window.setTimeout(() => routerNavigate(pathForRoute({
+      view: "todos",
+      selectedProjectId,
+      target: result.todo.id
+    })), 0);
+  };
+
   const updateDependency = (dependencyId: string, patch: DependencyPatch) => {
     setWorkspace((previous) => {
       const current = previous.dependencies.find((dependency) => dependency.id === dependencyId);
@@ -1462,17 +1647,31 @@ function RoutedApp() {
       timeboxDays: 14,
       opportunityCost: ""
     };
+    const shapeUpPitch = values.planningMethod === "shape-up"
+      ? createShapeUpPitch({
+          problem: title,
+          appetiteKind: "small-batch",
+          solutionSketch: "",
+          rabbitHoles: "",
+          noGos: "",
+          successBaseline: "",
+          now: createdAt
+        })
+      : undefined;
     const project: Project = {
       id: projectId,
       name,
-      status: "active",
+      status: values.planningMethod === "shape-up" ? "waiting" : "active",
       mode: "build",
+      planningMethod: values.planningMethod,
+      stage: values.planningMethod === "shape-up" ? "shape" : "plan",
       priority: 3,
       northStar: title,
-      currentOutcome: title,
+      currentOutcome: values.planningMethod === "shape-up" ? "Shape the problem and decide whether to bet." : title,
       horizon: addSeconds(start, 14 * daySeconds),
       start,
       directionCard,
+      ...(shapeUpPitch ? { shapeUpPitch } : {}),
       reviewCadenceDays: 7
     };
     setWorkspace((previous) => ({
@@ -1483,7 +1682,7 @@ function RoutedApp() {
           projectId,
           `Create project ${name}`,
           "Created as an active project from the quick project composer.",
-          [{ entity: "Project", entityId: projectId, field: "created", before: null, after: { name, createdAt, status: "active", mode: "build" } }],
+          [{ entity: "Project", entityId: projectId, field: "created", before: null, after: { name, createdAt, status: project.status, mode: "build", planningMethod: values.planningMethod } }],
           previous.changeSets.length
         ),
         ...previous.changeSets
@@ -1538,6 +1737,27 @@ function RoutedApp() {
     });
   };
 
+  const updateOmniPlanStage = (projectId: string, stage: OmniPlanStage) => {
+    setWorkspace((previous) => {
+      const project = previous.projects.find((candidate) => candidate.id === projectId);
+      if (!project || isShapeUpProject(project) || project.stage === stage) return previous;
+      return {
+        ...previous,
+        projects: previous.projects.map((candidate) => candidate.id === projectId ? { ...candidate, planningMethod: "omniplan", stage } : candidate),
+        changeSets: [
+          createChangeSet(
+            projectId,
+            `Move ${project.name} to ${stage}`,
+            "Advanced the OmniPlan lifecycle without changing its permanent planning method.",
+            [{ entity: "Project", entityId: projectId, field: "stage", before: project.stage ?? "plan", after: stage }],
+            previous.changeSets.length
+          ),
+          ...previous.changeSets
+        ]
+      };
+    });
+  };
+
   const updateDirectionCard = (projectId: string, directionCard: DirectionCard) => {
     setWorkspace((previous) => {
       const project = previous.projects.find((candidate) => candidate.id === projectId);
@@ -1581,43 +1801,6 @@ function RoutedApp() {
     });
   };
 
-  const convertProjectToShapeUp = (projectId: string) => {
-    setWorkspace((previous) => {
-      const project = previous.projects.find((candidate) => candidate.id === projectId);
-      if (!project || project.shapeUpPitch) return previous;
-      const createdAt = timestamp();
-      const shapeUpPitch = createShapeUpPitch({
-        problem: project.directionCard?.userProblem || project.currentOutcome,
-        appetiteKind: "small-batch",
-        solutionSketch: "",
-        rabbitHoles: "",
-        noGos: "",
-        successBaseline: project.directionCard?.successMetric || "",
-        now: createdAt
-      });
-      const nextProject = {
-        ...project,
-        status: "waiting" as ProjectStatus,
-        currentOutcome: "Complete the Shape Up pitch and decide whether to bet.",
-        shapeUpPitch
-      };
-      return {
-        ...previous,
-        projects: previous.projects.map((candidate) => candidate.id === projectId ? nextProject : candidate),
-        changeSets: [
-          createChangeSet(
-            projectId,
-            `Convert ${project.name} to Shape Up`,
-            "Converted existing project into a waiting Shape Up pitch. Existing work remains stored but is not executable until bet rules allow it.",
-            [{ entity: "Project", entityId: projectId, field: "shapeUpPitch", before: null, after: shapeUpPitch }],
-            previous.changeSets.length
-          ),
-          ...previous.changeSets
-        ]
-      };
-    });
-  };
-
   const approveShapeUpBet = (projectId: string) => {
     setWorkspace((previous) => {
       const project = previous.projects.find((candidate) => candidate.id === projectId);
@@ -1629,6 +1812,7 @@ function RoutedApp() {
       const nextProject: Project = {
         ...project,
         status: "active",
+        stage: "build",
         currentOutcome: `Build the approved Shape Up bet by ${bet.cycleEnd.slice(0, 10)}.`,
         horizon: bet.cycleEnd,
         shapeUpPitch: nextPitch
@@ -1676,11 +1860,12 @@ function RoutedApp() {
         createdAt: approvedAt,
         sourceGateIds: [`gate-shapeup-bet-${projectId}`]
       };
+      const unlockedExistingWorkItems = unlockShapeUpTasksForBet(nextProject, previous.workItems);
 
       return {
         ...previous,
         projects: previous.projects.map((candidate) => candidate.id === projectId ? nextProject : candidate),
-        workItems: [cycleMarker, ...scopeWorkItems, ...previous.workItems],
+        workItems: [cycleMarker, ...scopeWorkItems, ...unlockedExistingWorkItems],
         auditDecisions: [auditDecision, ...previous.auditDecisions],
         changeSets: [
           createChangeSet(
@@ -1731,7 +1916,7 @@ function RoutedApp() {
     const previous = workspaceRef.current;
     const project = previous.projects.find((candidate) => candidate.id === projectId);
     if (!project || projectLifecycleStatus(project) === "done") return;
-    const nextProject = { ...project, status: "done" as const };
+    const nextProject = { ...project, status: "done" as const, stage: "close" as const };
     const nextWorkspace = {
       ...previous,
       projects: previous.projects.map((candidate) => candidate.id === projectId ? nextProject : candidate),
@@ -1794,7 +1979,7 @@ function RoutedApp() {
         createChangeSet(
           projectId,
           `Restore ${project.name}`,
-          "Returned the archived project to the active portfolio without changing its lifecycle status.",
+          "Returned the archived project to active Projects without changing its lifecycle status.",
           [
             { entity: "Project", entityId: projectId, field: "archived", before: true, after: false },
             { entity: "Project", entityId: projectId, field: "archivedAt", before: previousArchivedAt ?? null, after: null }
@@ -1844,7 +2029,7 @@ function RoutedApp() {
     setWorkspace(nextWorkspace);
     saveWorkspaceImmediately(nextWorkspace);
     pushWorkspaceSoon("Empty project deleted; syncing workspace now.");
-    navigate("portfolio", nextProjectId);
+    navigate("projects", nextProjectId);
   };
 
   const createWorkItem = (projectId: string, values: WorkItemCreateValues) => {
@@ -2531,6 +2716,61 @@ function RoutedApp() {
     ) : undefined;
   const activePlanningProjectIds = new Set(workspace.projects.filter((project) => !isProjectArchived(project)).map((project) => project.id));
   const openHardGateCount = model.gates.filter((gate) => activePlanningProjectIds.has(gate.projectId) && gate.severity === "hard" && gate.status !== "cleared").length;
+  const todayTodos = selectTodayTodos(workspace.todos, clockNow, workspace.timeZone);
+
+  if (!workspacePersistence.loaded) {
+    return (
+      <main className="flex min-h-screen items-center justify-center bg-background p-6 text-foreground">
+        <Card className="w-full max-w-xl">
+          <CardHeader>
+            <CardTitle>{workspacePersistence.loadFailed ? "Workspace was not opened" : "Opening workspace..."}</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <p className="text-sm text-muted-foreground" role={workspacePersistence.loadFailed ? "alert" : "status"}>
+              {workspacePersistence.status}
+            </p>
+            {workspacePersistence.loadFailed && (
+              <>
+                <p className="text-sm text-muted-foreground">
+                  Your stored workspace was left unchanged. Saving and Firebase sync are blocked to prevent an empty workspace from replacing it.
+                </p>
+                <Button type="button" onClick={() => window.location.reload()}>Reload</Button>
+              </>
+            )}
+          </CardContent>
+        </Card>
+      </main>
+    );
+  }
+
+  if (localWorkspaceConflictRef.current || firebaseSettingsConflictRef.current) {
+    const conflictMessage = localWorkspaceConflictRef.current
+      ? workspacePersistence.status
+      : autoSyncStatus.message;
+    const exportConflictBranch = () => {
+      const payload = workspaceRepository.exportWorkspace(workspaceRef.current);
+      downloadText(`omni-plan-conflict-branch-${new Date().toISOString().replace(/[:.]/g, "-")}.json`, payload, "application/json");
+    };
+    return (
+      <main className="flex min-h-screen items-center justify-center bg-background p-6 text-foreground">
+        <Card className="w-full max-w-xl">
+          <CardHeader>
+            <CardTitle>Workspace conflict paused this tab</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <p className="text-sm text-muted-foreground" role="alert">{conflictMessage}</p>
+            <p className="text-sm text-muted-foreground">
+              Editing, local saving, and Firebase sync are paused. Export this tab&apos;s current branch before reloading so neither version is lost.
+            </p>
+            <div className="flex flex-wrap gap-2">
+              <Button type="button" onClick={exportConflictBranch}><FileDown />Export current branch</Button>
+              <Button type="button" variant="outline" onClick={() => window.location.reload()}>Reload stored version</Button>
+            </div>
+          </CardContent>
+        </Card>
+      </main>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-background text-foreground">
@@ -2562,31 +2802,41 @@ function RoutedApp() {
           </Button>
         </div>
         <nav className="space-y-1" aria-label="Primary">
-          <NavButton collapsed={sidebarCollapsed} active={view === "portfolio"} icon={<Home />} label="Portfolio" href={hashForRoute({ view: "portfolio", selectedProjectId })} />
-          <NavButton collapsed={sidebarCollapsed} active={view === "project"} icon={<Workflow />} label="Project" href={hashForRoute({ view: "project", selectedProjectId })} />
-          <NavButton collapsed={sidebarCollapsed} active={view === "calendar"} icon={<CalendarClock />} label="Calendar" href={hashForRoute({ view: "calendar", selectedProjectId })} />
           <NavButton collapsed={sidebarCollapsed} active={view === "today"} icon={<Timer />} label="Today" href={hashForRoute({ view: "today", selectedProjectId })} />
-          <NavButton collapsed={sidebarCollapsed} active={view === "audit"} icon={<ShieldAlert />} label="Audit" href={hashForRoute({ view: "audit", selectedProjectId })} />
-          <NavButton collapsed={sidebarCollapsed} active={view === "reports"} icon={<FileDown />} label="Reports" href={hashForRoute({ view: "reports", selectedProjectId })} />
-          <NavButton collapsed={sidebarCollapsed} active={view === "agent"} icon={<ClipboardCheck />} label="Agent" href={hashForRoute({ view: "agent", selectedProjectId })} />
-          <NavButton collapsed={sidebarCollapsed} active={view === "settings"} icon={<KeyRound />} label="Settings" href={hashForRoute({ view: "settings", selectedProjectId })} />
+          <NavButton collapsed={sidebarCollapsed} active={view === "todos"} icon={<ListTodo />} label="Todos" href={hashForRoute({ view: "todos", selectedProjectId })} />
+          <NavButton collapsed={sidebarCollapsed} active={view === "projects" || view === "portfolio" || view === "project"} icon={<Layers3 />} label="Projects" href={hashForRoute({ view: "projects", selectedProjectId })} />
+          <NavButton collapsed={sidebarCollapsed} active={view === "review" || view === "audit"} icon={<ClipboardCheck />} label="Review" href={hashForRoute({ view: "review", selectedProjectId })} />
         </nav>
+        <Button
+          type="button"
+          className={cn("sidebarQuickCaptureButton mt-3", sidebarCollapsed && "justify-center px-0")}
+          aria-label="Add Todo"
+          aria-keyshortcuts="Meta+N Control+N"
+          title={sidebarCollapsed ? "Add Todo (Cmd/Ctrl+N)" : undefined}
+          onClick={() => openQuickCapture(false)}
+        >
+          <Plus aria-hidden="true" />
+          {!sidebarCollapsed && <span>Add Todo</span>}
+          {!sidebarCollapsed && <kbd>⌘N</kbd>}
+        </Button>
         <Separator className="my-4" />
         {sidebarCollapsed ? (
         <div className="flex justify-center">
           <IconStatusBadge
             variant={openHardGateCount ? "destructive" : "success"}
-            status={openHardGateCount ? `${openHardGateCount} hard gates require review` : "Audit clear"}
+            status={openHardGateCount ? `${openHardGateCount} priority signals need review` : "Review clear"}
             icon={openHardGateCount ? <ShieldAlert /> : <CheckCircle2 />}
           />
         </div>
         ) : (
         <div className="space-y-2 rounded-lg border bg-muted/40 p-3 text-xs text-muted-foreground">
           <div className="font-medium text-foreground">{asOfLabel}</div>
-          <div>{openHardGateCount ? `${openHardGateCount} hard gates require review` : "Audit clear"}</div>
+          <div>{openHardGateCount ? `${openHardGateCount} priority signals need review` : "Review clear"}</div>
         </div>
         )}
         <Separator className="mb-3 mt-auto" />
+        <NavButton collapsed={sidebarCollapsed} active={view === "settings" || view === "agent"} icon={<SettingsIcon />} label="Settings" href={hashForRoute({ view: "settings", selectedProjectId })} />
+        <Separator className="my-3" />
         <div
           className={cn(
             "flex min-h-9 items-center rounded-md border bg-muted/20 text-xs text-muted-foreground",
@@ -2604,21 +2854,42 @@ function RoutedApp() {
       </aside>
 
       <div className={cn("desktopContent", sidebarCollapsed ? "lg:pl-20" : "lg:pl-64")}>
-        <nav className="fixed inset-x-3 bottom-3 z-30 grid grid-cols-8 rounded-xl border bg-card/95 p-1 shadow-lg backdrop-blur lg:hidden" aria-label="Mobile primary">
-          <NavButton active={view === "portfolio"} icon={<Home />} label="Portfolio" href={hashForRoute({ view: "portfolio", selectedProjectId })} />
-          <NavButton active={view === "project"} icon={<Workflow />} label="Project" href={hashForRoute({ view: "project", selectedProjectId })} />
-          <NavButton active={view === "calendar"} icon={<CalendarClock />} label="Calendar" href={hashForRoute({ view: "calendar", selectedProjectId })} />
+        <nav className="fixed inset-x-3 bottom-3 z-30 grid grid-cols-4 rounded-xl border bg-card/95 p-1 shadow-lg backdrop-blur lg:hidden" aria-label="Mobile primary">
           <NavButton active={view === "today"} icon={<Timer />} label="Today" href={hashForRoute({ view: "today", selectedProjectId })} />
-          <NavButton active={view === "audit"} icon={<ShieldAlert />} label="Audit" href={hashForRoute({ view: "audit", selectedProjectId })} />
-          <NavButton active={view === "reports"} icon={<FileDown />} label="Reports" href={hashForRoute({ view: "reports", selectedProjectId })} />
-          <NavButton active={view === "agent"} icon={<ClipboardCheck />} label="Agent" href={hashForRoute({ view: "agent", selectedProjectId })} />
-          <NavButton active={view === "settings"} icon={<KeyRound />} label="Settings" href={hashForRoute({ view: "settings", selectedProjectId })} />
+          <NavButton active={view === "todos"} icon={<ListTodo />} label="Todos" href={hashForRoute({ view: "todos", selectedProjectId })} />
+          <NavButton active={view === "projects" || view === "portfolio" || view === "project"} icon={<Layers3 />} label="Projects" href={hashForRoute({ view: "projects", selectedProjectId })} />
+          <NavButton active={view === "review" || view === "audit"} icon={<ClipboardCheck />} label="Review" href={hashForRoute({ view: "review", selectedProjectId })} />
         </nav>
         <main className="px-4 py-4 pb-24 lg:px-6 lg:pb-8" aria-labelledby="page-title">
         <h1 id="page-title" ref={pageTitleRef} tabIndex={-1} className="srOnly">{viewTitle(view, selectedProjectName)}</h1>
         <div className="routeAnnouncer" aria-live="polite">{breadcrumbFor(view, selectedProjectName)}</div>
+        {(autoSyncStatus.state === "conflict" || autoSyncStatus.state === "error") && (
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-destructive/30 bg-destructive/10 p-3 text-sm" role="alert">
+            <span>{autoSyncStatus.message}</span>
+            <a className="font-medium underline underline-offset-4" href={hashForRoute({ view: "settings", selectedProjectId })}>Open Settings</a>
+          </div>
+        )}
 
-        {view === "portfolio" && (
+        {view === "todos" && (
+          <TodosPage
+            snapshot={workspace}
+            initialFilter={route.target ? "all" : "inbox"}
+            selectedTodoId={route.target}
+            onSelectionChange={(todoId) => routerNavigate(pathForRoute({
+              view: "todos",
+              selectedProjectId,
+              target: todoId
+            }), { replace: true })}
+            onUpdateTodo={updateWorkspaceTodo}
+            onCompleteTodo={completeWorkspaceTodo}
+            onRestoreTodo={restoreWorkspaceTodo}
+            onKeepAsTodo={keepWorkspaceTodo}
+            onConvertToTask={convertWorkspaceTodoToTask}
+            onConvertToProject={convertWorkspaceTodoToProject}
+            onRequestCreateProject={() => navigate("projects")}
+          />
+        )}
+        {(view === "projects" || view === "portfolio") && (
           <PortfolioDashboard
             projects={workspace.projects}
             schedules={model.schedules}
@@ -2649,14 +2920,15 @@ function RoutedApp() {
             evidence={workspace.evidence.filter((item) => item.projectId === selectedProject.id)}
             onProjectChange={(projectId) => navigate("project", projectId)}
             onProjectStatusUpdate={updateProjectStatus}
+            onOmniPlanStageUpdate={updateOmniPlanStage}
             onProjectDetailsUpdate={updateProjectDetails}
             onDirectionCardUpdate={updateDirectionCard}
             onShapeUpPitchUpdate={updateShapeUpPitch}
             onShapeUpBetApprove={approveShapeUpBet}
-            onShapeUpConvert={convertProjectToShapeUp}
             onWorkItemCreate={createWorkItem}
             onWorkItemScheduleUpdate={updateWorkItemSchedule}
             onWorkItemMove={moveWorkItem}
+            onTaskConvertToTodo={convertProjectTaskToTodo}
             onWorkItemRepeatRuleUpdate={updateWorkItemRepeatRule}
             onAutomaticRuleStop={stopAutomaticRule}
             onDependencyCreate={createDependency}
@@ -2683,17 +2955,28 @@ function RoutedApp() {
           <EmptyWorkspacePanel onProjectCreate={createProject} />
         )}
         {view === "today" && (
-          <TodayExecution
-            workspace={workspace}
-            schedules={model.schedules}
-            projects={workspace.projects}
-            gates={model.gates}
-            onActualRecord={recordActual}
-            currentTime={clockNow}
-            onOccurrenceSkip={skipAutomaticOccurrence}
-            onOccurrenceReschedule={rescheduleAutomaticOccurrence}
-            onOccurrenceException={reportAutomaticOccurrenceException}
-          />
+          <div className="todayWorkspace">
+            <TodayTodosPanel
+              todos={todayTodos}
+              currentTime={clockNow}
+              timeZone={workspace.timeZone}
+              onAddTodo={() => openQuickCapture(true)}
+              onCompleteTodo={completeWorkspaceTodo}
+              onUpdateTodo={updateWorkspaceTodo}
+              todoHref={(todoId) => hashForRoute({ view: "todos", selectedProjectId, target: todoId })}
+            />
+            <TodayExecution
+              workspace={workspace}
+              schedules={model.schedules}
+              projects={workspace.projects}
+              gates={model.gates}
+              onActualRecord={recordActual}
+              currentTime={clockNow}
+              onOccurrenceSkip={skipAutomaticOccurrence}
+              onOccurrenceReschedule={rescheduleAutomaticOccurrence}
+              onOccurrenceException={reportAutomaticOccurrenceException}
+            />
+          </div>
         )}
         {view === "calendar" && (
           <CalendarView
@@ -2708,7 +2991,7 @@ function RoutedApp() {
             onOccurrenceException={reportAutomaticOccurrenceException}
           />
         )}
-        {view === "audit" && (
+        {(view === "review" || view === "audit") && (
           <AuditQueue
             projects={workspace.projects}
             schedules={model.schedules}
@@ -2779,35 +3062,57 @@ function RoutedApp() {
         )}
         </main>
       </div>
+      <Button
+        type="button"
+        size="icon"
+        className="quickCaptureFab lg:hidden"
+        aria-label="Add Todo"
+        onClick={() => openQuickCapture(view === "today")}
+      >
+        <Plus aria-hidden="true" />
+      </Button>
+      <QuickCaptureSheet
+        open={quickCaptureOpen}
+        defaultPlanForToday={quickCaptureForToday}
+        todayLabel={zonedDateKey(clockNow, workspace.timeZone)}
+        onOpenChange={setQuickCaptureOpen}
+        onCapture={captureTodo}
+      />
     </div>
   );
 }
 
 function viewTitle(view: View, projectName: string) {
   switch (view) {
+    case "todos":
+      return "Todos";
+    case "projects":
     case "portfolio":
-      return "Portfolio Control";
+      return "Projects";
     case "project":
       return projectName;
     case "calendar":
-      return "Calendar";
+      return "Today Calendar";
     case "today":
-      return "Today Execution";
+      return "Today";
+    case "review":
     case "audit":
-      return "Audit Queue";
+      return "Review";
     case "reports":
       return "Reports";
     case "agent":
-      return "Agent";
+      return "Settings / Agent";
     case "settings":
-      return "Secrets & Storage";
+      return "Settings";
   }
 }
 
 function breadcrumbFor(view: View, projectName: string) {
-  if (view === "portfolio") return "Portfolio";
-  if (view === "project") return `Portfolio / ${projectName}`;
-  return `Portfolio / ${viewTitle(view, projectName)}`;
+  if (view === "projects" || view === "portfolio") return "Projects";
+  if (view === "project") return `Projects / ${projectName}`;
+  if (view === "calendar") return "Today / Calendar";
+  if (view === "agent") return "Settings / Agent";
+  return viewTitle(view, projectName);
 }
 
 function NavButton({
@@ -2838,6 +3143,215 @@ function NavButton({
       {icon}
       <span className={collapsed ? "hidden" : "hidden lg:inline"}>{label}</span>
     </a>
+  );
+}
+
+function QuickCaptureSheet({
+  open,
+  defaultPlanForToday,
+  todayLabel,
+  onOpenChange,
+  onCapture
+}: {
+  open: boolean;
+  defaultPlanForToday: boolean;
+  todayLabel: string;
+  onOpenChange: (open: boolean) => void;
+  onCapture: (title: string, planForToday: boolean) => void;
+}) {
+  const [title, setTitle] = useState("");
+  const [planForToday, setPlanForToday] = useState(defaultPlanForToday);
+  const [error, setError] = useState("");
+  const titleInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    setTitle("");
+    setPlanForToday(defaultPlanForToday);
+    setError("");
+  }, [defaultPlanForToday, open]);
+
+  return (
+    <Sheet open={open} onOpenChange={onOpenChange}>
+      <SheetContent
+        className="quickCaptureSheet w-[94vw] sm:max-w-md"
+        onOpenAutoFocus={(event) => {
+          event.preventDefault();
+          window.requestAnimationFrame(() => titleInputRef.current?.focus());
+        }}
+      >
+        <SheetHeader>
+          <div className="quickCaptureSheet__context">
+            <span>{planForToday ? <Timer aria-hidden="true" /> : <Inbox aria-hidden="true" />}</span>
+            {planForToday ? `Today · ${todayLabel}` : "Inbox"}
+          </div>
+          <SheetTitle>Quick capture</SheetTitle>
+          <SheetDescription>
+            Start with a Todo. You can promote it to a Task or Project when it needs structure.
+          </SheetDescription>
+        </SheetHeader>
+        <form
+          className="quickCaptureForm"
+          onSubmit={(event) => {
+            event.preventDefault();
+            const nextTitle = title.trim();
+            if (!nextTitle) {
+              setError("Write the next thing you want to remember.");
+              titleInputRef.current?.focus();
+              return;
+            }
+            try {
+              onCapture(nextTitle, planForToday);
+              setTitle("");
+              setError("");
+              onOpenChange(false);
+            } catch (captureError) {
+              setError(captureError instanceof Error ? captureError.message : "This Todo could not be captured.");
+            }
+          }}
+        >
+          <label className="quickCaptureTitleField">
+            <span>Todo</span>
+            <Input
+              ref={titleInputRef}
+              value={title}
+              onChange={(event) => {
+                setTitle(event.target.value);
+                if (error) setError("");
+              }}
+              placeholder="What needs your attention?"
+              autoComplete="off"
+              enterKeyHint="done"
+            />
+          </label>
+          <label className="quickCaptureTodayToggle" data-active={planForToday ? "true" : "false"}>
+            <input
+              type="checkbox"
+              checked={planForToday}
+              onChange={(event) => setPlanForToday(event.target.checked)}
+            />
+            <span className="quickCaptureTodayToggle__icon"><CalendarClock aria-hidden="true" /></span>
+            <span>
+              <strong>Plan for Today</strong>
+              <small>{planForToday ? `Visible in Today for ${todayLabel}` : "Keep it in Inbox until you triage it"}</small>
+            </span>
+          </label>
+          {error && <p className="quickCaptureError" role="alert">{error}</p>}
+          <div className="quickCaptureActions">
+            <SheetClose asChild>
+              <Button type="button" variant="outline">Cancel</Button>
+            </SheetClose>
+            <Button type="submit" disabled={!title.trim()}>
+              <Plus aria-hidden="true" /> Add Todo <kbd>Enter</kbd>
+            </Button>
+          </div>
+        </form>
+      </SheetContent>
+    </Sheet>
+  );
+}
+
+function TodayTodosPanel({
+  todos,
+  currentTime,
+  timeZone,
+  onAddTodo,
+  onCompleteTodo,
+  onUpdateTodo,
+  todoHref
+}: {
+  todos: Todo[];
+  currentTime: string;
+  timeZone: string;
+  onAddTodo: () => void;
+  onCompleteTodo: (todoId: string) => void;
+  onUpdateTodo: (todoId: string, patch: TodoUpdatePatch) => void;
+  todoHref: (todoId: string) => string;
+}) {
+  const [actionError, setActionError] = useState("");
+  const todosPage = usePagedItems(todos, 8);
+  const todayKey = zonedDateKey(currentTime, timeZone);
+
+  const runTodoAction = (action: () => void) => {
+    setActionError("");
+    try {
+      action();
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : "This Todo changed elsewhere. Refresh and try again.");
+    }
+  };
+
+  return (
+    <Card id="today-todos" className="todayTodosCard">
+      <CardHeader className="compactCardHeader">
+        <div className="cardHeaderLine">
+          <div>
+            <CardTitle className="flex items-center gap-2"><ListTodo className="h-4 w-4" /> Today Todos</CardTitle>
+            <CardDescription className="mt-1">Independent work for today, before it needs a Project.</CardDescription>
+          </div>
+          <div className="cardHeaderBadges">
+            <Badge variant={todos.length ? "secondary" : "success"} className="iconBadge" title={`${todos.length} open Todos today`}>
+              <CheckCircle2 />{todos.length}
+            </Badge>
+            <Button type="button" size="sm" onClick={onAddTodo}>
+              <Plus aria-hidden="true" /> Add Todo
+            </Button>
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent className="todayTodoContent">
+        {todos.length ? (
+          <ul className="todayTodoList" aria-label="Todos planned or due today">
+            {todosPage.items.map((todo) => {
+              const checklistDone = todo.checklist.filter((item) => item.completed).length;
+              const dueToday = todo.dueAt ? zonedDateKey(todo.dueAt, timeZone) <= todayKey : false;
+              const plannedToday = todo.plannedForDate ? zonedDateKey(todo.plannedForDate, timeZone) === todayKey : false;
+              return (
+                <li className="todayTodoRow" key={todo.id}>
+                  <button
+                    type="button"
+                    className="todayTodoComplete"
+                    aria-label={`Complete ${todo.title}`}
+                    onClick={() => runTodoAction(() => onCompleteTodo(todo.id))}
+                  >
+                    <Circle aria-hidden="true" />
+                  </button>
+                  <div className="todayTodoMain">
+                    <a className="todayTodoTitle" href={todoHref(todo.id)}>{todo.title}</a>
+                    <div className="todayTodoMeta">
+                      {plannedToday && <Badge variant="secondary" className="todayIconBadge"><Timer />Planned</Badge>}
+                      {dueToday && <Badge variant="warning" className="todayIconBadge"><CalendarClock />Due</Badge>}
+                      {todo.checklist.length > 0 && (
+                        <Badge variant="outline" className="todayIconBadge"><CheckCircle2 />{checklistDone}/{todo.checklist.length}</Badge>
+                      )}
+                      {todo.tags.slice(0, 2).map((tag) => <span className="todayTodoTag" key={tag}>#{tag}</span>)}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    className="todayTodoFlag"
+                    data-active={todo.flagged ? "true" : "false"}
+                    aria-label={todo.flagged ? `Unflag ${todo.title}` : `Flag ${todo.title}`}
+                    aria-pressed={todo.flagged}
+                    onClick={() => runTodoAction(() => onUpdateTodo(todo.id, { flagged: !todo.flagged }))}
+                  >
+                    <Flag aria-hidden="true" />
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        ) : (
+          <button type="button" className="todayTodoEmpty" onClick={onAddTodo}>
+            <CheckCircle2 aria-hidden="true" />
+            <span><strong>No Todos for today</strong><small>Capture one here without creating a Project.</small></span>
+            <Plus aria-hidden="true" />
+          </button>
+        )}
+        {actionError && <p className="quickCaptureError" role="alert">{actionError}</p>}
+        <PaginationControls label="today Todos" {...todosPage} onPageChange={todosPage.setPage} />
+      </CardContent>
+    </Card>
   );
 }
 
@@ -2898,7 +3412,7 @@ function ArchivedProjectsSheet({
       <SheetContent className="flex w-[94vw] flex-col overflow-hidden pb-[max(1.25rem,env(safe-area-inset-bottom))] pt-[max(1.25rem,env(safe-area-inset-top))] sm:max-w-lg">
         <SheetHeader>
           <SheetTitle className="text-balance">Archived projects</SheetTitle>
-          <SheetDescription className="text-pretty">Open a project without restoring it, or return it to the active portfolio.</SheetDescription>
+          <SheetDescription className="text-pretty">Open a project without restoring it, or return it to active Projects.</SheetDescription>
         </SheetHeader>
         <div className="mt-4 grid min-h-0 flex-1 gap-3">
           <label>
@@ -2946,7 +3460,7 @@ function ArchivedProjectsSheet({
                       size="icon"
                       onClick={() => {
                         searchInputRef.current?.focus();
-                        setAnnouncement(`${project.name} restored to the active portfolio.`);
+                        setAnnouncement(`${project.name} restored to active Projects.`);
                         onRestore(project.id);
                       }}
                       aria-label={`Restore project ${project.name}`}
@@ -3035,7 +3549,7 @@ function PortfolioDashboard({
       <section className="grid gap-3">
         <div className="portfolioHeader">
           <div className="min-w-0">
-            <h2 className="text-lg font-semibold tracking-tight">Portfolio workspace</h2>
+            <h2 className="text-lg font-semibold tracking-tight">Projects</h2>
             <div className="compactBadgeRow">
               <Badge variant="outline" className="iconBadge" title="No local projects"><Layers3 />0 active</Badge>
               <Badge variant="success" className="iconBadge" title="No hard gates"><AlertTriangle />0</Badge>
@@ -3111,14 +3625,14 @@ function PortfolioDashboard({
     ? `${pressureMatrixItems.length} project${pressureMatrixItems.length === 1 ? "" : "s"} need attention before more scope`
     : `${pushMatrixItems.length} project${pushMatrixItems.length === 1 ? "" : "s"} can keep moving`;
   const matrixDetail = pressureMatrixItems.length
-    ? `${formatCompactProjectList(matrixLeadItems.map((item) => item.project))} carries the most visible pressure in this portfolio.`
+    ? `${formatCompactProjectList(matrixLeadItems.map((item) => item.project))} carries the most visible pressure across Projects.`
     : "No high-pressure cluster is visible; keep paused backlog work parked until you choose to promote it.";
 
   return (
     <section className="grid gap-3">
       <div className="portfolioHeader">
         <div className="min-w-0">
-          <h2 className="text-lg font-semibold tracking-tight">Portfolio workspace</h2>
+          <h2 className="text-lg font-semibold tracking-tight">Projects</h2>
           <div className="compactBadgeRow">
             <Badge variant="secondary" className="iconBadge" title="Active delivery projects"><Layers3 />{activeDeliveryProjects.length} active</Badge>
             <Badge variant={openHardGates ? "destructive" : "success"} className="iconBadge" title="Open hard gates"><AlertTriangle />{openHardGates}</Badge>
@@ -3368,7 +3882,7 @@ function PortfolioDashboard({
               <span className="axis y">Risk</span>
             </div>
             <div className="matrixLegend">
-              <span><i className="legendLine legendRelative" /> Relative position inside this portfolio</span>
+              <span><i className="legendLine legendRelative" /> Relative position across Projects</span>
               <span><i className="legendDot active" /> Active</span>
               <span><i className="legendDot paused" /> Paused</span>
               <span><i className="legendGate" /> Hard gate</span>
@@ -3395,7 +3909,8 @@ function PortfolioDashboard({
 function CreateProjectSheet({ onCreate }: { onCreate: (values: ProjectCreateValues) => void }) {
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState<ProjectCreateValues>({
-    title: ""
+    title: "",
+    planningMethod: "omniplan"
   });
   const update = (patch: Partial<ProjectCreateValues>) => setDraft((current) => ({ ...current, ...patch }));
 
@@ -3404,7 +3919,7 @@ function CreateProjectSheet({ onCreate }: { onCreate: (values: ProjectCreateValu
     if (!draft.title.trim()) return;
     onCreate(draft);
     setOpen(false);
-    setDraft({ title: "" });
+    setDraft({ title: "", planningMethod: "omniplan" });
   };
 
   return (
@@ -3422,10 +3937,33 @@ function CreateProjectSheet({ onCreate }: { onCreate: (values: ProjectCreateValu
         </SheetHeader>
         <form className="quickProjectForm" onSubmit={submit}>
           <FormTextarea label="Title / problem" value={draft.title} onChange={(value) => update({ title: value })} placeholder="What needs to be made visible and actionable?" />
+          <fieldset className="projectMethodChoice">
+            <legend>Planning method</legend>
+            <label data-selected={draft.planningMethod === "omniplan" ? "true" : "false"}>
+              <input
+                type="radio"
+                name="project-planning-method"
+                value="omniplan"
+                checked={draft.planningMethod === "omniplan"}
+                onChange={() => update({ planningMethod: "omniplan" })}
+              />
+              <span><strong>OmniPlan</strong><small>Start with tasks; add scheduling depth when needed.</small></span>
+            </label>
+            <label data-selected={draft.planningMethod === "shape-up" ? "true" : "false"}>
+              <input
+                type="radio"
+                name="project-planning-method"
+                value="shape-up"
+                checked={draft.planningMethod === "shape-up"}
+                onChange={() => update({ planningMethod: "shape-up" })}
+              />
+              <span><strong>Shape Up</strong><small>Shape, bet, then build inside confirmed scope.</small></span>
+            </label>
+          </fieldset>
           <div className="quickProjectDefaults" aria-label="Project defaults">
-            <Badge variant="success" className="iconBadge" title="Lifecycle status"><CheckCircle2 />active</Badge>
-            <Badge variant="secondary" className="iconBadge" title="Mode"><Workflow />build</Badge>
-            <Badge variant="outline" className="iconBadge" title="Start date"><CalendarClock />today</Badge>
+            <Badge variant="success" className="iconBadge" title="Planning method"><Workflow />{draft.planningMethod === "shape-up" ? "Shape Up" : "OmniPlan"}</Badge>
+            <Badge variant="secondary" className="iconBadge" title="Opening stage"><Layers3 />{draft.planningMethod === "shape-up" ? "Shape" : "Plan"}</Badge>
+            <Badge variant="outline" className="iconBadge" title="Method is permanent"><Lock />fixed</Badge>
           </div>
           <Button type="submit" disabled={!draft.title.trim()}><Plus />Create project</Button>
         </form>
@@ -3454,14 +3992,15 @@ function ProjectWorkspace({
   evidence,
   onProjectChange,
   onProjectStatusUpdate,
+  onOmniPlanStageUpdate,
   onProjectDetailsUpdate,
   onDirectionCardUpdate,
   onShapeUpPitchUpdate,
   onShapeUpBetApprove,
-  onShapeUpConvert,
   onWorkItemCreate,
   onWorkItemScheduleUpdate,
   onWorkItemMove,
+  onTaskConvertToTodo,
   onWorkItemRepeatRuleUpdate,
   onAutomaticRuleStop,
   onDependencyCreate,
@@ -3497,14 +4036,15 @@ function ProjectWorkspace({
   evidence: Evidence[];
   onProjectChange: (projectId: string) => void;
   onProjectStatusUpdate: (projectId: string, status: ProjectStatus) => void;
+  onOmniPlanStageUpdate: (projectId: string, stage: OmniPlanStage) => void;
   onProjectDetailsUpdate: (projectId: string, patch: ProjectDetailsPatch) => void;
   onDirectionCardUpdate: (projectId: string, directionCard: DirectionCard) => void;
   onShapeUpPitchUpdate: (projectId: string, pitch: ShapeUpPitch) => void;
   onShapeUpBetApprove: (projectId: string) => void;
-  onShapeUpConvert: (projectId: string) => void;
   onWorkItemCreate: (projectId: string, values: WorkItemCreateValues) => void;
   onWorkItemScheduleUpdate: (projectId: string, workItemId: string, values: WorkItemStartConstraintValues) => void;
   onWorkItemMove: (sourceProjectId: string, workItemId: string, values: WorkItemMoveValues) => void;
+  onTaskConvertToTodo: (workItemId: string) => void;
   onWorkItemRepeatRuleUpdate: (projectId: string, workItemId: string, repeatRule?: RepeatRule, description?: string) => void;
   onAutomaticRuleStop: (workItemId: string) => void;
   onDependencyCreate: (projectId: string, values: DependencyCreateValues) => void;
@@ -3575,12 +4115,23 @@ function ProjectWorkspace({
                 testId="project-status-selector"
                 disabled={projectArchived}
               />
+              {!isShapeUpProject(project) && (
+                <NativeSelectField
+                  label="Stage"
+                  value={(project.stage ?? "plan") as OmniPlanStage}
+                  onChange={(value) => onOmniPlanStageUpdate(project.id, value as OmniPlanStage)}
+                  options={omniPlanStages.map((stage) => ({ value: stage, label: stage }))}
+                  testId="project-planning-stage-selector"
+                  disabled={projectArchived}
+                />
+              )}
             </div>
             <div className="flex flex-wrap gap-2">
-              <Badge variant="secondary" className="iconBadge" title="Project mode"><Workflow />{project.mode}</Badge>
+              <Badge variant="secondary" className="iconBadge" title="Planning method"><Workflow />{isShapeUpProject(project) ? "Shape Up" : "OmniPlan"}</Badge>
+              <Badge variant="outline" className="iconBadge" title="Planning method is permanent"><Lock />{project.stage ?? (isShapeUpProject(project) ? "shape" : "plan")}</Badge>
               {projectArchived && <Badge variant="outline" className="iconBadge" title="Archived project is read-only"><Lock />read only</Badge>}
               <Badge variant="outline" className="iconBadge" title="Horizon"><CalendarClock />{project.horizon.slice(5, 10)}</Badge>
-              <Badge variant={blockingGate ? "destructive" : "success"} className="iconBadge" title={blockingGate?.reason ?? "No blocker"}>{blockingGate ? <Lock /> : <CheckCircle2 />}{blockingGate ? "gate" : "clear"}</Badge>
+              <Badge variant={blockingGate ? "warning" : "success"} className="iconBadge" title={blockingGate?.reason ?? "No priority review signal"}>{blockingGate ? <ClipboardCheck /> : <CheckCircle2 />}{blockingGate ? "review" : "clear"}</Badge>
             </div>
             <div className="projectDailyActions">
               {projectArchived && (
@@ -3593,9 +4144,6 @@ function ProjectWorkspace({
                   project={project}
                   onProjectDetailsUpdate={onProjectDetailsUpdate}
                   onDirectionCardUpdate={onDirectionCardUpdate}
-                  onShapeUpPitchUpdate={onShapeUpPitchUpdate}
-                  onShapeUpBetApprove={onShapeUpBetApprove}
-                  onShapeUpConvert={onShapeUpConvert}
                 />
               )}
               {canDeleteProject && !projectArchived && (
@@ -3643,11 +4191,26 @@ function ProjectWorkspace({
 
           <div className="projectSignalTiles">
             <SummaryTile label={next ? `${scheduleTiming(next)} action` : "Next action"} value={next?.workItem.title ?? "No open scheduled work"} detail={next ? `${formatScheduleRange(next)} / ${next.isCritical ? "critical path" : "non-critical"}` : "Review baselines before adding more work."} />
-            <SummaryTile label="Audit state" value={blockingGate ? "Blocked by hard gate" : "No hard blocker"} detail={blockingGate?.reason ?? "Warnings still need review before milestone closure."} tone={blockingGate ? "danger" : "default"} />
+            <SummaryTile label="Review" value={blockingGate ? "Priority signal" : "No priority signal"} detail={blockingGate?.reason ?? "Review stays advisory during execution."} tone={blockingGate ? "warning" : "default"} />
             <SummaryTile label="Evidence" value={formatFreshness(health?.evidenceFreshnessDays)} detail={latestEvidence?.summary ?? "Attach evidence before marking the next milestone complete."} />
           </div>
         </CardContent>
       </Card>
+
+      {isShapeUpProject(project) && (
+        <section className="shapeUpCurrentStage" aria-label="Current Shape Up stage">
+          <div className="shapeUpStageHeader">
+            <Badge variant="secondary"><Target />Current stage</Badge>
+            <strong>{isShapeUpBet(project) ? "Build" : isShapeUpPitchComplete(project.shapeUpPitch) ? "Bet" : "Shape"}</strong>
+            {!isShapeUpBet(project) && <Badge variant="outline"><Lock />Build locked</Badge>}
+          </div>
+          <ShapeUpProjectPanel
+            project={project}
+            onSave={(pitch) => onShapeUpPitchUpdate(project.id, pitch)}
+            onBet={() => onShapeUpBetApprove(project.id)}
+          />
+        </section>
+      )}
 
       <Tabs key={`${project.id}-${tabTarget}`} defaultValue={tabTarget} className="w-full">
         <TabsList className="projectTabs grid h-auto min-h-9 w-full grid-cols-3 gap-1 sm:grid-cols-6 lg:w-auto">
@@ -3658,7 +4221,7 @@ function ProjectWorkspace({
           <TabsTrigger value="baselines">Baselines</TabsTrigger>
           <TabsTrigger value="reports">Reports</TabsTrigger>
         </TabsList>
-        <TabsContent value="plan" className="grid gap-4 xl:grid-cols-[minmax(320px,0.78fr)_minmax(0,1.22fr)]">
+        <TabsContent value="plan" className="grid gap-4">
           <fieldset disabled={projectArchived} aria-disabled={projectArchived || undefined} className="contents">
           <Card>
             <CardHeader className="compactCardHeader">
@@ -3688,6 +4251,7 @@ function ProjectWorkspace({
                   currentTime={currentTime}
                   onScheduleItem={(workItemId, values) => onWorkItemScheduleUpdate(project.id, workItemId, values)}
                   onMoveItem={(workItemId, values) => onWorkItemMove(project.id, workItemId, values)}
+                  onConvertToTodo={onTaskConvertToTodo}
                   onFinishItem={(item) => {
                     const plannedHours = Math.max(1, formatAssignmentHours(item) || Math.round(item.workItem.durationSeconds / 3600));
                     onActualRecord(project.id, item.workItem.id, {
@@ -3709,6 +4273,7 @@ function ProjectWorkspace({
                 currentTime={currentTime}
                 onScheduleItem={(workItemId, values) => onWorkItemScheduleUpdate(project.id, workItemId, values)}
                 onMoveItem={(workItemId, values) => onWorkItemMove(project.id, workItemId, values)}
+                onConvertToTodo={onTaskConvertToTodo}
                 onFinishItem={(item) => {
                   const plannedWorkSeconds = item.assignmentIds.reduce((sum, assignment) => sum + assignment.effortSeconds, 0) || item.durationSeconds;
                   const plannedHours = Math.max(1, Math.round(plannedWorkSeconds / 3600));
@@ -3723,7 +4288,9 @@ function ProjectWorkspace({
               />
             </CardContent>
           </Card>
-          <div className="grid gap-4">
+          <details className="projectAdvancedPlanning">
+            <summary><SettingsIcon />Advanced planning <span>Gantt, dependencies, baseline, evidence checks, and close controls</span></summary>
+            <div className="grid gap-4">
             <Card id="project-gantt">
               <CardHeader className="flex-row items-start justify-between gap-3 pb-2 compactCardHeader">
                 <div>
@@ -3799,7 +4366,8 @@ function ProjectWorkspace({
             onComplete={() => onProjectComplete(project.id)}
             onArchive={() => onProjectArchive(project.id)}
           />
-        </div>
+            </div>
+          </details>
           </fieldset>
       </TabsContent>
         <TabsContent id="recurring" value="recurring">
@@ -3913,17 +4481,11 @@ function ProjectWorkspace({
 function ProjectAdvancedSheet({
   project,
   onProjectDetailsUpdate,
-  onDirectionCardUpdate,
-  onShapeUpPitchUpdate,
-  onShapeUpBetApprove,
-  onShapeUpConvert
+  onDirectionCardUpdate
 }: {
   project: Project;
   onProjectDetailsUpdate: (projectId: string, patch: ProjectDetailsPatch) => void;
   onDirectionCardUpdate: (projectId: string, directionCard: DirectionCard) => void;
-  onShapeUpPitchUpdate: (projectId: string, pitch: ShapeUpPitch) => void;
-  onShapeUpBetApprove: (projectId: string) => void;
-  onShapeUpConvert: (projectId: string) => void;
 }) {
   const [detailsDraft, setDetailsDraft] = useState({
     name: project.name,
@@ -4014,19 +4576,6 @@ function ProjectAdvancedSheet({
             </div>
             <DirectionCardPanel project={project} onSave={(directionCard) => onDirectionCardUpdate(project.id, directionCard)} />
           </section>
-
-          <section className="advancedSection">
-            <div className="advancedSectionHeader">
-              <h3><Target />Shape Up</h3>
-              <Badge variant={isShapeUpProject(project) ? "secondary" : "outline"} className="iconBadge" title="Shape Up mode"><Workflow />{isShapeUpProject(project) ? "on" : "off"}</Badge>
-            </div>
-            <ShapeUpProjectPanel
-              project={project}
-              onSave={(pitch) => onShapeUpPitchUpdate(project.id, pitch)}
-              onBet={() => onShapeUpBetApprove(project.id)}
-              onConvert={() => onShapeUpConvert(project.id)}
-            />
-          </section>
         </div>
       </SheetContent>
     </Sheet>
@@ -4112,13 +4661,11 @@ function DirectionCardPanel({ project, onSave }: { project: Project; onSave: (di
 function ShapeUpProjectPanel({
   project,
   onSave,
-  onBet,
-  onConvert
+  onBet
 }: {
   project: Project;
   onSave: (pitch: ShapeUpPitch) => void;
   onBet: () => void;
-  onConvert: () => void;
 }) {
   const savedPitch = project.shapeUpPitch;
   const fallbackPitch = savedPitch ?? createShapeUpPitch({
@@ -4166,21 +4713,7 @@ function ShapeUpProjectPanel({
     setDraft((current) => ({ ...current, scopes: current.scopes.filter((scope) => scope.id !== scopeId) }));
   };
 
-  if (!savedPitch) {
-    return (
-      <Card id="shape-up">
-        <CardHeader>
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div>
-              <CardTitle className="flex items-center gap-2"><Target className="h-4 w-4" /> Shape Up</CardTitle>
-              <CardDescription>This existing project is not using Shape Up yet.</CardDescription>
-            </div>
-            <Button type="button" variant="outline" onClick={onConvert}>Convert to Shape Up</Button>
-          </div>
-        </CardHeader>
-      </Card>
-    );
-  }
+  if (!savedPitch) return null;
 
   return (
     <Card id="shape-up">
@@ -4321,11 +4854,9 @@ function ProjectCompletionPanel({
     (item.evidenceRequired || item.isKeyTask) &&
     !evidence.some((candidate) => candidate.workItemId === item.id)
   ));
-  const readyToComplete = incompleteItems.length === 0 && openHardGates.length === 0 && keyItemsMissingEvidence.length === 0;
+  const readyToComplete = incompleteItems.length === 0;
   const completionBlockers = [
-    incompleteItems.length ? `${incompleteItems.length} open / first: ${incompleteItems[0]?.title}` : undefined,
-    keyItemsMissingEvidence.length ? `${keyItemsMissingEvidence.length} evidence / first: ${keyItemsMissingEvidence[0]?.title}` : undefined,
-    openHardGates.length ? `${openHardGates.length} gates / first: ${openHardGates[0]?.reason}` : undefined
+    incompleteItems.length ? `${incompleteItems.length} open / first: ${incompleteItems[0]?.title}` : undefined
   ].filter(Boolean);
   const archived = isProjectArchived(project);
   const lifecycleStatus = projectLifecycleStatus(project);
@@ -4333,7 +4864,7 @@ function ProjectCompletionPanel({
   const doneDisabledReason = lifecycleStatus === "done"
     ? "Project is already done."
     : completionBlockers.join(" ");
-  const badgeLabel = archived ? projectLifecycleLabel(project) : lifecycleStatus === "done" ? "done" : readyToComplete ? "ready for done" : "not ready";
+  const badgeLabel = archived ? projectLifecycleLabel(project) : lifecycleStatus === "done" ? "closed" : readyToComplete ? "ready to close" : "open work";
   const badgeVariant = archived || lifecycleStatus === "done" || readyToComplete ? "success" : "warning";
 
   return (
@@ -4341,7 +4872,7 @@ function ProjectCompletionPanel({
       <CardHeader className="compactCardHeader">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
-            <CardTitle className="flex items-center gap-2"><CheckCircle2 className="h-4 w-4" /> Completion Gate</CardTitle>
+            <CardTitle className="flex items-center gap-2"><CheckCircle2 className="h-4 w-4" /> Close project</CardTitle>
           </div>
           <Badge variant={badgeVariant}>{badgeLabel}</Badge>
         </div>
@@ -4349,12 +4880,12 @@ function ProjectCompletionPanel({
       <CardContent className="grid gap-3">
         <div className="grid gap-2 md:grid-cols-3">
           <SummaryTile label="Open" value={String(incompleteItems.length)} detail={incompleteItems[0]?.title ?? ""} tone={incompleteItems.length ? "warning" : "default"} />
-          <SummaryTile label="Evidence" value={String(keyItemsMissingEvidence.length)} detail={keyItemsMissingEvidence[0]?.title ?? ""} tone={keyItemsMissingEvidence.length ? "danger" : "default"} />
-          <SummaryTile label="Gates" value={String(openHardGates.length)} detail={openHardGates[0]?.reason ?? ""} tone={openHardGates.length ? "danger" : "default"} />
+          <SummaryTile label="Review evidence" value={String(keyItemsMissingEvidence.length)} detail={keyItemsMissingEvidence[0]?.title ?? "Optional review signal"} tone={keyItemsMissingEvidence.length ? "warning" : "default"} />
+          <SummaryTile label="Review signals" value={String(openHardGates.length)} detail={openHardGates[0]?.reason ?? "Nothing waiting for review"} tone={openHardGates.length ? "warning" : "default"} />
         </div>
         {completionBlockers.length > 0 && (
           <div className="completionBlockers">
-            <Badge variant="warning" className="iconBadge"><Lock />Blocked</Badge>
+            <Badge variant="warning" className="iconBadge"><Lock />Open work</Badge>
             <ul>
               {completionBlockers.map((blocker) => <li key={blocker}>{blocker}</li>)}
             </ul>
@@ -4365,8 +4896,8 @@ function ProjectCompletionPanel({
             <CheckCircle2 />
             Finish open
           </Button>
-          <Button type="button" onClick={onComplete} disabled={setDoneDisabled} title={setDoneDisabled ? doneDisabledReason : "Mark this project as verified done."} data-testid="lifecycle-set-done">
-            Done
+          <Button type="button" onClick={onComplete} disabled={setDoneDisabled} title={setDoneDisabled ? doneDisabledReason : "Close this project."} data-testid="lifecycle-set-done">
+            Close
           </Button>
           <Button type="button" variant="outline" onClick={onArchive} disabled={archived} title={archived ? "Project is already archived." : "Close this project and remove it from active planning."} data-testid="lifecycle-archive-project">
             <Archive />
@@ -4463,7 +4994,10 @@ function RecurringTasksPanel({
     records: recurringOccurrences
   }) : [];
   const occurrenceHistory = selected ? selectAutomaticOccurrenceHistory({
+    schemaVersion: 3,
     timeZone,
+    todos: [],
+    conversionHistory: [],
     projects: [project],
     workItems: items,
     recurringOccurrences,
@@ -5890,20 +6424,16 @@ function TodayExecution({
     .flatMap((schedule) => schedule.items.map((item) => ({ item, project: projects.find((project) => project.id === schedule.projectId)! })))
     .filter(({ item }) => item.workItem.kind !== "phase" && item.workItem.percentComplete < 100)
     .map(({ item, project }) => {
-      const gate = gates.find(
-        (candidate) =>
-          candidate.status !== "cleared" &&
-          candidate.severity === "hard" &&
-          (candidate.targetId === item.workItem.id ||
-            (candidate.projectId === project.id && candidate.targetType === "project"))
-      );
+      // Review signals remain visible, but do not lock ordinary execution.
+      // Shape Up's missing Bet is enforced earlier by scheduleShapeUpAwarePortfolio.
+      const gate = executionBlockingGate();
       const warningGate = gates.find(
         (candidate) =>
           candidate.status !== "cleared" &&
-          candidate.severity === "warning" &&
-          candidate.targetId === item.workItem.id
+          (candidate.targetId === item.workItem.id ||
+            (candidate.projectId === project.id && candidate.targetType === "project"))
       );
-      const timing = scheduleTiming(item, currentTime);
+      const timing = scheduleTiming(item, currentTime, workspace.timeZone);
       return { item, project, gate, warningGate, timing };
     })
     .sort((a, b) => {
@@ -5934,7 +6464,7 @@ function TodayExecution({
             <CardTitle className="flex items-center gap-2"><Timer className="h-4 w-4" /> Due or Overdue</CardTitle>
             <div className="cardHeaderBadges">
               <Badge variant={activeRows.length ? "warning" : "success"} className="iconBadge" title="Due or overdue work"><Timer />{activeRows.length}</Badge>
-              <Badge variant={activeRows.some((row) => row.gate) ? "destructive" : "outline"} className="iconBadge" title="Locked by hard gate"><Lock />{activeRows.filter((row) => row.gate).length}</Badge>
+              <Badge variant="outline" className="iconBadge" title="Execution is not blocked by review"><CheckCircle2 />open</Badge>
             </div>
           </div>
         </CardHeader>
@@ -6012,17 +6542,17 @@ function TodayExecution({
           <PaginationControls label="upcoming work" {...upcomingRowsPage} onPageChange={upcomingRowsPage.setPage} />
         </CardContent>
       </Card>
-      <Card id="today-blocking-gates" className="lg:col-span-2">
+      <Card id="today-review-signals" className="lg:col-span-2">
         <CardHeader className="compactCardHeader">
           <div className="cardHeaderLine">
-            <CardTitle className="flex items-center gap-2"><ShieldAlert className="h-4 w-4" /> Blocking Gates</CardTitle>
-            <Badge variant={gates.some((gate) => activeProjectIds.has(gate.projectId) && gate.severity === "hard" && gate.status !== "cleared") ? "destructive" : "success"} className="iconBadge">
-              <Lock />{gates.filter((gate) => activeProjectIds.has(gate.projectId) && gate.severity === "hard" && gate.status !== "cleared").length}
+            <CardTitle className="flex items-center gap-2"><ShieldAlert className="h-4 w-4" /> Review signals</CardTitle>
+            <Badge variant={gates.some((gate) => activeProjectIds.has(gate.projectId) && gate.status !== "cleared") ? "warning" : "success"} className="iconBadge">
+              <ClipboardCheck />{gates.filter((gate) => activeProjectIds.has(gate.projectId) && gate.status !== "cleared").length}
             </Badge>
           </div>
         </CardHeader>
         <CardContent>
-          <SignalList gates={sortGates(gates.filter((gate) => activeProjectIds.has(gate.projectId) && gate.severity === "hard" && gate.status !== "cleared")).slice(0, 8)} />
+          <SignalList gates={sortGates(gates.filter((gate) => activeProjectIds.has(gate.projectId) && gate.status !== "cleared")).slice(0, 8)} />
         </CardContent>
       </Card>
       <AutomaticOccurrenceSheet
@@ -6137,22 +6667,22 @@ function AuditQueue({
   const levelingPage = usePagedItems(activeLeveling, 8);
   return (
     <section className="grid gap-3 lg:grid-cols-2">
-      <Card id="hard-gates">
+      <Card id="review-priority-signals">
         <CardHeader className="compactCardHeader">
           <div className="cardHeaderLine">
-            <CardTitle className="flex items-center gap-2"><ShieldAlert className="h-4 w-4" /> Hard Gates</CardTitle>
-            <Badge variant={hardGates.length ? "destructive" : "success"} className="iconBadge" title="Open hard gates"><Lock />{hardGates.length}</Badge>
+            <CardTitle className="flex items-center gap-2"><ShieldAlert className="h-4 w-4" /> Priority signals</CardTitle>
+            <Badge variant={hardGates.length ? "warning" : "success"} className="iconBadge" title="Priority review signals"><ClipboardCheck />{hardGates.length}</Badge>
           </div>
         </CardHeader>
         <CardContent>
           <SignalList gates={hardGatePage.items} onClear={onGateClear} compact />
-          <PaginationControls label="hard gates" {...hardGatePage} onPageChange={hardGatePage.setPage} />
+          <PaginationControls label="priority review signals" {...hardGatePage} onPageChange={hardGatePage.setPage} />
         </CardContent>
       </Card>
       <Card id="audit-decisions">
         <CardHeader className="compactCardHeader">
           <div className="cardHeaderLine">
-            <CardTitle className="flex items-center gap-2"><Zap className="h-4 w-4" /> Contrarian Decisions</CardTitle>
+            <CardTitle className="flex items-center gap-2"><Zap className="h-4 w-4" /> Project decisions</CardTitle>
             <Badge variant="outline" className="iconBadge" title="Decisions"><Target />{activeDecisions.length}</Badge>
           </div>
         </CardHeader>
@@ -6194,7 +6724,7 @@ function AuditQueue({
       <Card id="baseline-change-sets">
         <CardHeader className="compactCardHeader">
           <div className="cardHeaderLine">
-            <CardTitle className="flex items-center gap-2"><Archive className="h-4 w-4" /> Change Sets</CardTitle>
+            <CardTitle className="flex items-center gap-2"><Archive className="h-4 w-4" /> Change review</CardTitle>
             <div className="cardHeaderBadges">
               <Badge variant="outline" className="iconBadge" title="Total changes"><GitPullRequest />{changeSets.length}</Badge>
               <Badge variant={changeSets.some((item) => item.status === "blocked") ? "destructive" : "success"} className="iconBadge" title="Blocked changes"><Lock />{changeSets.filter((item) => item.status === "blocked").length}</Badge>
@@ -6664,7 +7194,7 @@ function Settings({
   onForgetRememberedPassphrase: () => Promise<void>;
   autoSyncStatus: AutoSyncStatus;
   syncBlockedByExternalChange: boolean;
-  workspacePersistence: { loaded: boolean; status: string; lastSavedAt: string };
+  workspacePersistence: { loaded: boolean; loadFailed: boolean; status: string; lastSavedAt: string };
   onWorkspaceTimeZoneChange: (timeZone: string) => void;
   onWorkspaceImport: (workspace: WorkspaceSnapshot) => void;
   onWorkspaceReset: () => void;
@@ -7011,6 +7541,22 @@ function Settings({
       setNotice("Enter the workspace passphrase before decrypting the Firebase workspace snapshot.");
       return;
     }
+    const localChecksum = await workspacePlaintextChecksum(workspace);
+    const hasUnsyncedLocalWorkspace = firebaseDraft.lastSyncedChecksum
+      ? localChecksum !== firebaseDraft.lastSyncedChecksum
+      : workspaceHasUserContent(workspace);
+    if (hasUnsyncedLocalWorkspace) {
+      const accepted = window.confirm("Pulling replaces this browser's local workspace. Continue after exporting an automatic plaintext backup of the current local branch?");
+      if (!accepted) {
+        setNotice("Firebase pull canceled; the local workspace was left unchanged.");
+        return;
+      }
+      downloadText(
+        `omni-plan-before-firebase-pull-${new Date().toISOString().replace(/[:.]/g, "-")}.json`,
+        workspaceRepository.exportWorkspace(workspace),
+        "application/json"
+      );
+    }
     setNotice("Pulling latest encrypted workspace from Firebase...");
     setSyncBusy(true);
     try {
@@ -7122,12 +7668,23 @@ function Settings({
   const exportWorkspace = () => {
     const payload = workspaceRepository.exportWorkspace(workspace);
     downloadText(`omni-plan-workspace-${new Date().toISOString().slice(0, 10)}.json`, payload, "application/json");
-    setNotice("Workspace backup exported.");
+    setNotice("Plaintext workspace backup exported. Store this file on encrypted disk.");
+  };
+
+  const exportRollbackWorkspace = () => {
+    const payload = workspaceRepository.exportRollbackWorkspace(workspace);
+    downloadText(`omni-plan-rollback-schema2-${new Date().toISOString().slice(0, 10)}.json`, payload, "application/json");
+    setNotice("Schema 2 rollback file exported. Todos were mapped into a deterministic rollback project.");
   };
 
   const importWorkspace = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.currentTarget.files?.[0];
     if (!file) return;
+    if (settings.firebaseSync.autoSyncEnabled || firebaseDraft.autoSyncEnabled) {
+      setNotice("Turn off Firebase auto sync and save Sync settings before importing a backup.");
+      event.currentTarget.value = "";
+      return;
+    }
     try {
       const imported = workspaceRepository.importWorkspace(await file.text());
       onWorkspaceImport(imported);
@@ -7140,9 +7697,24 @@ function Settings({
   };
 
   const resetWorkspace = () => {
-    if (!window.confirm("Clear the local workspace in this browser? Firebase settings and saved secrets are not removed.")) return;
+    if (settings.firebaseSync.autoSyncEnabled || firebaseDraft.autoSyncEnabled) {
+      setNotice("Turn off Firebase auto sync and save Sync settings before clearing the local workspace.");
+      return;
+    }
+    if (!window.confirm("Clear the local workspace in this browser? Firebase connection and saved secrets stay, but the sync cursor is reset so reconnecting pulls the remote workspace before any push.")) return;
+    const nextFirebase: FirebaseSyncSettings = {
+      ...settings.firebaseSync,
+      autoSyncEnabled: false,
+      lastSyncedRevision: undefined,
+      lastSyncedChecksum: undefined,
+      lastPulledAt: undefined,
+      lastPushedAt: undefined,
+      updatedAt: new Date().toISOString()
+    };
+    onSettingsSave({ ...settings, firebaseSync: nextFirebase });
+    setFirebaseDraft(nextFirebase);
     onWorkspaceReset();
-    setNotice("Local workspace cleared. Firebase settings and saved secrets were kept.");
+    setNotice("Local workspace cleared. Firebase connection and saved secrets were kept, but its sync cursor was cleared so reconnecting will pull before it can push.");
   };
 
   const openPanel = (panel: SettingsPanelId) => {
@@ -7227,6 +7799,19 @@ function Settings({
         {hasSettingsNotice && (
           <div className={cn("rounded-lg border p-3 text-sm font-medium lg:col-span-2", noticeBannerClassName(settingsNoticeTone))}>{notice}</div>
         )}
+
+        <Card className="lg:col-span-2">
+          <CardContent className="flex flex-wrap items-center justify-between gap-3 p-4">
+            <div className="flex min-w-0 items-start gap-3">
+              <div className="grid size-9 shrink-0 place-items-center rounded-lg bg-muted"><ClipboardCheck className="size-4" /></div>
+              <div className="min-w-0">
+                <strong className="block text-sm">Agent</strong>
+                <p className="text-sm text-muted-foreground">Read endpoints, guarded commands, and AI audit live under Settings.</p>
+              </div>
+            </div>
+            <Button asChild variant="outline"><a href={hashForRoute({ view: "agent", selectedProjectId: evidenceProject?.id ?? defaultProjectId })}>Open Agent</a></Button>
+          </CardContent>
+        </Card>
 
       <SettingsOverviewCard
         icon={<Lock className="h-4 w-4" />}
@@ -7518,6 +8103,9 @@ function Settings({
             <p className="text-sm text-muted-foreground md:col-span-2">Automatic schedules follow this time zone. Existing occurrence history remains fixed to its recorded timestamps.</p>
           </form>
           <div className="flex flex-wrap gap-2">
+            <IconActionButton label="Export schema 2 rollback" type="button" variant="outline" onClick={exportRollbackWorkspace}>
+              <ArchiveRestore />
+            </IconActionButton>
             <IconActionButton label="Import backup" type="button" variant="outline" onClick={() => workspaceImportRef.current?.click()}>
               <Upload />
             </IconActionButton>
@@ -8152,9 +8740,10 @@ function formatCompactScheduleRange(item: ScheduledItem) {
     : `${startDate} ${startTime}->${finishDate} ${finishTime}`;
 }
 
-function scheduleTiming(item: ScheduledItem, referenceTime = now): ScheduleTiming {
-  const dayStart = `${referenceTime.slice(0, 10)}T00:00:00.000Z`;
-  const dayEnd = addSeconds(dayStart, 24 * 60 * 60);
+function scheduleTiming(item: ScheduledItem, referenceTime = now, timeZone = "UTC"): ScheduleTiming {
+  const localDate = zonedDateKey(referenceTime, timeZone);
+  const dayStart = zonedDateTimeToIso(localDate, "00:00", timeZone);
+  const dayEnd = addZonedCalendarDays(dayStart, 1, timeZone);
   if (item.finish < dayStart) return "Overdue";
   if (item.start < dayEnd && item.finish >= dayStart) return "Due now";
   return "Upcoming";
@@ -8172,6 +8761,12 @@ function sortGates(gates: AuditGate[]) {
     statusRank[a.status] - statusRank[b.status] ||
     a.reason.localeCompare(b.reason)
   ));
+}
+
+function executionBlockingGate(): AuditGate | undefined {
+  // Review records are advisory. Shape Up's missing Bet is enforced by its
+  // planning projection before a task can appear in Today.
+  return undefined;
 }
 
 function downloadText(filename: string, content: string, type: string) {
@@ -8258,6 +8853,7 @@ function ParkedWorkSection({
   currentTime,
   onScheduleItem,
   onMoveItem,
+  onConvertToTodo,
   onFinishItem
 }: {
   projectId: string;
@@ -8268,6 +8864,7 @@ function ParkedWorkSection({
   currentTime: string;
   onScheduleItem: (workItemId: string, values: WorkItemStartConstraintValues) => void;
   onMoveItem: (workItemId: string, values: WorkItemMoveValues) => void;
+  onConvertToTodo: (workItemId: string) => void;
   onFinishItem: (item: WorkItem) => void;
 }) {
   if (!items.length) return null;
@@ -8314,6 +8911,18 @@ function ParkedWorkSection({
                   allWorkItems={allWorkItems}
                   onMove={onMoveItem}
                 />
+                {item.kind === "task" && (
+                  <Button
+                    type="button"
+                    size="icon"
+                    variant="outline"
+                    onClick={() => onConvertToTodo(item.id)}
+                    aria-label={`Move ${item.title} to Todos`}
+                    title="Move to Todos"
+                  >
+                    <ListTodo />
+                  </Button>
+                )}
                 {canFinish ? (
                   <Button
                     type="button"
@@ -8532,6 +9141,7 @@ function OutlineTable({
   currentTime,
   onScheduleItem,
   onMoveItem,
+  onConvertToTodo,
   onFinishItem
 }: {
   projectId: string;
@@ -8544,6 +9154,7 @@ function OutlineTable({
   currentTime: string;
   onScheduleItem: (workItemId: string, values: WorkItemStartConstraintValues) => void;
   onMoveItem: (workItemId: string, values: WorkItemMoveValues) => void;
+  onConvertToTodo: (workItemId: string) => void;
   onFinishItem: (item: ScheduledItem) => void;
 }) {
   const itemPage = usePagedItems(items, 10);
@@ -8614,6 +9225,18 @@ function OutlineTable({
                         allWorkItems={allWorkItems}
                         onMove={onMoveItem}
                       />
+                      {item.workItem.kind === "task" && (
+                        <Button
+                          type="button"
+                          size="icon"
+                          variant="outline"
+                          onClick={() => onConvertToTodo(item.workItem.id)}
+                          aria-label={`Move ${item.workItem.title} to Todos`}
+                          title="Move to Todos"
+                        >
+                          <ListTodo />
+                        </Button>
+                      )}
                       {item.workItem.kind === "phase" ? (
                         <span className="text-xs text-muted-foreground">-</span>
                       ) : item.workItem.percentComplete >= 100 ? (

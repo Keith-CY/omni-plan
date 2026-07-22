@@ -4,8 +4,11 @@ import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { HashRouter } from "react-router-dom";
 import { JSDOM } from "jsdom";
-import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { BrowserRememberedPassphraseVault } from "./domain/secrets";
+import { APP_SETTINGS_STORAGE_KEY, defaultAppSettings } from "./domain/settings";
 import { BrowserWorkspaceRepository, WORKSPACE_STORAGE_KEY } from "./domain/storage";
+import { FirebaseE2eeSyncClient } from "./domain/sync";
 import type { Project, WorkItem, WorkspaceSnapshot } from "./domain/types";
 import { createEmptyWorkspace } from "./domain/workspace";
 
@@ -41,6 +44,7 @@ const projectId = "calendar-click-project";
 
 let root: Root | undefined;
 let container: HTMLDivElement | undefined;
+let AppComponent: typeof import("./App").App;
 
 class MemoryStorage implements Storage {
   private readonly values = new Map<string, string>();
@@ -138,7 +142,6 @@ async function eventually<T>(read: () => T | undefined): Promise<T> {
 }
 
 async function renderCalendar() {
-  const { App } = await import("./App");
   const fixture = calendarFixture();
   const repository = new BrowserWorkspaceRepository();
   window.localStorage.setItem(WORKSPACE_STORAGE_KEY, repository.exportWorkspace(fixture.workspace));
@@ -148,7 +151,7 @@ async function renderCalendar() {
   root = createRoot(container);
 
   await act(async () => {
-    root?.render(createElement(HashRouter, null, createElement(App)));
+    root?.render(createElement(HashRouter, null, createElement(AppComponent)));
   });
 
   const selector = await eventually(() => container?.querySelector<HTMLButtonElement>(
@@ -161,6 +164,10 @@ async function renderCalendar() {
 }
 
 describe("calendar day selection", () => {
+  beforeAll(async () => {
+    ({ App: AppComponent } = await import("./App"));
+  }, 30_000);
+
   beforeEach(() => {
     const storage = new MemoryStorage();
     Object.defineProperty(window, "localStorage", {
@@ -181,6 +188,7 @@ describe("calendar day selection", () => {
     root = undefined;
     container = undefined;
     window.localStorage.clear();
+    vi.restoreAllMocks();
   });
 
   afterAll(() => bunDom?.window.close());
@@ -220,5 +228,107 @@ describe("calendar day selection", () => {
 
     expect(selectedDayPanel().querySelector("h3")?.textContent?.trim()).toBe(selectedDayBeforeClick);
     expect(cell.getAttribute("aria-selected")).toBe("false");
+  });
+
+  it("preserves an unsupported future workspace and blocks the interactive app", async () => {
+    const futurePayload = JSON.stringify({
+      schemaVersion: 999,
+      exportedAt: "2099-01-01T00:00:00.000Z",
+      snapshot: { schemaVersion: 999 }
+    });
+    const saveSpy = vi.spyOn(BrowserWorkspaceRepository.prototype, "save");
+    const firebaseSignInSpy = vi.spyOn(FirebaseE2eeSyncClient.prototype, "signInAnonymously")
+      .mockRejectedValue(new Error("Unexpected Firebase sync during rejected workspace load."));
+    vi.spyOn(BrowserRememberedPassphraseVault.prototype, "read").mockResolvedValue({
+      schemaVersion: 1,
+      id: "workspace",
+      passphrase: "test-passphrase",
+      savedAt: "2099-01-01T00:00:00.000Z"
+    });
+    window.localStorage.setItem(WORKSPACE_STORAGE_KEY, futurePayload);
+    window.localStorage.setItem(APP_SETTINGS_STORAGE_KEY, JSON.stringify({
+      ...defaultAppSettings,
+      firebaseSync: {
+        ...defaultAppSettings.firebaseSync,
+        projectId: "test-project",
+        apiKey: "test-api-key",
+        workspaceId: "test-workspace",
+        autoSyncEnabled: true
+      }
+    }));
+    window.location.hash = "#/today";
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(createElement(HashRouter, null, createElement(AppComponent)));
+    });
+
+    const alert = await eventually(() => container?.querySelector<HTMLElement>("[role='alert']") ?? undefined);
+    expect(alert.textContent).toContain("Workspace load failed");
+    expect(container?.textContent).toContain("Saving and Firebase sync are blocked");
+    expect(container?.querySelector("nav[aria-label='Primary']")).toBeNull();
+    expect(window.localStorage.getItem(WORKSPACE_STORAGE_KEY)).toBe(futurePayload);
+
+    await act(async () => {
+      await new Promise((resolve) => window.setTimeout(resolve, 20));
+    });
+    expect(window.localStorage.getItem(WORKSPACE_STORAGE_KEY)).toBe(futurePayload);
+    expect(saveSpy).not.toHaveBeenCalled();
+    expect(firebaseSignInSpy).not.toHaveBeenCalled();
+  });
+
+  it("stops first-time auto sync when both local and remote workspaces already exist", async () => {
+    const repository = new BrowserWorkspaceRepository();
+    window.localStorage.setItem(WORKSPACE_STORAGE_KEY, repository.exportWorkspace(calendarFixture().workspace));
+    window.localStorage.setItem(APP_SETTINGS_STORAGE_KEY, JSON.stringify({
+      ...defaultAppSettings,
+      firebaseSync: {
+        ...defaultAppSettings.firebaseSync,
+        projectId: "test-project",
+        apiKey: "test-api-key",
+        workspaceId: "test-workspace",
+        autoSyncEnabled: true
+      }
+    }));
+    vi.spyOn(BrowserRememberedPassphraseVault.prototype, "read").mockResolvedValue({
+      schemaVersion: 1,
+      id: "workspace",
+      passphrase: "test-passphrase",
+      savedAt: "2099-01-01T00:00:00.000Z"
+    });
+    vi.spyOn(FirebaseE2eeSyncClient.prototype, "signInAnonymously").mockResolvedValue({
+      idToken: "test-token",
+      localId: "test-user"
+    });
+    vi.spyOn(FirebaseE2eeSyncClient.prototype, "readManifest").mockResolvedValue({
+      schemaVersion: 1,
+      workspaceSchemaVersion: 3,
+      minimumClientWorkspaceSchemaVersion: 3,
+      provider: "firebase-firestore-e2ee",
+      workspaceId: "test-workspace",
+      latestRevision: "remote-revision-existing",
+      updatedAt: "2099-01-01T00:00:00.000Z",
+      updatedByDeviceId: "remote-device",
+      snapshotDocumentPath: "omniPlanSync/test-workspace/snapshots/latest",
+      heads: {}
+    });
+    const pullSpy = vi.spyOn(FirebaseE2eeSyncClient.prototype, "pullWorkspaceSnapshot");
+    const pushSpy = vi.spyOn(FirebaseE2eeSyncClient.prototype, "pushWorkspaceSnapshot");
+    window.location.hash = "#/today";
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(createElement(HashRouter, null, createElement(AppComponent)));
+    });
+
+    const alert = await eventually(() => Array.from(container?.querySelectorAll<HTMLElement>("[role='alert']") ?? [])
+      .find((candidate) => candidate.textContent?.includes("local workspace both changed")));
+    expect(alert.textContent).toContain("Remote revision");
+    expect(pullSpy).not.toHaveBeenCalled();
+    expect(pushSpy).not.toHaveBeenCalled();
   });
 });

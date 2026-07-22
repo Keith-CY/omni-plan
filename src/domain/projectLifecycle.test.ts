@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { canDeleteEmptyProject, removeEmptyProjectFromWorkspace, withProjectRestored } from "./projectLifecycle";
 import { sampleWorkspace } from "./sampleData";
+import { migrateWorkspaceToSchema3 } from "./workspaceMigration";
 import type { WorkspaceSnapshot } from "./types";
 
 function cloneWorkspace(): WorkspaceSnapshot {
@@ -119,6 +120,30 @@ describe("project lifecycle cleanup", () => {
       createdAt: "2026-07-06T00:00:00.000Z",
       sourceGateIds: ["gate-empty"]
     });
+    workspace.changeSets.push(
+      {
+        id: "cs-empty-draft",
+        projectId: "p-empty",
+        title: "Draft empty-project change",
+        status: "draft",
+        createdAt: "2026-07-06T00:00:00.000Z",
+        reason: "Live work cannot outlive its project.",
+        diffs: [],
+        rollbackToken: "rollback-cs-empty-draft",
+        auditGateIds: []
+      },
+      {
+        id: "cs-empty-approved",
+        projectId: "p-empty",
+        title: "Approved empty-project history",
+        status: "approved",
+        createdAt: "2026-07-06T00:00:00.000Z",
+        reason: "Historical work remains auditable.",
+        diffs: [],
+        rollbackToken: "rollback-cs-empty-approved",
+        auditGateIds: []
+      }
+    );
 
     const next = removeEmptyProjectFromWorkspace(workspace, "p-empty");
 
@@ -129,5 +154,28 @@ describe("project lifecycle cleanup", () => {
     expect(next?.decisions.some((decision) => decision.projectId === "p-empty")).toBe(false);
     expect(next?.auditGates.some((gate) => gate.projectId === "p-empty")).toBe(false);
     expect(next?.auditDecisions.some((decision) => decision.projectId === "p-empty")).toBe(false);
+    expect(next?.changeSets.some((changeSet) => changeSet.id === "cs-empty-draft")).toBe(false);
+    expect(next?.changeSets.some((changeSet) => changeSet.id === "cs-empty-approved")).toBe(true);
+
+    const withDeleteHistory: WorkspaceSnapshot = {
+      ...next!,
+      changeSets: [{
+        id: "cs-empty-delete",
+        projectId: "p-empty",
+        title: "Delete empty project",
+        status: "approved",
+        createdAt: "2026-07-07T00:00:00.000Z",
+        reason: "Explicit deletion history.",
+        diffs: [],
+        rollbackToken: "rollback-cs-empty-delete",
+        auditGateIds: []
+      }, ...next!.changeSets]
+    };
+    const roundTrip = migrateWorkspaceToSchema3({ schemaVersion: 3, snapshot: withDeleteHistory });
+    expect(roundTrip.snapshot.changeSets.map(({ id }) => id)).toEqual(expect.arrayContaining([
+      "cs-empty-approved",
+      "cs-empty-delete"
+    ]));
+    expect(roundTrip.report.integrityIssues.filter(({ code }) => code === "historical-change-set-project")).toHaveLength(2);
   });
 });

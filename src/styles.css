@@ -128,6 +128,40 @@ body {
   margin: 0 auto;
 }
 
+.sidebarQuickCaptureButton {
+  width: 100%;
+  justify-content: flex-start;
+  box-shadow: 0 5px 14px rgba(15, 23, 42, 0.1);
+}
+
+.desktopSidebar[data-collapsed="true"] .sidebarQuickCaptureButton {
+  justify-content: center;
+}
+
+.sidebarQuickCaptureButton kbd {
+  min-width: 30px;
+  margin-left: auto;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 4px;
+  padding: 1px 4px;
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.76);
+  font-family: inherit;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.quickCaptureFab {
+  position: fixed;
+  z-index: 40;
+  right: max(1rem, env(safe-area-inset-right));
+  bottom: calc(5.25rem + env(safe-area-inset-bottom));
+  width: 48px;
+  height: 48px;
+  border-radius: 999px;
+  box-shadow: 0 12px 28px rgba(15, 23, 42, 0.24);
+}
+
 button,
 select,
 input {
@@ -3533,6 +3567,330 @@ th {
   font-weight: 800;
 }
 
+.quickCaptureSheet {
+  overflow-y: auto;
+  border-left-color: color-mix(in srgb, var(--cyan) 22%, var(--line));
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--cyan) 3%, white), transparent 180px),
+    var(--background);
+}
+
+.quickCaptureSheet__context {
+  display: inline-flex;
+  width: fit-content;
+  min-height: 26px;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid color-mix(in srgb, var(--cyan) 20%, var(--line));
+  border-radius: 999px;
+  padding: 3px 8px 3px 4px;
+  background: color-mix(in srgb, var(--cyan) 7%, white);
+  color: color-mix(in srgb, var(--cyan) 82%, black);
+  font-size: 11px;
+  font-weight: 850;
+}
+
+.quickCaptureSheet__context > span {
+  display: grid;
+  width: 18px;
+  height: 18px;
+  place-items: center;
+  border-radius: 999px;
+  background: white;
+}
+
+.quickCaptureSheet__context svg {
+  width: 12px;
+  height: 12px;
+}
+
+.quickCaptureForm {
+  display: grid;
+  gap: 14px;
+  margin-top: 24px;
+}
+
+.quickCaptureTitleField {
+  display: grid;
+  gap: 7px;
+}
+
+.quickCaptureTitleField > span {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.quickCaptureTitleField input {
+  height: 48px;
+  border-color: var(--line-strong);
+  background: var(--surface);
+  font-size: 15px;
+  font-weight: 700;
+  box-shadow: 0 4px 14px rgba(15, 23, 42, 0.04);
+}
+
+.quickCaptureTodayToggle {
+  display: grid;
+  min-height: 64px;
+  grid-template-columns: 18px 36px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  padding: 10px 12px;
+  background: var(--surface);
+  cursor: pointer;
+}
+
+.quickCaptureTodayToggle:hover {
+  border-color: var(--line-strong);
+}
+
+.quickCaptureTodayToggle[data-active="true"] {
+  border-color: color-mix(in srgb, var(--cyan) 38%, white);
+  background: color-mix(in srgb, var(--cyan) 6%, white);
+  box-shadow: inset 3px 0 0 var(--cyan);
+}
+
+.quickCaptureTodayToggle > input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--cyan);
+}
+
+.quickCaptureTodayToggle__icon {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border-radius: 8px;
+  background: var(--muted);
+  color: var(--text-muted);
+}
+
+.quickCaptureTodayToggle[data-active="true"] .quickCaptureTodayToggle__icon {
+  background: white;
+  color: var(--cyan);
+}
+
+.quickCaptureTodayToggle__icon svg {
+  width: 16px;
+  height: 16px;
+}
+
+.quickCaptureTodayToggle > span:last-child {
+  display: grid;
+  gap: 3px;
+}
+
+.quickCaptureTodayToggle strong {
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.quickCaptureTodayToggle small {
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.quickCaptureError {
+  margin: 0;
+  border-radius: 7px;
+  padding: 8px 10px;
+  background: color-mix(in srgb, var(--red) 7%, white);
+  color: var(--red);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+.quickCaptureActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 4px;
+}
+
+.quickCaptureActions kbd {
+  margin-left: 3px;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 4px;
+  padding: 1px 4px;
+  background: rgba(255, 255, 255, 0.1);
+  color: rgba(255, 255, 255, 0.76);
+  font-family: inherit;
+  font-size: 10px;
+}
+
+.todayWorkspace {
+  display: grid;
+  gap: 12px;
+}
+
+.todayTodosCard {
+  border-color: color-mix(in srgb, var(--cyan) 20%, var(--line));
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.045);
+}
+
+.todayTodoContent {
+  display: grid;
+  gap: 8px;
+}
+
+.todayTodoList {
+  display: grid;
+  gap: 5px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.todayTodoRow {
+  display: grid;
+  min-height: 52px;
+  grid-template-columns: 38px minmax(0, 1fr) 38px;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 5px 7px;
+  background: #fbfcf8;
+}
+
+.todayTodoRow:hover {
+  border-color: var(--line-strong);
+  background: var(--surface);
+}
+
+.todayTodoComplete,
+.todayTodoFlag {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  place-items: center;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-subtle);
+}
+
+.todayTodoComplete:hover {
+  background: color-mix(in srgb, var(--green) 9%, white);
+  color: var(--green);
+}
+
+.todayTodoComplete:hover svg {
+  fill: color-mix(in srgb, var(--green) 12%, transparent);
+}
+
+.todayTodoFlag:hover {
+  background: color-mix(in srgb, var(--amber) 8%, white);
+  color: var(--amber);
+}
+
+.todayTodoFlag[data-active="true"] {
+  color: var(--amber);
+}
+
+.todayTodoFlag[data-active="true"] svg {
+  fill: currentColor;
+}
+
+.todayTodoComplete svg,
+.todayTodoFlag svg {
+  width: 17px;
+  height: 17px;
+}
+
+.todayTodoMain {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.todayTodoTitle {
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 900;
+  line-height: 1.25;
+  text-decoration: none;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.todayTodoTitle:hover {
+  color: var(--cyan);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.todayTodoMeta {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 4px;
+  overflow: hidden;
+}
+
+.todayTodoTag {
+  max-width: 90px;
+  overflow: hidden;
+  border-radius: 4px;
+  padding: 2px 5px;
+  background: var(--muted);
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.todayTodoEmpty {
+  display: grid;
+  min-height: 74px;
+  grid-template-columns: 30px minmax(0, 1fr) 30px;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  border: 1px dashed var(--line-strong);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: color-mix(in srgb, var(--muted) 45%, white);
+  color: var(--text-muted);
+  text-align: left;
+}
+
+.todayTodoEmpty:hover {
+  border-color: color-mix(in srgb, var(--cyan) 40%, white);
+  background: color-mix(in srgb, var(--cyan) 5%, white);
+  color: var(--cyan);
+}
+
+.todayTodoEmpty > svg {
+  width: 19px;
+  height: 19px;
+  justify-self: center;
+}
+
+.todayTodoEmpty > span {
+  display: grid;
+  gap: 3px;
+}
+
+.todayTodoEmpty strong {
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.todayTodoEmpty small {
+  font-size: 11px;
+}
+
 .todayGrid,
 .settingsGrid {
   grid-template-columns: repeat(2, minmax(280px, 1fr));
@@ -4676,6 +5034,143 @@ button.todayItem {
   }
 
   .matrixNodeFlag {
+    display: none;
+  }
+}
+.projectMethodChoice {
+  display: grid;
+  gap: 0.5rem;
+  border: 0;
+  padding: 0;
+}
+
+.projectMethodChoice legend {
+  margin-bottom: 0.25rem;
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+
+.projectMethodChoice label {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 0.75rem;
+  min-height: 3.25rem;
+  padding: 0.75rem;
+  border: 1px solid hsl(var(--border));
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+
+.projectMethodChoice label[data-selected="true"] {
+  border-color: hsl(var(--primary));
+  background: hsl(var(--accent));
+}
+
+.projectMethodChoice input {
+  margin-top: 0.2rem;
+}
+
+.projectMethodChoice span,
+.projectMethodChoice small {
+  display: block;
+}
+
+.projectAdvancedPlanning {
+  border: 1px solid hsl(var(--border));
+  border-radius: var(--radius);
+  background: hsl(var(--muted) / 0.18);
+}
+
+.projectAdvancedPlanning > summary {
+  display: flex;
+  min-height: 3rem;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.75rem 1rem;
+  cursor: pointer;
+  font-size: 0.875rem;
+  font-weight: 600;
+  list-style: none;
+}
+
+.projectAdvancedPlanning > summary::-webkit-details-marker {
+  display: none;
+}
+
+.projectAdvancedPlanning > summary span {
+  margin-left: auto;
+  color: hsl(var(--muted-foreground));
+  font-size: 0.75rem;
+  font-weight: 400;
+}
+
+.projectAdvancedPlanning[open] > summary {
+  border-bottom: 1px solid hsl(var(--border));
+}
+
+.projectAdvancedPlanning > div {
+  padding: 0.75rem;
+}
+
+.shapeUpCurrentStage {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.shapeUpStageHeader {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0 0.25rem;
+}
+
+.shapeUpStageHeader strong {
+  font-size: 0.875rem;
+}
+
+@media (max-width: 640px) {
+  .projectAdvancedPlanning > summary span {
+    display: none;
+  }
+}
+
+.projectMethodChoice small {
+  margin-top: 0.2rem;
+  color: hsl(var(--muted-foreground));
+  font-weight: 400;
+  line-height: 1.35;
+}
+
+@media (max-width: 560px) {
+  .quickCaptureSheet {
+    width: 100vw;
+    max-width: 100vw;
+  }
+
+  .quickCaptureActions {
+    display: grid;
+    grid-template-columns: 1fr 1.35fr;
+  }
+
+  .quickCaptureActions button {
+    min-height: 42px;
+  }
+
+  .todayTodoRow {
+    min-height: 58px;
+    grid-template-columns: 40px minmax(0, 1fr) 40px;
+    padding-inline: 5px;
+  }
+
+  .todayTodoComplete,
+  .todayTodoFlag {
+    width: 40px;
+    height: 40px;
+  }
+
+  .todayTodoMeta .todayIconBadge:nth-of-type(n + 3),
+  .todayTodoTag:nth-of-type(n + 2) {
     display: none;
   }
 }

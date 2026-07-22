@@ -1,10 +1,30 @@
 import type { ChangeSet, Id, WorkspaceSnapshot } from "./types";
 import { browserFetch } from "./http";
 import { normalizeWorkspaceSnapshot } from "./projectLifecycle";
+import { CURRENT_WORKSPACE_SCHEMA_VERSION, migrateWorkspaceToSchema3 } from "./workspaceMigration";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 const syncKdfIterations = 210_000;
+
+function assertSupportedWorkspaceSchemaVersion(value: unknown, source: string): void {
+  if (value === undefined) return;
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 1) {
+    throw new Error(`${source} has an invalid workspace schema version.`);
+  }
+  if (value > CURRENT_WORKSPACE_SCHEMA_VERSION) {
+    throw new Error(`${source} uses unsupported future workspace schema ${value}; update OmniPlan before continuing.`);
+  }
+}
+
+function assertFirebaseManifestCompatible(manifest: FirebaseE2eeManifest | undefined): void {
+  if (!manifest) return;
+  assertSupportedWorkspaceSchemaVersion(
+    manifest.minimumClientWorkspaceSchemaVersion,
+    "Firebase manifest minimum client requirement"
+  );
+  assertSupportedWorkspaceSchemaVersion(manifest.workspaceSchemaVersion, "Firebase manifest");
+}
 
 function bytesToBase64(bytes: Uint8Array): string {
   let binary = "";
@@ -108,6 +128,8 @@ export interface SyncChangeEnvelope {
 
 export interface FirebaseWorkspaceSnapshotEnvelope {
   schemaVersion: 1;
+  /** Domain schema inside the encrypted payload. Missing means legacy schema 1/2. */
+  workspaceSchemaVersion?: number;
   workspaceId: Id;
   deviceId: Id;
   revision: string;
@@ -130,6 +152,10 @@ export interface SyncManifest {
 
 export interface FirebaseE2eeManifest {
   schemaVersion: 1;
+  workspaceSchemaVersion?: number;
+  minimumClientWorkspaceSchemaVersion?: number;
+  /** Firestore document version used for compare-and-swap; never serialized into manifestJson. */
+  firestoreUpdateTime?: string;
   provider: "firebase-firestore-e2ee";
   workspaceId: Id;
   latestRevision: string;
@@ -275,6 +301,7 @@ export async function createFirebaseWorkspaceSnapshotEnvelope(
   const revision = await sha256Hex(`${previousRevision ?? "root"}\n${config.deviceId}\n${createdAt}\n${plaintextChecksum}`);
   return {
     schemaVersion: 1,
+    workspaceSchemaVersion: CURRENT_WORKSPACE_SCHEMA_VERSION,
     workspaceId: config.workspaceId,
     deviceId: config.deviceId,
     revision,
@@ -289,12 +316,27 @@ export async function decryptFirebaseWorkspaceSnapshotEnvelope(
   envelope: FirebaseWorkspaceSnapshotEnvelope,
   passphrase: string
 ): Promise<WorkspaceSnapshot> {
-  const snapshot = await decryptSyncPayload<WorkspaceSnapshot>(envelope.payload, passphrase);
+  assertSupportedWorkspaceSchemaVersion(envelope.workspaceSchemaVersion, "Firebase snapshot envelope");
+  const snapshot = await decryptSyncPayload<unknown>(envelope.payload, passphrase);
   const checksum = await sha256Hex(stableJson(snapshot));
   if (checksum !== envelope.plaintextChecksum) {
     throw new Error("Firebase workspace checksum mismatch after decrypt.");
   }
-  return normalizeWorkspaceSnapshot(snapshot);
+  const embeddedSchemaVersion = typeof snapshot === "object" && snapshot !== null && "schemaVersion" in snapshot
+    ? (snapshot as { schemaVersion?: unknown }).schemaVersion
+    : undefined;
+  assertSupportedWorkspaceSchemaVersion(embeddedSchemaVersion, "Encrypted Firebase workspace");
+  if (
+    envelope.workspaceSchemaVersion !== undefined &&
+    embeddedSchemaVersion !== undefined &&
+    envelope.workspaceSchemaVersion !== embeddedSchemaVersion
+  ) {
+    throw new Error(
+      `Firebase snapshot schema mismatch: envelope declares ${envelope.workspaceSchemaVersion}, payload declares ${String(embeddedSchemaVersion)}.`
+    );
+  }
+  const sourceSchemaVersion = envelope.workspaceSchemaVersion ?? embeddedSchemaVersion ?? 1;
+  return migrateWorkspaceToSchema3({ schemaVersion: sourceSchemaVersion, snapshot }).snapshot as WorkspaceSnapshot;
 }
 
 export function createFirebaseE2eeManifest(
@@ -302,8 +344,12 @@ export function createFirebaseE2eeManifest(
   envelope: FirebaseWorkspaceSnapshotEnvelope,
   previous?: FirebaseE2eeManifest
 ): FirebaseE2eeManifest {
+  assertFirebaseManifestCompatible(previous);
+  assertSupportedWorkspaceSchemaVersion(envelope.workspaceSchemaVersion, "Firebase snapshot envelope");
   return {
     schemaVersion: 1,
+    workspaceSchemaVersion: CURRENT_WORKSPACE_SCHEMA_VERSION,
+    minimumClientWorkspaceSchemaVersion: CURRENT_WORKSPACE_SCHEMA_VERSION,
     provider: "firebase-firestore-e2ee",
     workspaceId: config.workspaceId,
     latestRevision: envelope.revision,
@@ -393,6 +439,13 @@ type FirestoreDocument = {
   updateTime?: string;
 };
 
+type FirestorePrecondition = { exists: boolean } | { updateTime: string };
+type FirestoreWrite = {
+  path: string;
+  fields: Record<string, FirestoreValue>;
+  currentDocument?: FirestorePrecondition;
+};
+
 export interface FirebaseAnonymousSession {
   idToken: string;
   refreshToken?: string;
@@ -436,7 +489,18 @@ export class FirebaseE2eeSyncClient {
 
   async readManifest(session: FirebaseAnonymousSession): Promise<FirebaseE2eeManifest | undefined> {
     const document = await this.readDocument(buildFirebaseSyncPaths(this.config).manifest, session);
-    return document ? this.parseJsonField<FirebaseE2eeManifest>(document, "manifestJson") : undefined;
+    if (!document) return undefined;
+    const manifest = this.parseJsonField<FirebaseE2eeManifest>(document, "manifestJson");
+    assertFirebaseManifestCompatible(manifest);
+    if (document.updateTime) {
+      Object.defineProperty(manifest, "firestoreUpdateTime", {
+        value: document.updateTime,
+        enumerable: false,
+        writable: false,
+        configurable: false
+      });
+    }
+    return manifest;
   }
 
   async readLatestSnapshotEnvelope(session: FirebaseAnonymousSession): Promise<FirebaseWorkspaceSnapshotEnvelope | undefined> {
@@ -450,6 +514,14 @@ export class FirebaseE2eeSyncClient {
     session: FirebaseAnonymousSession,
     previousManifest?: FirebaseE2eeManifest
   ): Promise<FirebaseWorkspacePushResult> {
+    assertFirebaseManifestCompatible(previousManifest);
+    const manifestPrecondition: FirestorePrecondition = previousManifest
+      ? previousManifest.firestoreUpdateTime
+        ? { updateTime: previousManifest.firestoreUpdateTime }
+        : (() => {
+            throw new FirebaseSyncConflictError("Firebase manifest version is unavailable. Read the latest manifest before pushing.");
+          })()
+      : { exists: false };
     const createdAt = new Date().toISOString();
     const envelope = await createFirebaseWorkspaceSnapshotEnvelope(
       snapshot,
@@ -465,6 +537,7 @@ export class FirebaseE2eeSyncClient {
         path: paths.snapshot,
         fields: {
           schemaVersion: { integerValue: "1" },
+          workspaceSchemaVersion: { integerValue: String(CURRENT_WORKSPACE_SCHEMA_VERSION) },
           workspaceId: { stringValue: this.config.workspaceId },
           revision: { stringValue: envelope.revision },
           updatedAt: { stringValue: envelope.createdAt },
@@ -473,8 +546,10 @@ export class FirebaseE2eeSyncClient {
       },
       {
         path: joinRepoPath(paths.opDirectory, envelope.revision),
+        currentDocument: { exists: false },
         fields: {
           schemaVersion: { integerValue: "1" },
+          workspaceSchemaVersion: { integerValue: String(CURRENT_WORKSPACE_SCHEMA_VERSION) },
           workspaceId: { stringValue: this.config.workspaceId },
           deviceId: { stringValue: this.config.deviceId },
           revision: { stringValue: envelope.revision },
@@ -485,8 +560,10 @@ export class FirebaseE2eeSyncClient {
       },
       {
         path: paths.manifest,
+        currentDocument: manifestPrecondition,
         fields: {
           schemaVersion: { integerValue: "1" },
+          workspaceSchemaVersion: { integerValue: String(CURRENT_WORKSPACE_SCHEMA_VERSION) },
           workspaceId: { stringValue: this.config.workspaceId },
           latestRevision: { stringValue: manifest.latestRevision },
           updatedAt: { stringValue: manifest.updatedAt },
@@ -500,11 +577,13 @@ export class FirebaseE2eeSyncClient {
   async pullWorkspaceSnapshot(passphrase: string, session: FirebaseAnonymousSession): Promise<FirebaseWorkspacePullResult> {
     const manifest = await this.readManifest(session);
     if (!manifest) throw new Error("Firebase workspace manifest does not exist yet.");
+    assertFirebaseManifestCompatible(manifest);
     const envelope = await this.readLatestSnapshotEnvelope(session);
     if (!envelope) throw new Error("Firebase latest workspace snapshot does not exist yet.");
     if (envelope.revision !== manifest.latestRevision) {
       throw new FirebaseSyncConflictError("Firebase manifest and latest snapshot revision differ. Push or pull again after the writer finishes.");
     }
+    assertSupportedWorkspaceSchemaVersion(envelope.workspaceSchemaVersion, "Firebase snapshot envelope");
     const workspace = await decryptFirebaseWorkspaceSnapshotEnvelope(envelope, passphrase);
     return { manifest, envelope, workspace };
   }
@@ -519,7 +598,7 @@ export class FirebaseE2eeSyncClient {
   }
 
   private async commitDocuments(
-    documents: Array<{ path: string; fields: Record<string, FirestoreValue> }>,
+    documents: FirestoreWrite[],
     session: FirebaseAnonymousSession
   ): Promise<{ commitTime?: string }> {
     const response = await this.fetcher(this.commitUrl(), {
@@ -533,11 +612,24 @@ export class FirebaseE2eeSyncClient {
           update: {
             name: this.documentName(document.path),
             fields: document.fields
-          }
+          },
+          ...(document.currentDocument ? { currentDocument: document.currentDocument } : {})
         }))
       })
     });
-    if (!response.ok) throw new Error(`Firebase commit failed: ${response.status}`);
+    if (!response.ok) {
+      let firestoreStatus = "";
+      try {
+        const payload = await response.json() as { error?: { status?: string; message?: string } };
+        firestoreStatus = `${payload.error?.status ?? ""} ${payload.error?.message ?? ""}`.trim();
+      } catch {
+        // The HTTP status is still sufficient for a conflict-safe failure.
+      }
+      if (response.status === 409 || /FAILED_PRECONDITION|ABORTED/.test(firestoreStatus)) {
+        throw new FirebaseSyncConflictError("Firebase workspace changed while this device was pushing. Pull the latest workspace before retrying.");
+      }
+      throw new Error(`Firebase commit failed: ${response.status}${firestoreStatus ? ` (${firestoreStatus})` : ""}`);
+    }
     return await response.json() as { commitTime?: string };
   }
 
@@ -594,5 +686,5 @@ export const firebaseE2eeSyncStatus = {
   encryption: "AES-GCM with PBKDF2-SHA256 passphrase-derived key",
   secretBoundary: "Firebase stores ciphertext only; passphrase and provider keys never leave the device",
   authModel: "Firebase anonymous auth for transport access; workspace passphrase controls decryption",
-  conflictPolicy: "If remote has advanced beyond this device's last sync, pull before pushing"
+  conflictPolicy: "Manifest compare-and-swap rejects concurrent writers; divergent local and remote changes require review"
 };

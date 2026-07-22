@@ -307,7 +307,10 @@ export const baselines: Baseline[] = [
 ];
 
 export const sampleWorkspace: WorkspaceSnapshot = {
+  schemaVersion: 3,
   timeZone: "Asia/Tokyo",
+  todos: [],
+  conversionHistory: [],
   projects,
   workItems,
   recurringOccurrences: [],
