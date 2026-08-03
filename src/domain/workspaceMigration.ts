@@ -688,7 +688,8 @@ function todoToRollbackTask(
   const estimatedSeconds = finiteNonNegative(todo.estimatedSeconds) ?? 0;
   const constraint = {
     ...(todo.deferUntil ? { noEarlierThan: todo.deferUntil } : {}),
-    ...(todo.dueAt ? { noLaterThan: todo.dueAt } : {})
+    ...(todo.dueAt ? { noLaterThan: todo.dueAt } : {}),
+    ...(todo.scheduledAt ? { fixedStart: todo.scheduledAt } : {})
   };
   return {
     id: workItemId,
@@ -710,6 +711,7 @@ function todoToRollbackTask(
     estimatedSeconds: todo.estimatedSeconds,
     deferUntil: todo.deferUntil,
     dueAt: todo.dueAt,
+    scheduledAt: todo.scheduledAt,
     checklist: todo.checklist.map((item) => ({ ...item })),
     plannedForDate: todo.plannedForDate,
     completedAt: todo.completedAt,
@@ -726,7 +728,14 @@ function createTodoRollbackProject(
 ): Omit<Project, "planningMethod" | "stage"> {
   const dates = [
     ...source.projects.flatMap((project) => [project.start, project.horizon]),
-    ...source.todos.flatMap((todo) => [todo.capturedAt, todo.updatedAt, todo.deferUntil, todo.dueAt, todo.completedAt])
+    ...source.todos.flatMap((todo) => [
+      todo.capturedAt,
+      todo.updatedAt,
+      todo.deferUntil,
+      todo.dueAt,
+      todo.scheduledAt,
+      todo.completedAt
+    ])
   ].filter((value): value is string => typeof value === "string" && !Number.isNaN(Date.parse(value))).sort();
   const start = dates[0] ?? "1970-01-01T00:00:00.000Z";
   const horizon = dates[dates.length - 1] ?? start;

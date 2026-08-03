@@ -13,10 +13,12 @@ import {
   Circle,
   CircleSlash2,
   ClipboardCheck,
+  Diamond,
   FileDown,
   FileJson,
   FileText,
   Flag,
+  Folder,
   GitCommitHorizontal,
   GitPullRequest,
   Inbox,
@@ -132,6 +134,7 @@ import {
   buildGitHubSyncPaths,
   createSyncChangeEnvelope,
   createSyncManifest,
+  FirebaseAuthenticationError,
   FirebaseE2eeSyncClient,
   FirebaseSyncConflictError,
   firebaseE2eeSyncStatus,
@@ -194,6 +197,7 @@ import {
   type ConvertTodoToTaskInput as TodosPageConvertToTaskInput,
   type TodoUpdatePatch
 } from "@/features/todos/TodosPage";
+import { QuietHorizonsDashboard } from "@/features/projects/QuietHorizonsDashboard";
 
 type View = "today" | "todos" | "projects" | "review" | "project" | "calendar" | "portfolio" | "audit" | "reports" | "agent" | "settings";
 type ScheduleTiming = "Overdue" | "Due now" | "Upcoming";
@@ -1075,10 +1079,21 @@ function RoutedApp() {
 
     try {
       const client = new FirebaseE2eeSyncClient(firebaseConfigFromSettings(settings));
-      const session = firebaseSessionRef.current ?? await client.signInAnonymously();
+      const cachedSession = firebaseSessionRef.current;
+      let session = cachedSession ?? await client.signInAnonymously();
       if (stopForHardInvalidation() || stopForWorkspaceChange()) return;
       firebaseSessionRef.current = session;
-      const manifest = await client.readManifest(session);
+      let manifest;
+      try {
+        manifest = await client.readManifest(session);
+      } catch (error) {
+        if (!(cachedSession && error instanceof FirebaseAuthenticationError)) throw error;
+        firebaseSessionRef.current = undefined;
+        session = await client.refreshAnonymousSession(cachedSession);
+        if (stopForHardInvalidation() || stopForWorkspaceChange()) return;
+        firebaseSessionRef.current = session;
+        manifest = await client.readManifest(session);
+      }
       if (stopForHardInvalidation() || stopForWorkspaceChange()) return;
       const syncWorkspace = workspaceRef.current;
       const localChecksum = await workspacePlaintextChecksum(syncWorkspace);
@@ -2717,6 +2732,8 @@ function RoutedApp() {
   const activePlanningProjectIds = new Set(workspace.projects.filter((project) => !isProjectArchived(project)).map((project) => project.id));
   const openHardGateCount = model.gates.filter((gate) => activePlanningProjectIds.has(gate.projectId) && gate.severity === "hard" && gate.status !== "cleared").length;
   const todayTodos = selectTodayTodos(workspace.todos, clockNow, workspace.timeZone);
+  const quietHorizonsDashboardActive = view === "projects" || view === "portfolio";
+  const quietHorizonsActive = true;
 
   if (!workspacePersistence.loaded) {
     return (
@@ -2773,20 +2790,24 @@ function RoutedApp() {
   }
 
   return (
-    <div className="min-h-screen bg-background text-foreground">
+    <div className="quietHorizonsShell min-h-screen bg-background text-foreground">
       <aside
         data-collapsed={sidebarCollapsed ? "true" : "false"}
+        data-quiet-horizons={quietHorizonsActive ? "true" : undefined}
         className={cn(
           "desktopSidebar fixed inset-y-0 left-0 z-30 hidden flex-col border-r bg-card/95 pb-[max(1rem,env(safe-area-inset-bottom))] pt-[max(1rem,env(safe-area-inset-top))] shadow-sm backdrop-blur lg:flex",
-          sidebarCollapsed ? "w-20 px-2" : "w-64 px-3"
+          sidebarCollapsed ? "w-20 px-2" : quietHorizonsActive ? "w-[120px] px-2" : "w-64 px-3"
         )}
       >
         <div className={cn("desktopSidebarBrand", sidebarCollapsed && "collapsed")}>
-          <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary text-sm font-bold text-primary-foreground">OP</div>
+          <div className={cn(
+            "flex h-9 w-9 items-center justify-center rounded-lg bg-primary text-sm font-bold text-primary-foreground",
+            quietHorizonsActive && "quietHorizonsMark"
+          )}>{quietHorizonsActive ? "QH" : "OP"}</div>
           {!sidebarCollapsed && (
           <div className="min-w-0">
-            <div className="text-sm font-semibold">OmniPlan Personal</div>
-            <div className="text-xs text-muted-foreground">AI-era project OS</div>
+            <div className="text-sm font-semibold">{quietHorizonsActive ? "Quiet Horizons" : "OmniPlan Personal"}</div>
+            {!quietHorizonsActive && <div className="text-xs text-muted-foreground">AI-era project OS</div>}
           </div>
           )}
           <Button
@@ -2802,24 +2823,26 @@ function RoutedApp() {
           </Button>
         </div>
         <nav className="space-y-1" aria-label="Primary">
-          <NavButton collapsed={sidebarCollapsed} active={view === "today"} icon={<Timer />} label="Today" href={hashForRoute({ view: "today", selectedProjectId })} />
+          <NavButton collapsed={sidebarCollapsed} active={view === "today" || view === "calendar"} icon={<Timer />} label="Today" href={hashForRoute({ view: "today", selectedProjectId })} />
           <NavButton collapsed={sidebarCollapsed} active={view === "todos"} icon={<ListTodo />} label="Todos" href={hashForRoute({ view: "todos", selectedProjectId })} />
-          <NavButton collapsed={sidebarCollapsed} active={view === "projects" || view === "portfolio" || view === "project"} icon={<Layers3 />} label="Projects" href={hashForRoute({ view: "projects", selectedProjectId })} />
+          <NavButton collapsed={sidebarCollapsed} active={view === "projects" || view === "portfolio" || view === "project" || view === "reports"} icon={<Folder />} label="Projects" href={hashForRoute({ view: "projects", selectedProjectId })} />
           <NavButton collapsed={sidebarCollapsed} active={view === "review" || view === "audit"} icon={<ClipboardCheck />} label="Review" href={hashForRoute({ view: "review", selectedProjectId })} />
         </nav>
         <Button
           type="button"
-          className={cn("sidebarQuickCaptureButton mt-3", sidebarCollapsed && "justify-center px-0")}
+          className={cn("sidebarQuickCaptureButton mt-3", quietHorizonsActive && "quietHorizonsTodoButton", sidebarCollapsed && "justify-center px-0")}
           aria-label="Add Todo"
           aria-keyshortcuts="Meta+N Control+N"
           title={sidebarCollapsed ? "Add Todo (Cmd/Ctrl+N)" : undefined}
           onClick={() => openQuickCapture(false)}
         >
           <Plus aria-hidden="true" />
-          {!sidebarCollapsed && <span>Add Todo</span>}
-          {!sidebarCollapsed && <kbd>⌘N</kbd>}
+          {!sidebarCollapsed && <span>{quietHorizonsActive ? "Todo" : "Add Todo"}</span>}
+          {!sidebarCollapsed && !quietHorizonsActive && <kbd>⌘N</kbd>}
         </Button>
-        <Separator className="my-4" />
+        {!quietHorizonsActive && <Separator className="my-4" />}
+        {!quietHorizonsActive && (
+        <>
         {sidebarCollapsed ? (
         <div className="flex justify-center">
           <IconStatusBadge
@@ -2834,9 +2857,12 @@ function RoutedApp() {
           <div>{openHardGateCount ? `${openHardGateCount} priority signals need review` : "Review clear"}</div>
         </div>
         )}
+        </>
+        )}
         <Separator className="mb-3 mt-auto" />
         <NavButton collapsed={sidebarCollapsed} active={view === "settings" || view === "agent"} icon={<SettingsIcon />} label="Settings" href={hashForRoute({ view: "settings", selectedProjectId })} />
-        <Separator className="my-3" />
+        {!quietHorizonsActive && <Separator className="my-3" />}
+        {!quietHorizonsActive && (
         <div
           className={cn(
             "flex min-h-9 items-center rounded-md border bg-muted/20 text-xs text-muted-foreground",
@@ -2851,24 +2877,46 @@ function RoutedApp() {
           </span>
           {!sidebarCollapsed && <code className="truncate font-mono tabular-nums text-foreground">{buildCommitShort}</code>}
         </div>
+        )}
       </aside>
 
-      <div className={cn("desktopContent", sidebarCollapsed ? "lg:pl-20" : "lg:pl-64")}>
+      <div className={cn("desktopContent", sidebarCollapsed ? "lg:pl-20" : quietHorizonsActive ? "lg:pl-[120px]" : "lg:pl-64")}>
         <nav className="fixed inset-x-3 bottom-3 z-30 grid grid-cols-4 rounded-xl border bg-card/95 p-1 shadow-lg backdrop-blur lg:hidden" aria-label="Mobile primary">
-          <NavButton active={view === "today"} icon={<Timer />} label="Today" href={hashForRoute({ view: "today", selectedProjectId })} />
+          <NavButton active={view === "today" || view === "calendar"} icon={<Timer />} label="Today" href={hashForRoute({ view: "today", selectedProjectId })} />
           <NavButton active={view === "todos"} icon={<ListTodo />} label="Todos" href={hashForRoute({ view: "todos", selectedProjectId })} />
-          <NavButton active={view === "projects" || view === "portfolio" || view === "project"} icon={<Layers3 />} label="Projects" href={hashForRoute({ view: "projects", selectedProjectId })} />
+          <NavButton active={view === "projects" || view === "portfolio" || view === "project" || view === "reports"} icon={<Layers3 />} label="Projects" href={hashForRoute({ view: "projects", selectedProjectId })} />
           <NavButton active={view === "review" || view === "audit"} icon={<ClipboardCheck />} label="Review" href={hashForRoute({ view: "review", selectedProjectId })} />
         </nav>
-        <main className="px-4 py-4 pb-24 lg:px-6 lg:pb-8" aria-labelledby="page-title">
+        <main className={cn(
+          "px-4 py-4 pb-24",
+          quietHorizonsActive ? "lg:p-0" : "lg:px-6 lg:pb-8"
+        )} aria-labelledby="page-title">
         <h1 id="page-title" ref={pageTitleRef} tabIndex={-1} className="srOnly">{viewTitle(view, selectedProjectName)}</h1>
         <div className="routeAnnouncer" aria-live="polite">{breadcrumbFor(view, selectedProjectName)}</div>
         {(autoSyncStatus.state === "conflict" || autoSyncStatus.state === "error") && (
-          <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-destructive/30 bg-destructive/10 p-3 text-sm" role="alert">
+          <div className="qhShellAlert flex flex-wrap items-center justify-between gap-3 border border-destructive/30 bg-destructive/10 p-3 text-sm" role="alert">
             <span>{autoSyncStatus.message}</span>
             <a className="font-medium underline underline-offset-4" href={hashForRoute({ view: "settings", selectedProjectId })}>Open Settings</a>
           </div>
         )}
+
+        {!quietHorizonsDashboardActive && view !== "todos" && (
+          <QuietHorizonsPageHeader
+            view={view}
+            projectName={selectedProjectName}
+            selectedProjectId={selectedProjectId}
+            currentTime={clockNow}
+            timeZone={workspace.timeZone}
+            openTodoCount={workspace.todos.filter((todo) => todo.status === "open").length}
+            openHardGateCount={openHardGateCount}
+          />
+        )}
+
+        <div className={cn(
+          "quietHorizonsRoute",
+          !quietHorizonsDashboardActive && "qhPageContent",
+          view === "todos" && "qhTodosPageContent"
+        )}>
 
         {view === "todos" && (
           <TodosPage
@@ -2890,14 +2938,34 @@ function RoutedApp() {
           />
         )}
         {(view === "projects" || view === "portfolio") && (
-          <PortfolioDashboard
+          <QuietHorizonsDashboard
             projects={workspace.projects}
             schedules={model.schedules}
             health={model.health}
             gates={model.gates}
-            overloads={model.overloads}
-            onProjectCreate={createProject}
-            onProjectRestore={restoreProject}
+            dependencies={workspace.dependencies}
+            baselines={workspace.baselines}
+            workItems={workspace.workItems}
+            now={clockNow}
+            headerActions={(
+              <>
+                <ArchivedProjectsSheet projects={workspace.projects} onRestore={restoreProject} />
+                <CreateProjectSheet onCreate={createProject} />
+              </>
+            )}
+            projectHref={(projectId, target) => hashForRoute({ view: "project", selectedProjectId: projectId, target })}
+            reviewHref={hashForRoute({ view: "review", selectedProjectId })}
+            renderGantt={({ items, dependencies, baseline, gates }) => (
+              <GanttChart
+                items={items}
+                dependencies={dependencies}
+                baseline={baseline}
+                gates={gates}
+                embedded
+                onDependencyUpdate={updateDependency}
+                onDependencyRemove={removeDependency}
+              />
+            )}
           />
         )}
         {view === "project" && selectedProject && selectedSchedule && (
@@ -3060,6 +3128,7 @@ function RoutedApp() {
             onEvidenceImport={importEvidenceItems}
           />
         )}
+        </div>
         </main>
       </div>
       <Button
@@ -3113,6 +3182,143 @@ function breadcrumbFor(view: View, projectName: string) {
   if (view === "calendar") return "Today / Calendar";
   if (view === "agent") return "Settings / Agent";
   return viewTitle(view, projectName);
+}
+
+function QuietHorizonsPageHeader({
+  view,
+  projectName,
+  selectedProjectId,
+  currentTime,
+  timeZone,
+  openTodoCount,
+  openHardGateCount
+}: {
+  view: View;
+  projectName: string;
+  selectedProjectId: string;
+  currentTime: string;
+  timeZone: string;
+  openTodoCount: number;
+  openHardGateCount: number;
+}) {
+  const todayLabel = zonedDateKey(currentTime, timeZone);
+  const config = (() => {
+    switch (view) {
+      case "today":
+        return {
+          eyebrow: "Daily focus",
+          title: "Today",
+          description: "Current commitments, overdue work, and the next few days.",
+          meta: `${todayLabel} · ${openTodoCount} open todos`,
+          icon: <Timer />,
+          actionLabel: "Open Calendar",
+          actionHref: hashForRoute({ view: "calendar", selectedProjectId }),
+          actionIcon: <CalendarClock />,
+          tone: openHardGateCount ? "attention" : "calm"
+        };
+      case "project":
+        return {
+          eyebrow: "Project workspace",
+          title: projectName,
+          description: "Outcome, schedule, evidence, and controls in one place.",
+          meta: "Detailed planning",
+          icon: <Folder />,
+          actionLabel: "Back to Projects",
+          actionHref: hashForRoute({ view: "projects", selectedProjectId }),
+          actionIcon: <Folder />,
+          tone: "neutral"
+        };
+      case "calendar":
+        return {
+          eyebrow: "Time",
+          title: "Calendar",
+          description: "Scheduled work and recurring commitments.",
+          meta: timeZone,
+          icon: <CalendarClock />,
+          actionLabel: "Back to Today",
+          actionHref: hashForRoute({ view: "today", selectedProjectId }),
+          actionIcon: <Timer />,
+          tone: "neutral"
+        };
+      case "review":
+      case "audit":
+        return {
+          eyebrow: "Decisions",
+          title: "Review",
+          description: "Resolve priority signals before they become delivery risk.",
+          meta: openHardGateCount ? `${openHardGateCount} priority signals` : "Review clear",
+          icon: <ClipboardCheck />,
+          actionLabel: "Open Projects",
+          actionHref: hashForRoute({ view: "projects", selectedProjectId }),
+          actionIcon: <Folder />,
+          tone: openHardGateCount ? "attention" : "calm"
+        };
+      case "reports":
+        return {
+          eyebrow: "Project intelligence",
+          title: "Reports",
+          description: "Schedule, variance, risk, and export-ready evidence.",
+          meta: projectName,
+          icon: <BarChart3 />,
+          actionLabel: "Open Project",
+          actionHref: hashForRoute({ view: "project", selectedProjectId }),
+          actionIcon: <Folder />,
+          tone: "neutral"
+        };
+      case "agent":
+        return {
+          eyebrow: "Automation",
+          title: "Agent",
+          description: "Read endpoints, guarded commands, and contrarian audit.",
+          meta: "Local workspace",
+          icon: <Zap />,
+          actionLabel: "Open Settings",
+          actionHref: hashForRoute({ view: "settings", selectedProjectId }),
+          actionIcon: <SettingsIcon />,
+          tone: "neutral"
+        };
+      case "settings":
+        return {
+          eyebrow: "Workspace",
+          title: "Settings",
+          description: "Sync, secrets, AI provider, and local workspace controls.",
+          meta: "Local-first",
+          icon: <SettingsIcon />,
+          actionLabel: "Open Agent",
+          actionHref: hashForRoute({ view: "agent", selectedProjectId }),
+          actionIcon: <Zap />,
+          tone: "neutral"
+        };
+      case "todos":
+      case "projects":
+      case "portfolio":
+        return undefined;
+    }
+  })();
+
+  if (!config) return null;
+
+  return (
+    <header className="qhPageHeader">
+      <div className="qhPageHeading">
+        <span className="qhPageHeadingIcon" aria-hidden="true">{config.icon}</span>
+        <span className="qhPageHeadingCopy">
+          <span className="qhPageEyebrow">{config.eyebrow}</span>
+          <strong>{config.title}</strong>
+          <small>{config.description}</small>
+        </span>
+      </div>
+      <div className="qhPageHeaderMeta">
+        <span className="qhPageStatus" data-tone={config.tone}>
+          <span aria-hidden="true" />
+          {config.meta}
+        </span>
+        <Button asChild variant="outline" size="icon" className="qhPageHeaderAction" title={config.actionLabel}>
+          <a href={config.actionHref} aria-label={config.actionLabel}>{config.actionIcon}</a>
+        </Button>
+      </div>
+    </header>
+  );
 }
 
 function NavButton({
@@ -6865,7 +7071,7 @@ function Reports({
     <section className="grid gap-3">
       <div className="portfolioHeader">
         <div className="min-w-0">
-          <h2 className="text-lg font-semibold tracking-tight">Reports</h2>
+          <h2 className="srOnly">Reports</h2>
           <div className="compactBadgeRow">
             <Badge variant={evm ? "secondary" : "warning"} className="iconBadge" title="Schedule performance index"><BarChart3 />SPI {evm ? evm.schedulePerformanceIndex.toFixed(2) : "-"}</Badge>
             <Badge variant={evm ? "secondary" : "warning"} className="iconBadge" title="Cost performance index"><BarChart3 />CPI {evm ? evm.costPerformanceIndex.toFixed(2) : "-"}</Badge>
@@ -8726,6 +8932,19 @@ function formatTick(iso: string) {
   return date.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
 }
 
+function formatGanttWeekday(iso: string) {
+  return new Intl.DateTimeFormat("en-US", { weekday: "narrow", timeZone: "UTC" }).format(new Date(iso));
+}
+
+function formatGanttWeek(start: string, finish: string) {
+  const startDate = new Date(start);
+  const finishDate = new Date(finish);
+  const month = new Intl.DateTimeFormat("en-US", { month: "short", timeZone: "UTC" });
+  const startMonth = month.format(startDate);
+  const finishMonth = month.format(finishDate);
+  return `${startMonth} ${startDate.getUTCDate()} – ${startMonth === finishMonth ? "" : `${finishMonth} `}${finishDate.getUTCDate()}`;
+}
+
 function formatScheduleRange(item: ScheduledItem) {
   return `${formatShortDateTime(item.start)} -> ${formatShortDateTime(item.finish)}`;
 }
@@ -9282,12 +9501,16 @@ function GanttChart({
   items,
   dependencies,
   baseline,
+  gates = [],
+  embedded = false,
   onDependencyUpdate,
   onDependencyRemove
 }: {
   items: ScheduledItem[];
   dependencies: Dependency[];
   baseline?: Baseline;
+  gates?: AuditGate[];
+  embedded?: boolean;
   onDependencyUpdate: (dependencyId: string, patch: DependencyPatch) => void;
   onDependencyRemove: (dependencyId: string) => void;
 }) {
@@ -9302,30 +9525,76 @@ function GanttChart({
   const firstStart = sortedItems[0]?.start ?? now;
   const visibleItemIds = new Set(sortedItems.map((item) => item.workItem.id));
   const selectedItem = sortedItems.find((item) => item.workItem.id === selectedItemId) ?? sortedItems[0];
-  const pixelsPerDay = zoom === "compact" ? 44 : zoom === "wide" ? 128 : 84;
-  const rowHeight = 46;
-  const labelWidth = 320;
+  const pixelsPerDay = embedded ? 80 : zoom === "compact" ? 44 : zoom === "wide" ? 128 : 84;
+  const rowHeight = embedded ? 29 : 46;
+  const labelWidth = embedded ? 0 : 320;
   const baselineStarts = baseline ? Object.values(baseline.plannedStartByItem) : [];
   const baselineFinishes = baseline ? Object.values(baseline.plannedFinishByItem) : [];
-  const min = startOfDay(
+  const earliest = startOfDay(
     [...sortedItems.map((item) => item.start), ...baselineStarts].reduce(
       (value, item) => (item < value ? item : value),
       firstStart
     )
   );
-  const maxRaw = [...sortedItems.map((item) => item.finish), ...baselineFinishes, now].reduce(
+  const min = embedded ? addSeconds(earliest, -daySeconds) : earliest;
+  const maxCandidates = embedded
+    ? [...sortedItems.map((item) => item.finish), ...baselineFinishes]
+    : [...sortedItems.map((item) => item.finish), ...baselineFinishes, now];
+  const maxRaw = maxCandidates.reduce(
     (value, item) => (item > value ? item : value),
     sortedItems[0]?.finish ?? now
   );
-  const max = addSeconds(startOfDay(maxRaw), 2 * daySeconds);
+  const paddedMax = addSeconds(startOfDay(maxRaw), 2 * daySeconds);
+  const minimumEmbeddedMax = addSeconds(min, 17 * daySeconds);
+  const max = embedded && paddedMax < minimumEmbeddedMax ? minimumEmbeddedMax : paddedMax;
   const totalDays = Math.max(1, Math.ceil(secondsBetween(min, max) / daySeconds));
   const width = totalDays * pixelsPerDay;
-  const height = sortedItems.length * rowHeight;
+  let laneTop = 0;
+  const laneLayouts = sortedItems.map((item) => {
+    const laneHeight = rowHeight;
+    const layout = { top: laneTop, height: laneHeight, center: laneTop + laneHeight / 2 };
+    laneTop += laneHeight;
+    return layout;
+  });
+  const height = laneTop;
   const ticks = Array.from({ length: totalDays + 1 }, (_, index) => addSeconds(min, index * daySeconds));
   const x = (iso: string) => Math.max(0, (secondsBetween(min, iso) / daySeconds) * pixelsPerDay);
   const criticalCount = items.filter((item) => item.isCritical).length;
   const visibleDependencies = dependencies.filter((dependency) => visibleItemIds.has(dependency.fromId) && visibleItemIds.has(dependency.toId));
-  const indexById = new Map(sortedItems.map((item, index) => [item.workItem.id, index]));
+  const gateByItemId = new Map(gates
+    .filter((gate) => gate.status !== "cleared" && visibleItemIds.has(gate.targetId))
+    .sort((left, right) => Number(right.severity === "hard") - Number(left.severity === "hard"))
+    .map((gate) => [gate.targetId, gate]));
+  const baselineRangeByItemId = new Map<string, { start: string; finish: string }>();
+  if (baseline) {
+    sortedItems.forEach((item) => {
+      const start = baseline.plannedStartByItem[item.workItem.id];
+      const finish = baseline.plannedFinishByItem[item.workItem.id];
+      if (start && finish) baselineRangeByItemId.set(item.workItem.id, { start, finish });
+    });
+    sortedItems.filter((item) => item.workItem.kind === "phase").forEach((phase) => {
+      const childRanges = sortedItems
+        .filter((item) => item.workItem.parentId === phase.workItem.id)
+        .map((item) => baselineRangeByItemId.get(item.workItem.id))
+        .filter((range): range is { start: string; finish: string } => Boolean(range));
+      if (!childRanges.length) return;
+      baselineRangeByItemId.set(phase.workItem.id, {
+        start: childRanges.reduce((earliest, range) => range.start < earliest ? range.start : earliest, childRanges[0].start),
+        finish: childRanges.reduce((latest, range) => range.finish > latest ? range.finish : latest, childRanges[0].finish)
+      });
+    });
+  }
+  const weekBands = Array.from({ length: Math.ceil(totalDays / 7) }, (_, index) => {
+    const startIndex = index * 7;
+    const endIndex = Math.min(totalDays, startIndex + 7);
+    return {
+      start: ticks[startIndex],
+      end: ticks[Math.max(startIndex, endIndex - 1)],
+      left: startIndex * pixelsPerDay,
+      width: Math.max(pixelsPerDay, (endIndex - startIndex) * pixelsPerDay)
+    };
+  });
+  const laneLayoutById = new Map(sortedItems.map((item, index) => [item.workItem.id, laneLayouts[index]]));
   const criticalPathWidth = sortedItems.filter((item) => item.isCritical).length;
   const selectedDependency = visibleDependencies.find((dependency) => dependency.id === selectedDependencyId);
   const relatedDependencies = selectedItem
@@ -9390,7 +9659,7 @@ function GanttChart({
   if (!selectedItem) return <div className="emptyState">No scheduled items.</div>;
 
   return (
-    <div className="ganttWorkSurface" aria-label={`Interactive Gantt chart with ${items.length} items from ${formatShortDateTime(min)} to ${formatShortDateTime(max)}; ${criticalCount} critical items.`}>
+    <div className={cn("ganttWorkSurface", embedded && "embedded")} aria-label={`Interactive Gantt chart with ${items.length} items from ${formatShortDateTime(min)} to ${formatShortDateTime(max)}; ${criticalCount} critical items.`}>
       <div className="ganttToolbar">
         <div className="ganttToolbarBadges">
           <Badge variant={baseline ? "success" : "outline"} className="iconBadge" title={baseline?.name ?? "No baseline"}>{baseline ? <CheckCircle2 /> : <Archive />}{baseline ? "B" : "-"}</Badge>
@@ -9410,29 +9679,40 @@ function GanttChart({
         </div>
       </div>
       <div className="ganttViewport" ref={viewportRef} onScroll={updateViewport}>
-        <div className="ganttBoard" style={{ width: labelWidth + width, gridTemplateColumns: `${labelWidth}px ${width}px` }}>
-          <div className="ganttTreeHeader">WBS / Task</div>
-          <div className="ganttTimeHeader" style={{ width }}>
+        <div className={cn("ganttBoard", embedded && "embedded")} style={{ width: labelWidth + width, gridTemplateColumns: `${labelWidth}px ${width}px` }}>
+          {!embedded && (
+            <div className="ganttTreeHeader">
+              <span>WBS / Task</span>
+            </div>
+          )}
+          <div className={cn("ganttTimeHeader", embedded && "embedded")} style={{ width }}>
+            {embedded && weekBands.map((week) => (
+              <div key={week.start} className="ganttWeekBand" style={{ left: week.left, width: week.width }}>
+                {formatGanttWeek(week.start, week.end)}
+              </div>
+            ))}
             {ticks.map((tick, index) => (
               <div key={tick} className={`ganttTick ${index % 7 === 5 || index % 7 === 6 ? "weekend" : ""}`} style={{ left: index * pixelsPerDay, width: pixelsPerDay }}>
-                {formatTick(tick)}
+                {embedded ? <strong>{formatGanttWeekday(tick)}</strong> : formatTick(tick)}
               </div>
             ))}
           </div>
-          <div className="ganttTreeRows">
-            {sortedItems.map((item) => (
-              <button
-                key={item.workItem.id}
-                className={`ganttTreeRow ${selectedItem.workItem.id === item.workItem.id ? "selected" : ""} ${item.workItem.kind}`}
-                onClick={() => setSelectedItemId(item.workItem.id)}
-                aria-pressed={selectedItem.workItem.id === item.workItem.id}
-              >
-                <span className="ganttOutline">{item.workItem.outline}</span>
-                <span className="ganttTaskTitle">{item.workItem.title}</span>
-                {item.isCritical && <span className="miniBadge danger">Critical</span>}
-              </button>
-            ))}
-          </div>
+          {!embedded && (
+            <div className="ganttTreeRows">
+              {sortedItems.map((item) => (
+                <button
+                  key={item.workItem.id}
+                  className={`ganttTreeRow ${selectedItem.workItem.id === item.workItem.id ? "selected" : ""} ${item.workItem.kind}`}
+                  onClick={() => setSelectedItemId(item.workItem.id)}
+                  aria-pressed={selectedItem.workItem.id === item.workItem.id}
+                >
+                  <span className="ganttOutline">{item.workItem.outline}</span>
+                  <span className="ganttTaskTitle">{item.workItem.title}</span>
+                  {item.isCritical && <span className="miniBadge danger">Critical</span>}
+                </button>
+              ))}
+            </div>
+          )}
           <div className="ganttTimelinePane" style={{ width, height }}>
             {ticks.map((tick, index) => (
               <div
@@ -9441,33 +9721,48 @@ function GanttChart({
                 style={{ left: index * pixelsPerDay, width: pixelsPerDay }}
               />
             ))}
-            <div className="ganttToday" style={{ left: x(now) }}>
-              <span>Today</span>
-            </div>
+            {x(now) >= 0 && x(now) <= width && (
+              <div className="ganttToday" style={{ left: x(now) }}>
+                <span>Today</span>
+              </div>
+            )}
             <svg className="ganttDependencyLayer" width={width} height={height} viewBox={`0 0 ${width} ${height}`} aria-hidden="true">
               <defs>
-                <marker id="gantt-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
-                  <path d="M0,0 L8,4 L0,8 z" className="ganttArrowHead" />
+                <marker
+                  id={embedded ? "gantt-arrow-embedded" : "gantt-arrow"}
+                  markerWidth={embedded ? 5 : 8}
+                  markerHeight={embedded ? 5 : 8}
+                  refX={embedded ? 4.5 : 7}
+                  refY={embedded ? 2.5 : 4}
+                  orient="auto"
+                >
+                  <path d={embedded ? "M0,0 L5,2.5 L0,5 z" : "M0,0 L8,4 L0,8 z"} className="ganttArrowHead" />
                 </marker>
               </defs>
               {visibleDependencies.map((dependency) => {
                 const from = itemById.get(dependency.fromId);
                 const to = itemById.get(dependency.toId);
                 if (!from || !to) return null;
-                const fromIndex = indexById.get(from.workItem.id) ?? 0;
-                const toIndex = indexById.get(to.workItem.id) ?? 0;
                 const x1 = dependencyEndpointX(from, dependency.type, "from", x);
                 const x2 = dependencyEndpointX(to, dependency.type, "to", x);
-                const y1 = fromIndex * rowHeight + rowHeight / 2;
-                const y2 = toIndex * rowHeight + rowHeight / 2;
-                const bend = Math.max(x1 + 18, (x1 + x2) / 2);
+                const y1 = laneLayoutById.get(from.workItem.id)?.center ?? rowHeight / 2;
+                const y2 = laneLayoutById.get(to.workItem.id)?.center ?? rowHeight / 2;
+                const bend = Math.max(x1 + 22, x2 - 22);
+                const verticalDirection = Math.sign(y2 - y1) || 1;
+                const exitDirection = Math.sign(x2 - bend) || -1;
+                const curveRadius = embedded
+                  ? Math.max(0, Math.min(7, Math.abs(bend - x1) / 2, Math.abs(y2 - y1) / 2, Math.abs(x2 - bend) / 2))
+                  : 0;
+                const dependencyPath = curveRadius > 0
+                  ? `M ${x1} ${y1} H ${bend - curveRadius} Q ${bend} ${y1} ${bend} ${y1 + verticalDirection * curveRadius} V ${y2 - verticalDirection * curveRadius} Q ${bend} ${y2} ${bend + exitDirection * curveRadius} ${y2} H ${x2}`
+                  : `M ${x1} ${y1} H ${bend} V ${y2} H ${x2}`;
                 const active = selectedDependencyId === dependency.id || dependency.fromId === selectedItem.workItem.id || dependency.toId === selectedItem.workItem.id;
                 return (
                   <g key={dependency.id} className={active ? "activeDependency" : undefined}>
                     <path
                       className={`ganttDependency ${selectedDependencyId === dependency.id ? "selected" : ""}`}
-                      markerEnd="url(#gantt-arrow)"
-                      d={`M ${x1} ${y1} H ${bend} V ${y2} H ${x2}`}
+                      markerEnd={`url(#${embedded ? "gantt-arrow-embedded" : "gantt-arrow"})`}
+                      d={dependencyPath}
                     />
                     <circle className="ganttDepPort from" cx={x1} cy={y1} r="3" />
                     <circle className="ganttDepPort to" cx={x2} cy={y2} r="3" />
@@ -9479,10 +9774,13 @@ function GanttChart({
               <GanttItemBar
                 key={item.workItem.id}
                 item={item}
-                index={index}
-                rowHeight={rowHeight}
+                top={laneLayouts[index]?.top ?? index * rowHeight}
+                rowHeight={laneLayouts[index]?.height ?? rowHeight}
                 x={x}
-                baseline={baseline}
+                baselineRange={baselineRangeByItemId.get(item.workItem.id)}
+                gate={gateByItemId.get(item.workItem.id)}
+                embedded={embedded}
+                referenceTime={now}
                 selected={selectedItem.workItem.id === item.workItem.id}
                 onSelect={() => setSelectedItemId(item.workItem.id)}
               />
@@ -9490,7 +9788,7 @@ function GanttChart({
           </div>
         </div>
       </div>
-      <div className="ganttMinimapRow">
+      {!embedded && <div className="ganttMinimapRow">
         <div
           className={`ganttMinimap ${miniDragging ? "dragging" : ""}`}
           role="button"
@@ -9540,7 +9838,7 @@ function GanttChart({
           <span>{visibleDependencies.length} deps</span>
           <span>{formatShortDateTime(min)} - {formatShortDateTime(max)}</span>
         </div>
-      </div>
+      </div>}
       <div className="ganttInspector">
         <div className="ganttSelectedSummary">
           <span>Selected</span>
@@ -9583,58 +9881,138 @@ function GanttChart({
 
 function GanttItemBar({
   item,
-  index,
+  top,
   rowHeight,
   x,
-  baseline,
+  baselineRange,
+  gate,
+  embedded,
+  referenceTime,
   selected,
   onSelect
 }: {
   item: ScheduledItem;
-  index: number;
+  top: number;
   rowHeight: number;
   x: (iso: string) => number;
-  baseline?: Baseline;
+  baselineRange?: { start: string; finish: string };
+  gate?: AuditGate;
+  embedded: boolean;
+  referenceTime: string;
   selected: boolean;
   onSelect: () => void;
 }) {
-  const top = index * rowHeight;
   const scheduledStart = x(item.start);
   const scheduledFinish = Math.max(scheduledStart + 10, x(item.finish));
-  const baselineStart = baseline?.plannedStartByItem[item.workItem.id];
-  const baselineFinish = baseline?.plannedFinishByItem[item.workItem.id];
+  const baselineStart = baselineRange?.start;
+  const baselineFinish = baselineRange?.finish;
   const baselineLeft = baselineStart ? x(baselineStart) : undefined;
   const baselineWidth = baselineStart && baselineFinish ? Math.max(6, x(baselineFinish) - baselineLeft!) : undefined;
+  const phaseEnvelopeFinish = item.workItem.kind === "phase" && baselineFinish
+    ? Math.max(scheduledFinish, x(baselineFinish))
+    : scheduledFinish;
+  const scheduledWidth = Math.max(8, scheduledFinish - scheduledStart);
+  const progress = Math.max(0, Math.min(100, item.workItem.percentComplete));
+  const hasGate = gate !== undefined && gate.status !== "cleared";
+  const isDelayed = Date.parse(item.finish) < Date.parse(referenceTime) && progress < 100;
+  const visualState = hasGate ? "blocked" : progress >= 100 ? "complete" : "planned";
   const segmentBase = item.workItem.splitSegments?.length ? item.workItem.splitSegments : undefined;
   const segments = segmentBase
     ? segmentBase.map((segment) => ({
         left: x(addSeconds(item.start, segment.offsetSeconds)),
         width: Math.max(8, x(addSeconds(item.start, segment.offsetSeconds + segment.durationSeconds)) - x(addSeconds(item.start, segment.offsetSeconds)))
       }))
-    : [{ left: scheduledStart, width: Math.max(8, scheduledFinish - scheduledStart) }];
+    : [{ left: scheduledStart, width: Math.max(8, phaseEnvelopeFinish - scheduledStart) }];
+  const finalSegmentEnd = segments.reduce((latest, segment) => Math.max(latest, segment.left + segment.width), scheduledFinish);
+  const milestoneStatus = hasGate
+    ? gate.targetType === "milestone" ? "Needs evidence" : "Needs attention"
+    : isDelayed ? "Delayed"
+    : progress >= 100 ? "Complete"
+    : "Milestone";
 
   return (
-    <div className={`ganttLane ${selected ? "selected" : ""}`} style={{ top, height: rowHeight }}>
-      {baselineLeft !== undefined && baselineWidth !== undefined && <span className="ganttBaseline" style={{ left: baselineLeft, width: baselineWidth }} />}
+    <div className={`ganttLane ${item.workItem.kind} ${visualState} ${selected ? "selected" : ""}`} style={{ top, height: rowHeight }}>
+      {embedded && item.workItem.kind !== "phase" && (
+        <>
+          <span className="ganttInlineOutline" aria-hidden="true">{item.workItem.outline}</span>
+          {item.workItem.kind !== "milestone" && scheduledStart >= 190 && (
+            <span className="ganttInlineTaskTitle" style={{ width: Math.max(72, scheduledStart - 82) }} aria-hidden="true">
+              {item.workItem.title}
+            </span>
+          )}
+        </>
+      )}
+      {item.workItem.kind !== "milestone" && !(embedded && item.workItem.kind === "phase") && baselineLeft !== undefined && baselineWidth !== undefined && (
+        <span className={`ganttBaseline ${item.workItem.kind}`} style={{ left: baselineLeft, width: baselineWidth }} />
+      )}
       {item.workItem.kind === "milestone" ? (
-        <button
-          className={`ganttMilestone ${item.isCritical ? "critical" : ""}`}
-          style={{ left: scheduledStart }}
-          onClick={onSelect}
-          aria-label={`${item.workItem.title}, milestone, ${formatShortDateTime(item.start)}`}
-        />
-      ) : (
-        segments.map((segment, segmentIndex) => (
+        <>
+          {embedded && baselineLeft !== undefined && (
+            <Diamond className="ganttBaselineMilestone" style={{ left: baselineLeft }} aria-hidden="true" />
+          )}
           <button
-            key={`${item.workItem.id}-${segmentIndex}`}
-            className={`ganttBarButton ${item.isCritical ? "critical" : ""} ${item.workItem.kind} ${selected ? "selected" : ""}`}
-            style={{ left: segment.left, width: segment.width }}
+            className={`ganttMilestone ${item.isCritical ? "critical" : ""} ${visualState}`}
+            style={{ left: scheduledStart }}
             onClick={onSelect}
-            aria-label={`${item.workItem.title}, ${formatScheduleRange(item)}, ${item.workItem.percentComplete}% complete`}
+            aria-pressed={selected}
+            aria-label={`${item.workItem.title}, milestone, ${formatShortDateTime(item.start)}, ${milestoneStatus}`}
           >
-            <span className="ganttProgressFill" style={{ width: `${Math.max(0, Math.min(100, item.workItem.percentComplete))}%` }} />
+            <Diamond aria-hidden="true" />
           </button>
-        ))
+          {embedded && (
+            <span className={`ganttMilestoneAnnotation ${visualState}`} style={{ left: scheduledStart + 19 }} aria-hidden="true">
+              <strong>{item.workItem.title}</strong>
+              <span>{formatTick(item.start)}</span>
+              <em>{milestoneStatus}</em>
+            </span>
+          )}
+        </>
+      ) : (
+        <>
+          {segments.map((segment, segmentIndex) => {
+            const scheduledShare = item.workItem.kind === "phase"
+              ? Math.max(0, Math.min(100, (scheduledWidth / segment.width) * 100))
+              : 100;
+            return (
+              <button
+                key={`${item.workItem.id}-${segmentIndex}`}
+                className={`ganttBarButton ${item.isCritical ? "critical" : ""} ${item.workItem.kind} ${visualState} ${selected ? "selected" : ""}`}
+                style={{ left: segment.left, width: segment.width }}
+                onClick={onSelect}
+                aria-pressed={selected}
+                aria-label={`${item.workItem.title}, ${formatScheduleRange(item)}, ${progress}% complete, ${visualState}`}
+              >
+                {embedded ? (
+                  <span className="ganttScheduledFill" style={{ width: `${scheduledShare}%` }}>
+                    <span className="ganttProgressFill" style={{ width: `${progress}%` }} />
+                  </span>
+                ) : <span className="ganttProgressFill" style={{ width: `${progress}%` }} />}
+                {embedded && item.workItem.kind === "phase" && segmentIndex === 0 && segment.width >= 110 && (
+                  <span className="ganttBarLabel" style={{ right: "auto", width: `calc(${scheduledShare}% - 48px)` }}>
+                    <b>{item.workItem.outline}</b><span>{item.workItem.title}</span>
+                  </span>
+                )}
+                {embedded && progress > 0 && segmentIndex === segments.length - 1 && segment.width >= 64 && (
+                  <span
+                    className="ganttBarPercent"
+                    style={item.workItem.kind === "phase" ? { left: `${scheduledShare}%`, right: "auto", transform: "translateX(-100%)" } : undefined}
+                  >
+                    {Math.round(progress)}%
+                  </span>
+                )}
+              </button>
+            );
+          })}
+          {embedded && item.workItem.kind === "phase" && baselineFinish && (
+            <>
+              <span className="ganttPhaseTail" style={{ left: scheduledFinish + 8, width: Math.max(18, phaseEnvelopeFinish - scheduledFinish - 10) }} aria-hidden="true" />
+              <Diamond className="ganttPhaseEndMilestone" style={{ left: phaseEnvelopeFinish + 7 }} aria-hidden="true" />
+            </>
+          )}
+          {embedded && visualState === "complete" && (
+            <CheckCircle2 className="ganttCompletionMark" style={{ left: finalSegmentEnd + 5 }} aria-hidden="true" />
+          )}
+        </>
       )}
     </div>
   );
@@ -9835,7 +10213,7 @@ function SignalList({
             <strong className="text-sm">{gate.targetType}</strong>
             <span className={cn(compact ? "compactSignalText" : "mt-1 block text-xs text-muted-foreground")}>{gate.reason}</span>
             <span className={cn(compact ? "compactSignalRequired" : "mt-1 block text-xs text-muted-foreground")}>Req: {gate.requiredAction}</span>
-            {onClear && gate.status !== "cleared" && (
+            {!compact && onClear && gate.status !== "cleared" && (
               <form
                 className="mt-2 grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]"
                 onSubmit={(event) => {
@@ -9854,6 +10232,32 @@ function SignalList({
               </form>
             )}
           </div>
+          {compact && onClear && gate.status !== "cleared" && (
+            <details className="compactSignalClear">
+              <summary aria-label={`Clear gate: ${gate.reason}`} title="Clear gate">
+                <ClipboardCheck aria-hidden="true" />
+              </summary>
+              <form
+                className="compactSignalClearForm"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  onClear(gate, rationales[gate.id] ?? "");
+                  setRationales((current) => ({ ...current, [gate.id]: "" }));
+                }}
+              >
+                <label>
+                  <span>Evidence or rationale</span>
+                  <Input
+                    value={rationales[gate.id] ?? ""}
+                    onChange={(event) => setRationales((current) => ({ ...current, [gate.id]: event.target.value }))}
+                    placeholder="Evidence, waiver, or decision rationale"
+                    aria-label={`Rationale for ${gate.reason}`}
+                  />
+                </label>
+                <Button type="submit" size="sm" variant={gate.severity === "hard" ? "destructive" : "outline"}>Clear gate</Button>
+              </form>
+            </details>
+          )}
           <Badge variant={gate.severity === "hard" ? "destructive" : gate.severity === "warning" ? "warning" : "secondary"}>{gate.status}</Badge>
         </article>
       ))}

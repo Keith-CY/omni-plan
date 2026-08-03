@@ -41,6 +41,7 @@ describe("Todo capture and Inbox", () => {
       { tags: ["home"] },
       { flagged: true },
       { dueAt: "2026-07-23T00:00:00.000Z" },
+      { scheduledAt: "2026-07-23T06:00:00.000Z" },
       { repeatRule: { count: 2, startAt: "2026-07-23T00:00:00.000Z" } }
     ];
     for (const patch of patches) {
@@ -82,6 +83,14 @@ describe("Today Todo selector", () => {
   it("uses the workspace time zone when converting instants to a Today date", () => {
     const tokyoDue = todo("tokyo", { dueAt: "2026-07-21T15:30:00.000Z" });
     expect(selectTodayTodos([tokyoDue], "2026-07-22", "Asia/Tokyo")).toHaveLength(1);
+  });
+
+  it("reveals a scheduled Todo only after its exact planned instant", () => {
+    const scheduled = todo("scheduled", { scheduledAt: "2026-07-22T06:00:00.000Z" });
+
+    expect(selectTodayTodos([scheduled], "2026-07-22T05:59:59.000Z", "Asia/Tokyo")).toEqual([]);
+    expect(selectTodayTodos([scheduled], "2026-07-22T06:00:00.000Z", "Asia/Tokyo").map(({ id }) => id))
+      .toEqual(["scheduled"]);
   });
 
   it("keeps the next uncompleted repeat occurrence visible after it becomes overdue", () => {

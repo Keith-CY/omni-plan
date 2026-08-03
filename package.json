@@ -9,7 +9,10 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "preview": "vite preview --host 127.0.0.1",
-    "workspace:migrate": "bun scripts/migrate-workspace.ts"
+    "workspace:migrate": "bun scripts/migrate-workspace.ts",
+    "apple:test": "cd apple/OmniPlanCompanion/Core && CLANG_MODULE_CACHE_PATH=\"$PWD/.build/clang-module-cache\" SWIFT_MODULE_CACHE_PATH=\"$PWD/.build/swift-module-cache\" SWIFTPM_MODULECACHE_OVERRIDE=\"$PWD/.build/swift-module-cache\" swift test --disable-sandbox",
+    "apple:build": "cd apple/OmniPlanCompanion && CLANG_MODULE_CACHE_PATH=\"$PWD/.build/clang-module-cache\" SWIFT_MODULE_CACHE_PATH=\"$PWD/.build/swift-module-cache\" SWIFTPM_MODULECACHE_OVERRIDE=\"$PWD/.build/swift-module-cache\" swift build --disable-sandbox",
+    "apple:verify-alfred": "zsh 'apple/Alfred/verify-workflow.zsh'"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "^1.1.18",

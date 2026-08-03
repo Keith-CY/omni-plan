@@ -122,6 +122,7 @@ export function createTodo(input: CreateTodoInput, now = input.capturedAt ?? new
       : { estimatedSeconds: nonNegativeSeconds(input.estimatedSeconds) }),
     ...(input.deferUntil === undefined ? {} : { deferUntil: input.deferUntil }),
     ...(input.dueAt === undefined ? {} : { dueAt: input.dueAt }),
+    ...(input.scheduledAt === undefined ? {} : { scheduledAt: input.scheduledAt }),
     ...(input.repeatRule === undefined
       ? {}
       : { repeatRule: normalizeRepeatRule(id, input.repeatRule) }),
@@ -227,10 +228,16 @@ export function reopenTodo(todo: Todo, now = new Date().toISOString()): Todo {
 
 export function todoHasInboxExitMetadata(todo: Pick<
   Todo,
-  "tags" | "flagged" | "deferUntil" | "dueAt" | "plannedForDate" | "repeatRule"
+  "tags" | "flagged" | "deferUntil" | "dueAt" | "scheduledAt" | "plannedForDate" | "repeatRule"
 >): boolean {
   return Boolean(
-    todo.tags.length || todo.flagged || todo.deferUntil || todo.dueAt || todo.plannedForDate || todo.repeatRule
+    todo.tags.length ||
+    todo.flagged ||
+    todo.deferUntil ||
+    todo.dueAt ||
+    todo.scheduledAt ||
+    todo.plannedForDate ||
+    todo.repeatRule
   );
 }
 
@@ -241,7 +248,7 @@ export function selectTodayTodos(
 ): Todo[] {
   const today = dateKey(todayOrNow, timeZone);
   return todos
-    .filter((todo) => todo.status === "open" && todayMembership(todo, today, timeZone))
+    .filter((todo) => todo.status === "open" && todayMembership(todo, todayOrNow, timeZone))
     .sort((left, right) => compareTodayTodos(left, right, today, timeZone));
 }
 
@@ -483,12 +490,14 @@ function patchTriggersInboxExit(patch: TodoPatch): boolean {
     patch.flagged === true ||
     patch.deferUntil ||
     patch.dueAt ||
+    patch.scheduledAt ||
     patch.plannedForDate ||
     patch.repeatRule
   );
 }
 
-function todayMembership(todo: Todo, today: string, timeZone: string): boolean {
+function todayMembership(todo: Todo, todayOrNow: string, timeZone: string): boolean {
+  const today = dateKey(todayOrNow, timeZone);
   if (todo.repeatRule) {
     const occurrenceDate = todoRepeatOccurrenceDate(todo, timeZone);
     return Boolean(occurrenceDate && occurrenceDate <= today);
@@ -496,11 +505,22 @@ function todayMembership(todo: Todo, today: string, timeZone: string): boolean {
   const due = optionalDateKey(todo.dueAt, timeZone);
   const deferred = optionalDateKey(todo.deferUntil, timeZone);
   const planned = optionalDateKey(todo.plannedForDate, timeZone);
+  const scheduled = optionalDateKey(todo.scheduledAt, timeZone);
   return Boolean(
     (due && due <= today) ||
     (deferred && deferred <= today) ||
-    planned === today
+    planned === today ||
+    (scheduled && scheduled < today) ||
+    (scheduled === today && scheduledTimeReached(todo.scheduledAt, todayOrNow))
   );
+}
+
+function scheduledTimeReached(scheduledAt: ISODate | undefined, todayOrNow: string): boolean {
+  if (!scheduledAt) return false;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(todayOrNow)) return true;
+  const scheduledTime = Date.parse(scheduledAt);
+  const currentTime = Date.parse(todayOrNow);
+  return !Number.isNaN(scheduledTime) && !Number.isNaN(currentTime) && scheduledTime <= currentTime;
 }
 
 function compareTodayTodos(left: Todo, right: Todo, today: string, timeZone: string): number {
@@ -522,6 +542,7 @@ function todayRank(todo: Todo, today: string, timeZone: string): { group: number
   if (due && due < today) return { group: 0, key: todo.dueAt ?? due };
   if (due === today) return { group: 1, key: todo.dueAt ?? due };
   const starts = [
+    optionalDateKey(todo.scheduledAt, timeZone) === today ? todo.scheduledAt : undefined,
     optionalDateKey(todo.plannedForDate, timeZone) === today ? todo.plannedForDate : undefined,
     optionalDateKey(todo.deferUntil, timeZone) && optionalDateKey(todo.deferUntil, timeZone)! <= today
       ? todo.deferUntil
@@ -583,7 +604,13 @@ function repeatOccurrenceIso(todo: Todo, occurrenceIndex: number, timeZone: stri
 }
 
 function repeatAnchorIso(todo: Todo, timeZone: string): ISODate | undefined {
-  const value = todo.repeatRule?.startAt ?? todo.plannedForDate ?? todo.deferUntil ?? todo.dueAt ?? todo.capturedAt;
+  const value =
+    todo.repeatRule?.startAt ??
+    todo.scheduledAt ??
+    todo.plannedForDate ??
+    todo.deferUntil ??
+    todo.dueAt ??
+    todo.capturedAt;
   if (!value) return undefined;
   if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
     try {
@@ -654,7 +681,8 @@ function workItemFromTodo(
   const estimate = nonNegativeSeconds(todo.estimatedSeconds ?? 0);
   const constraint = {
     ...(todo.deferUntil ? { noEarlierThan: todo.deferUntil } : {}),
-    ...(todo.dueAt ? { noLaterThan: todo.dueAt } : {})
+    ...(todo.dueAt ? { noLaterThan: todo.dueAt } : {}),
+    ...(todo.scheduledAt ? { fixedStart: todo.scheduledAt } : {})
   };
   return {
     id: todo.id,
@@ -665,7 +693,9 @@ function workItemFromTodo(
     tags: [...todo.tags],
     flagged: todo.flagged,
     checklist: cloneChecklist(todo.checklist),
-    ...(todo.plannedForDate === undefined ? {} : { plannedForDate: todo.plannedForDate }),
+    ...(todo.plannedForDate === undefined && todo.scheduledAt === undefined
+      ? {}
+      : { plannedForDate: todo.plannedForDate ?? zonedDateKey(todo.scheduledAt!, timeZone) }),
     capturedAt: todo.capturedAt,
     updatedAt: now,
     ...(todo.completedAt === undefined ? {} : { completedAt: todo.completedAt }),
@@ -686,7 +716,8 @@ function todoFromWorkItem(snapshot: WorkspaceSnapshot, task: WorkItem, now: ISOD
   const latestActual = snapshot.actuals
     .filter((entry) => entry.workItemId === task.id)
     .sort((left, right) => right.recordedAt.localeCompare(left.recordedAt))[0];
-  const plannedForDate = task.plannedForDate ?? task.constraint?.fixedStart?.slice(0, 10);
+  const plannedForDate = task.plannedForDate;
+  const scheduledAt = task.constraint?.fixedStart;
   return {
     id: task.id,
     title: task.title,
@@ -700,6 +731,7 @@ function todoFromWorkItem(snapshot: WorkspaceSnapshot, task: WorkItem, now: ISOD
     ...((task.constraint?.noLaterThan ?? task.constraint?.fixedFinish) === undefined
       ? {}
       : { dueAt: task.constraint?.noLaterThan ?? task.constraint?.fixedFinish }),
+    ...(scheduledAt === undefined ? {} : { scheduledAt }),
     ...(task.repeatRule === undefined ? {} : { repeatRule: cloneRepeatRule(task.repeatRule) }),
     checklist: cloneChecklist(task.checklist ?? []),
     ...(plannedForDate === undefined ? {} : { plannedForDate }),
@@ -717,8 +749,11 @@ function projectFromTodo(
   projectId: Id,
   now: ISODate
 ): Project {
-  const start = projectTimestamp(todo.deferUntil ?? todo.plannedForDate, todo.capturedAt || now);
-  const horizon = projectTimestamp(todo.dueAt ?? todo.plannedForDate, start);
+  const start = projectTimestamp(
+    todo.deferUntil ?? todo.scheduledAt ?? todo.plannedForDate,
+    todo.capturedAt || now
+  );
+  const horizon = projectTimestamp(todo.dueAt ?? todo.scheduledAt ?? todo.plannedForDate, start);
   const common: Project = {
     id: projectId,
     name: requiredText(input.name ?? todo.title, "Project name"),

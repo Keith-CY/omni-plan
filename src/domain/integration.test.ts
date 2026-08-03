@@ -11,6 +11,7 @@ import {
   createFirebaseWorkspaceSnapshotEnvelope,
   decryptFirebaseWorkspaceSnapshotEnvelope,
   decryptSyncPayload,
+  FirebaseAuthenticationError,
   FirebaseE2eeSyncClient,
   FirebaseSyncConflictError,
   githubSyncCommitMessage,
@@ -395,6 +396,68 @@ describe("workspace, GitHub, and secrets", () => {
     expect(opWrite?.currentDocument).toEqual({ exists: false });
     expect(manifestWrite?.currentDocument).toEqual({ updateTime: manifestUpdateTime });
     expect(JSON.stringify(manifestWrite?.update.fields.manifestJson)).not.toContain("firestoreUpdateTime");
+  });
+
+  it("refreshes an expired Firebase anonymous session without creating a new user", async () => {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    const client = new FirebaseE2eeSyncClient({
+      projectId: "firebase-project",
+      apiKey: "firebase-web-api-key",
+      databaseId: "(default)",
+      collectionPath: "omniPlanSync",
+      workspaceId: "personal",
+      deviceId: "browser"
+    }, (async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: String(input), init: init ?? {} });
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          id_token: "fresh-id-token",
+          refresh_token: "rotated-refresh-token",
+          user_id: "same-anonymous-user",
+          expires_in: "3600"
+        })
+      } as Response;
+    }) as typeof fetch);
+
+    const refreshed = await client.refreshAnonymousSession({
+      idToken: "expired-id-token",
+      refreshToken: "old-refresh-token",
+      localId: "same-anonymous-user"
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toBe("https://securetoken.googleapis.com/v1/token?key=firebase-web-api-key");
+    expect(calls[0].init.headers).toEqual({ "Content-Type": "application/x-www-form-urlencoded" });
+    expect(calls[0].init.body).toBe("grant_type=refresh_token&refresh_token=old-refresh-token");
+    expect(refreshed).toEqual({
+      idToken: "fresh-id-token",
+      refreshToken: "rotated-refresh-token",
+      localId: "same-anonymous-user",
+      expiresIn: 3600
+    });
+  });
+
+  it("classifies a 401 Firebase read as an expired authentication session", async () => {
+    const client = new FirebaseE2eeSyncClient({
+      projectId: "firebase-project",
+      apiKey: "firebase-web-api-key",
+      databaseId: "(default)",
+      collectionPath: "omniPlanSync",
+      workspaceId: "personal",
+      deviceId: "browser"
+    }, (async () => ({
+      ok: false,
+      status: 401,
+      json: async () => ({})
+    } as Response)) as unknown as typeof fetch);
+
+    await expect(client.readManifest({
+      idToken: "expired-id-token",
+      refreshToken: "refresh-token",
+      localId: "anonymous-user"
+    })).rejects.toBeInstanceOf(FirebaseAuthenticationError);
   });
 
   it("uses create-only preconditions for the first Firebase manifest and operation", async () => {

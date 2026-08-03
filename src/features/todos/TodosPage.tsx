@@ -48,6 +48,7 @@ export interface TodoUpdatePatch {
   estimatedSeconds?: number;
   deferUntil?: string;
   dueAt?: string;
+  scheduledAt?: string;
   plannedForDate?: string;
   repeatRule?: RepeatRule;
   checklist?: TodoChecklistItem[];
@@ -91,6 +92,7 @@ interface TodoDraft {
   estimatedMinutes: string;
   deferUntil: string;
   dueAt: string;
+  scheduledAt: string;
   plannedForDate: string;
   repeatCadence: "none" | RepeatCadenceKind;
   repeatEveryDays: string;
@@ -119,6 +121,18 @@ const FILTERS: FilterDefinition[] = [
 
 function dateInputValue(value?: string): string {
   return value ? value.slice(0, 10) : "";
+}
+
+function dateTimeInputValue(value: string | undefined, timeZone: string): string {
+  const parts = zonedDateTimeParts(value, timeZone);
+  return parts ? `${parts.date}T${parts.time}` : "";
+}
+
+function dateTimeInputIso(value: string, timeZone: string): string | undefined {
+  if (!value) return undefined;
+  const match = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})$/.exec(value);
+  if (!match) throw new Error("Scheduled time is invalid.");
+  return zonedDateTimeToIso(match[1], match[2], timeZone);
 }
 
 function zonedDateTimeParts(value: string | undefined, timeZone: string): { date: string; time: string } | undefined {
@@ -182,6 +196,7 @@ function draftFromTodo(todo: Todo, timeZone: string): TodoDraft {
     estimatedMinutes: todo.estimatedSeconds ? String(Math.round(todo.estimatedSeconds / 60)) : "",
     deferUntil: dateInputValue(todo.deferUntil),
     dueAt: dateInputValue(todo.dueAt),
+    scheduledAt: dateTimeInputValue(todo.scheduledAt, timeZone),
     plannedForDate: dateInputValue(todo.plannedForDate),
     repeatCadence: todo.repeatRule?.cadence ?? (todo.repeatRule ? "every-n-days" : "none"),
     repeatEveryDays: String(Math.max(1, Math.round(todo.repeatRule?.everyDays ?? 1))),
@@ -270,6 +285,19 @@ function formatDate(value?: string): string | undefined {
   const date = new Date(value.length === 10 ? `${value}T00:00:00` : value);
   if (Number.isNaN(date.getTime())) return value;
   return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" }).format(date);
+}
+
+function formatDateTime(value: string | undefined, timeZone: string): string | undefined {
+  if (!value) return undefined;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    timeZone
+  }).format(date);
 }
 
 function formatRepeat(rule?: RepeatRule): string | undefined {
@@ -587,6 +615,7 @@ function TodoRow({
   const checklistDone = todo.checklist.filter((item) => item.completed).length;
   const dueLabel = formatDate(todo.dueAt);
   const deferLabel = formatDate(todo.deferUntil);
+  const scheduledLabel = formatDateTime(todo.scheduledAt, timeZone);
   const planLabel = formatDate(todo.plannedForDate);
   const repeatLabel = formatRepeat(todo.repeatRule);
   const [rowError, setRowError] = useState("");
@@ -638,6 +667,11 @@ function TodoRow({
             {deferLabel ? (
               <span>
                 <Clock3 aria-hidden="true" /> Available {deferLabel}
+              </span>
+            ) : null}
+            {scheduledLabel ? (
+              <span>
+                <Clock3 aria-hidden="true" /> Scheduled {scheduledLabel}
               </span>
             ) : null}
             {planLabel ? (
@@ -757,6 +791,7 @@ function TodoEditor({ id, todo, timeZone, onSave, onCancel, onKeep, onConvertToT
           parsedMinutes !== undefined && Number.isFinite(parsedMinutes) ? Math.max(0, Math.round(parsedMinutes * 60)) : undefined,
         deferUntil: draft.deferUntil || undefined,
         dueAt: draft.dueAt || undefined,
+        scheduledAt: dateTimeInputIso(draft.scheduledAt, timeZone),
         plannedForDate: draft.plannedForDate || undefined,
         repeatRule: repeatRuleFromDraft(todo, draft, timeZone),
         checklist: draft.checklist.map((item) => ({ ...item, title: item.title.trim() })).filter((item) => item.title)
@@ -811,6 +846,14 @@ function TodoEditor({ id, todo, timeZone, onSave, onCancel, onKeep, onConvertToT
             type="date"
             value={draft.dueAt}
             onChange={(event) => setDraft((current) => ({ ...current, dueAt: event.target.value }))}
+          />
+        </label>
+        <label className="todoEditor__field">
+          <span>Scheduled</span>
+          <input
+            type="datetime-local"
+            value={draft.scheduledAt}
+            onChange={(event) => setDraft((current) => ({ ...current, scheduledAt: event.target.value }))}
           />
         </label>
         <label className="todoEditor__field todoEditor__planField">

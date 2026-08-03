@@ -191,6 +191,13 @@ export class FirebaseSyncConflictError extends Error {
   }
 }
 
+export class FirebaseAuthenticationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "FirebaseAuthenticationError";
+  }
+}
+
 export function buildGitHubSyncPaths(config: Pick<GitHubSyncConfig, "rootPath" | "workspaceId" | "deviceId">): GitHubSyncPaths {
   const workspaceRoot = joinRepoPath(config.rootPath, "workspaces", config.workspaceId);
   return {
@@ -487,6 +494,31 @@ export class FirebaseE2eeSyncClient {
     };
   }
 
+  async refreshAnonymousSession(session: FirebaseAnonymousSession): Promise<FirebaseAnonymousSession> {
+    if (!session.refreshToken) return await this.signInAnonymously();
+    const response = await this.fetcher(`https://securetoken.googleapis.com/v1/token?key=${encodeURIComponent(this.config.apiKey)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "refresh_token",
+        refresh_token: session.refreshToken
+      }).toString()
+    });
+    if (!response.ok) throw new FirebaseAuthenticationError(`Firebase session refresh failed: ${response.status}`);
+    const payload = await response.json() as {
+      id_token: string;
+      refresh_token?: string;
+      user_id: string;
+      expires_in?: string;
+    };
+    return {
+      idToken: payload.id_token,
+      refreshToken: payload.refresh_token ?? session.refreshToken,
+      localId: payload.user_id,
+      expiresIn: payload.expires_in ? Number(payload.expires_in) : undefined
+    };
+  }
+
   async readManifest(session: FirebaseAnonymousSession): Promise<FirebaseE2eeManifest | undefined> {
     const document = await this.readDocument(buildFirebaseSyncPaths(this.config).manifest, session);
     if (!document) return undefined;
@@ -593,6 +625,9 @@ export class FirebaseE2eeSyncClient {
       headers: this.headers(session)
     });
     if (response.status === 404) return undefined;
+    if (response.status === 401) {
+      throw new FirebaseAuthenticationError(`Firebase read failed for ${path}: ${response.status}`);
+    }
     if (!response.ok) throw new Error(`Firebase read failed for ${path}: ${response.status}`);
     return await response.json() as FirestoreDocument;
   }
@@ -627,6 +662,9 @@ export class FirebaseE2eeSyncClient {
       }
       if (response.status === 409 || /FAILED_PRECONDITION|ABORTED/.test(firestoreStatus)) {
         throw new FirebaseSyncConflictError("Firebase workspace changed while this device was pushing. Pull the latest workspace before retrying.");
+      }
+      if (response.status === 401) {
+        throw new FirebaseAuthenticationError(`Firebase commit failed: ${response.status}`);
       }
       throw new Error(`Firebase commit failed: ${response.status}${firestoreStatus ? ` (${firestoreStatus})` : ""}`);
     }

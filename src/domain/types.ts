@@ -37,6 +37,8 @@ export interface Todo {
   estimatedSeconds?: Seconds;
   deferUntil?: ISODate;
   dueAt?: ISODate;
+  /** Exact instant when this Todo should enter Today. */
+  scheduledAt?: ISODate;
   repeatRule?: RepeatRule;
   /** Number of occurrences already acknowledged for this repeating Todo. */
   repeatCompletedCount?: number;
