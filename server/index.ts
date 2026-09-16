@@ -28,9 +28,11 @@ export function createServerRuntime(environment: ServerEnvironment = process.env
 
   const fetch = async (request: Request) => {
     if (environment.OMNIPLAN_REQUIRE_HTTPS === "1") {
+      const url = new URL(request.url);
+      const isHealthCheck = request.method === "GET" && url.pathname === "/api/health";
       const forwarded = request.headers.get("x-forwarded-proto")?.split(",")[0]?.trim().toLowerCase();
-      const directProtocol = new URL(request.url).protocol.replace(/:$/, "").toLowerCase();
-      if ((forwarded || directProtocol) !== "https") {
+      const directProtocol = url.protocol.replace(/:$/, "").toLowerCase();
+      if (!isHealthCheck && (forwarded || directProtocol) !== "https") {
         return Response.json({ error: { code: "https_required", message: "Use HTTPS for this service." } }, { status: 426 });
       }
     }

@@ -7,10 +7,11 @@ COPY . .
 RUN bun run build
 RUN bun run build:server
 
-FROM oven/bun:1.1.8
+FROM oven/bun:1.1.8-alpine
 
 WORKDIR /app
 ENV NODE_ENV=production
+RUN apk add --no-cache curl
 COPY --from=build --chown=bun:bun /app/package.json /app/bun.lockb ./
 COPY --from=build --chown=bun:bun /app/node_modules ./node_modules
 COPY --from=build --chown=bun:bun /app/dist ./dist
