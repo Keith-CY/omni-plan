@@ -190,7 +190,7 @@ import type {
   WorkItemKind,
   WorkspaceSnapshot
 } from "./domain/types";
-import { createEmptyWorkspace } from "./domain/workspace";
+import { createEmptyWorkspace, workspaceHasUserContent } from "./domain/workspace";
 import { addSeconds, addZonedCalendarDays, secondsBetween, startOfDay, zonedDateKey, zonedDateTimeToIso, zonedTimeKey } from "./domain/time";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -520,24 +520,6 @@ function uniqueId(prefix: string, seed: string, existingIds: Iterable<string>) {
 
 function firebaseSettingsReady(settings: FirebaseSyncSettings) {
   return Boolean(settings.projectId.trim() && settings.apiKey.trim() && settings.workspaceId.trim());
-}
-
-function workspaceHasUserContent(snapshot: WorkspaceSnapshot) {
-  return snapshot.projects.length > 0
-    || snapshot.todos.length > 0
-    || snapshot.workItems.length > 0
-    || snapshot.recurringOccurrences.length > 0
-    || snapshot.dependencies.length > 0
-    || snapshot.resources.length > 0
-    || snapshot.capacities.length > 0
-    || snapshot.baselines.length > 0
-    || snapshot.actuals.length > 0
-    || snapshot.evidence.length > 0
-    || snapshot.decisions.length > 0
-    || snapshot.changeSets.length > 0
-    || snapshot.auditGates.length > 0
-    || snapshot.auditDecisions.length > 0
-    || snapshot.conversionHistory.length > 0;
 }
 
 function firebaseSyncConfigurationMatches(left: FirebaseSyncSettings, right: FirebaseSyncSettings) {
