@@ -16,7 +16,10 @@ function resolveBuildCommit(): string {
   if (environmentCommit) return environmentCommit.trim();
 
   try {
-    return execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    return execFileSync("git", ["rev-parse", "HEAD"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"]
+    }).trim();
   } catch {
     return "unknown";
   }
@@ -26,6 +29,18 @@ const buildCommit = resolveBuildCommit();
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  build: {
+    chunkSizeWarningLimit: 500,
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          "react-vendor": ["react", "react-dom", "react-router-dom", "scheduler"],
+          "radix-vendor": ["@radix-ui/react-dialog", "@radix-ui/react-select", "@radix-ui/react-slot", "@radix-ui/react-tabs"],
+          icons: ["lucide-react"]
+        }
+      }
+    }
+  },
   define: {
     __BUILD_COMMIT__: JSON.stringify(buildCommit)
   },
@@ -37,6 +52,6 @@ export default defineConfig({
   test: {
     environment: "node",
     globals: true,
-    include: ["src/**/*.test.ts"]
+    include: ["src/**/*.test.{ts,tsx}"]
   }
 });

@@ -1,13 +1,19 @@
 {
   "name": "OmniPlan Personal",
   "short_name": "OmniPlan",
-  "description": "Personal multi-project scheduling, evidence, and direction audit.",
+  "description": "随手记录，并按需展开时间、工作量、项目与依赖。",
+  "id": "/",
   "start_url": "/",
+  "scope": "/",
   "display": "standalone",
-  "background_color": "#f4f5f2",
-  "theme_color": "#20251f",
+  "background_color": "#f7f5f0",
+  "theme_color": "#f7f5f0",
+  "categories": ["productivity", "utilities"],
+  "launch_handler": {
+    "client_mode": "navigate-existing"
+  },
   "share_target": {
-    "action": "/agent/commands",
+    "action": "/capture",
     "method": "GET",
     "params": {
       "title": "title",
@@ -15,11 +21,32 @@
       "url": "url"
     }
   },
+  "shortcuts": [
+    {
+      "name": "快速记录",
+      "short_name": "记录",
+      "description": "打开可立即输入的任务捕捉框",
+      "url": "/#/today/p-omni?capture=1",
+      "icons": [{ "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" }]
+    },
+    {
+      "name": "收件箱",
+      "short_name": "收件箱",
+      "url": "/#/todos/p-omni",
+      "icons": [{ "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" }]
+    }
+  ],
   "icons": [
     {
-      "src": "/icon.svg",
-      "sizes": "any",
-      "type": "image/svg+xml",
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
       "purpose": "any maskable"
     }
   ]

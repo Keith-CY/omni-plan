@@ -1,4 +1,4 @@
-import type { Id, WorkItem, WorkspaceSnapshot } from "./types";
+import type { Id, ISODate, Seconds, WorkItem, WorkspaceSnapshot } from "./types";
 import { zonedDateTimeToIso } from "./time";
 
 export type WorkItemStartConstraintMode = "none" | "noEarlierThan" | "fixedStart";
@@ -6,6 +6,53 @@ export type WorkItemStartConstraintMode = "none" | "noEarlierThan" | "fixedStart
 export interface WorkItemStartConstraintValues {
   constraintMode: WorkItemStartConstraintMode;
   constraintDate: string;
+}
+
+export interface WorkItemDetailsPatch {
+  title: string;
+  description?: string;
+}
+
+export interface WorkItemDayPlanPatch {
+  plannedStart: ISODate;
+  effortSeconds: Seconds;
+}
+
+export function updateWorkItemDetails(item: WorkItem, patch: WorkItemDetailsPatch): WorkItem {
+  const title = patch.title.trim();
+  if (!title) throw new Error("Work item title is required.");
+  const description = patch.description?.trim() || undefined;
+  const next = { ...item, title };
+  if (description === undefined) delete next.description;
+  else next.description = description;
+  return next;
+}
+
+export function planWorkItemForDay(item: WorkItem, patch: WorkItemDayPlanPatch): WorkItem {
+  if (!Number.isFinite(new Date(patch.plannedStart).getTime())) throw new Error("A valid planned start is required.");
+  const effortSeconds = item.kind === "milestone" ? 0 : Math.max(0, Math.round(patch.effortSeconds));
+  const previousEffort = item.assignmentIds.reduce((total, assignment) => total + assignment.effortSeconds, 0);
+  const assignmentIds = item.assignmentIds.map((assignment, index, assignments) => {
+    if (effortSeconds === 0) return { ...assignment, effortSeconds: 0 };
+    if (previousEffort > 0) {
+      const share = assignment.effortSeconds / previousEffort;
+      const allocated = index === assignments.length - 1
+        ? effortSeconds - assignments.slice(0, index).reduce((total, candidate) => total + Math.round(effortSeconds * candidate.effortSeconds / previousEffort), 0)
+        : Math.round(effortSeconds * share);
+      return { ...assignment, effortSeconds: Math.max(0, allocated) };
+    }
+    return { ...assignment, effortSeconds: index === 0 ? effortSeconds : 0 };
+  });
+  return {
+    ...item,
+    durationSeconds: effortSeconds,
+    estimate: { ...item.estimate, mostLikelySeconds: effortSeconds },
+    assignmentIds,
+    constraint: {
+      ...(item.constraint?.noLaterThan ? { noLaterThan: item.constraint.noLaterThan } : {}),
+      fixedStart: patch.plannedStart
+    }
+  };
 }
 
 export function calendarWorkItemStartValues(selectedDay: string): WorkItemStartConstraintValues {

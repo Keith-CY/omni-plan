@@ -34,6 +34,7 @@ import type {
   WorkspaceSnapshot
 } from "../../domain/types";
 import { zonedDateTimeToIso } from "../../domain/time";
+import { QuickTaskCapture } from "../task-capture/QuickTaskCapture";
 import "./todos.css";
 
 export type TodosFilter = "inbox" | "all" | "flagged" | "tags" | "completed";
@@ -49,6 +50,8 @@ export interface TodoUpdatePatch {
   deferUntil?: string;
   dueAt?: string;
   plannedForDate?: string;
+  plannedStart?: string;
+  plannedFinish?: string;
   repeatRule?: RepeatRule;
   checklist?: TodoChecklistItem[];
 }
@@ -69,6 +72,8 @@ export interface TodosPageProps {
   initialFilter?: TodosFilter;
   selectedTodoId?: Id;
   onSelectionChange?: (todoId: Id | undefined) => void;
+  onCapture: (title: string) => string | undefined;
+  onUndoCapture: (todoId: Id) => TodosPageCallbackResult;
   onUpdateTodo: (todoId: Id, patch: TodoUpdatePatch) => TodosPageCallbackResult;
   onCompleteTodo: (todoId: Id) => TodosPageCallbackResult;
   onRestoreTodo: (todoId: Id) => TodosPageCallbackResult;
@@ -305,6 +310,8 @@ export function TodosPage({
   initialFilter = "inbox",
   selectedTodoId,
   onSelectionChange,
+  onCapture,
+  onUndoCapture,
   onUpdateTodo,
   onCompleteTodo,
   onRestoreTodo,
@@ -456,6 +463,14 @@ export function TodosPage({
           ) : null}
         </label>
       </header>
+
+      <QuickTaskCapture
+        inputId="inbox-quick-capture"
+        className="todosPage__quickCapture"
+        placeholder="记下一件事，稍后再整理…"
+        onCapture={onCapture}
+        onUndo={onUndoCapture}
+      />
 
       <nav className="todosPage__filters" aria-label="Todo views">
         {FILTERS.map(({ id, label, icon: Icon }) => (

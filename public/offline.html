@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="zh-Hans">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#f7f5f0" />
+    <title>OmniPlan · 离线</title>
+    <style>
+      :root { color-scheme: light; font-family: ui-sans-serif, system-ui, -apple-system, sans-serif; background: #f7f5f0; color: #262522; }
+      body { min-height: 100vh; margin: 0; display: grid; place-items: center; padding: 24px; }
+      main { width: min(100%, 420px); border: 1px solid #e6e1d8; border-radius: 12px; padding: 28px; background: #fffdfa; }
+      p { color: #76716a; line-height: 1.6; }
+      button { min-height: 40px; border: 1px solid #3f4b98; border-radius: 8px; padding: 0 16px; background: #4a56a6; color: white; font: inherit; font-weight: 700; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>现在处于离线状态</h1>
+      <p>已经打开过的工作区仍会保存在这台设备上。网络恢复后，请重新载入以同步最新内容。</p>
+      <button type="button" onclick="location.reload()">重新尝试</button>
+    </main>
+  </body>
+</html>

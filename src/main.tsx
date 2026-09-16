@@ -1,32 +1,35 @@
-import React from "react";
+import React, { lazy, Suspense } from "react";
 import ReactDOM from "react-dom/client";
 import { HashRouter } from "react-router-dom";
-import { AgentApp, isAgentPath } from "./AgentApp";
-import { App } from "./App";
+import { queueShareTarget } from "./domain/externalCapture";
+import { registerPwaServiceWorker } from "./pwa";
 import "./styles.css";
 
-if ("serviceWorker" in navigator && import.meta.env.PROD) {
-  window.addEventListener("load", () => {
-    navigator.serviceWorker.register("/sw.js").catch(() => {
-      // Offline support is progressive; the app remains usable without SW registration.
-    });
-  });
-} else if ("serviceWorker" in navigator) {
-  navigator.serviceWorker.getRegistrations().then((registrations) => {
-    for (const registration of registrations) {
-      registration.unregister();
-    }
-  });
+const App = lazy(() => import("./App").then((module) => ({ default: module.App })));
+const AgentApp = lazy(() => import("./AgentApp").then((module) => ({ default: module.AgentApp })));
+const agentPath = window.location.pathname === "/agent" || window.location.pathname.startsWith("/agent/");
+
+if (window.location.pathname === "/capture") {
+  queueShareTarget(window.location, window.localStorage);
+  window.history.replaceState(null, "", "/#/today/p-omni");
 }
+
+window.addEventListener("load", () => {
+  void registerPwaServiceWorker().catch(() => {
+    // Offline support is progressive; the app remains usable without SW registration.
+  });
+});
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
-    {isAgentPath() ? (
-      <AgentApp />
-    ) : (
-      <HashRouter>
-        <App />
-      </HashRouter>
-    )}
+    <Suspense fallback={<main className="flex min-h-screen items-center justify-center bg-background text-sm text-muted-foreground">Opening OmniPlan…</main>}>
+      {agentPath ? (
+        <AgentApp />
+      ) : (
+        <HashRouter>
+          <App />
+        </HashRouter>
+      )}
+    </Suspense>
   </React.StrictMode>
 );

@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   calendarWorkItemStartValues,
   moveWorkItemToProject,
+  planWorkItemForDay,
   updateWorkItemStartConstraint,
+  updateWorkItemDetails,
   workItemStartConstraintValues
 } from "./workItems";
 import { createEmptyWorkspace } from "./workspace";
@@ -235,5 +237,69 @@ describe("work item start constraints", () => {
 
     expect(updated).not.toHaveProperty("constraint");
     expect(original.constraint).toEqual({ fixedStart: "2026-07-19T15:00:00.000Z" });
+  });
+});
+
+describe("work item details", () => {
+  it("updates title and description without changing planning identity", () => {
+    const original: WorkItem = {
+      ...item("w-edit", "p-source", "2.1", "Old title"),
+      description: "Old description",
+      constraint: { fixedStart: "2026-07-20T00:00:00.000Z" }
+    };
+
+    const updated = updateWorkItemDetails(original, {
+      title: "  New title  ",
+      description: "  New description  "
+    });
+
+    expect(updated).toMatchObject({
+      id: "w-edit",
+      projectId: "p-source",
+      outline: "2.1",
+      title: "New title",
+      description: "New description",
+      constraint: original.constraint
+    });
+    expect(original.title).toBe("Old title");
+  });
+
+  it("requires a non-empty title and can clear the description", () => {
+    const original = { ...item("w-edit", "p-source", "1", "Title"), description: "Details" };
+    expect(updateWorkItemDetails(original, { title: "Title", description: "  " })).not.toHaveProperty("description");
+    expect(() => updateWorkItemDetails(original, { title: "  " })).toThrow("title is required");
+  });
+});
+
+describe("work item day planning", () => {
+  it("sets an exact start and keeps resource effort aligned with duration", () => {
+    const original: WorkItem = {
+      ...item("w-plan", "p-source", "1", "Plan me"),
+      durationSeconds: 3600,
+      estimate: { optimisticSeconds: 1800, mostLikelySeconds: 3600, pessimisticSeconds: 7200 },
+      assignmentIds: [
+        { resourceId: "r-1", attention: "deep", effortSeconds: 2700 },
+        { resourceId: "r-2", attention: "medium", effortSeconds: 900 }
+      ],
+      constraint: {
+        noEarlierThan: "2026-07-19T00:00:00.000Z",
+        noLaterThan: "2026-07-30T00:00:00.000Z",
+        fixedFinish: "2026-07-21T00:00:00.000Z"
+      }
+    };
+
+    const updated = planWorkItemForDay(original, {
+      plannedStart: "2026-07-20T01:30:00.000Z",
+      effortSeconds: 7200
+    });
+
+    expect(updated.constraint).toEqual({
+      noLaterThan: "2026-07-30T00:00:00.000Z",
+      fixedStart: "2026-07-20T01:30:00.000Z"
+    });
+    expect(updated.durationSeconds).toBe(7200);
+    expect(updated.estimate).toEqual({ optimisticSeconds: 1800, mostLikelySeconds: 7200, pessimisticSeconds: 7200 });
+    expect(updated.assignmentIds.map((assignment) => assignment.effortSeconds)).toEqual([5400, 1800]);
+    expect(original.durationSeconds).toBe(3600);
   });
 });

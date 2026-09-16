@@ -67,11 +67,14 @@
 .todosPage__titleRow h2 {
   margin: 0;
   color: var(--foreground, #0f172a);
-  font-family: Georgia, "Times New Roman", serif;
   font-size: clamp(1.75rem, 3vw, 2.35rem);
   font-weight: 650;
   letter-spacing: -0.035em;
   line-height: 1;
+}
+
+.todosPage__quickCapture {
+  margin-bottom: 14px;
 }
 
 .todosPage__total {
@@ -955,7 +958,6 @@
 
 .todoDialog__header h2 {
   margin: 1px 0 4px;
-  font-family: Georgia, "Times New Roman", serif;
   font-size: 1.18rem;
   letter-spacing: -0.015em;
 }

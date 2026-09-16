@@ -41,11 +41,21 @@ export interface AiProviderSettings {
   updatedAt?: string;
 }
 
+export interface ExternalServiceSettings {
+  baseUrl: string;
+  ownerTokenSecretId?: string;
+  autoPullEnabled: boolean;
+  pollIntervalSeconds: number;
+  showNotificationTitles: boolean;
+  updatedAt?: string;
+}
+
 export interface AppSettings {
   schemaVersion: 1;
   githubSync: GitHubSyncSettings;
   firebaseSync: FirebaseSyncSettings;
   aiProviders: AiProviderSettings[];
+  externalService: ExternalServiceSettings;
 }
 
 export const defaultGitHubSyncSettings: GitHubSyncSettings = {
@@ -77,11 +87,19 @@ export const defaultCustomAiProviderSettings: AiProviderSettings = {
   model: ""
 };
 
+export const defaultExternalServiceSettings: ExternalServiceSettings = {
+  baseUrl: "",
+  autoPullEnabled: true,
+  pollIntervalSeconds: 30,
+  showNotificationTitles: false
+};
+
 export const defaultAppSettings: AppSettings = {
   schemaVersion: 1,
   githubSync: defaultGitHubSyncSettings,
   firebaseSync: defaultFirebaseSyncSettings,
-  aiProviders: [defaultCustomAiProviderSettings]
+  aiProviders: [defaultCustomAiProviderSettings],
+  externalService: defaultExternalServiceSettings
 };
 
 export class BrowserAppSettingsRepository {
@@ -98,7 +116,8 @@ export class BrowserAppSettingsRepository {
       schemaVersion: 1,
       githubSync: { ...defaultGitHubSyncSettings, ...parsed.githubSync },
       firebaseSync: { ...defaultFirebaseSyncSettings, ...parsed.firebaseSync },
-      aiProviders: parsed.aiProviders?.length ? parsed.aiProviders : [defaultCustomAiProviderSettings]
+      aiProviders: parsed.aiProviders?.length ? parsed.aiProviders : [defaultCustomAiProviderSettings],
+      externalService: { ...defaultExternalServiceSettings, ...parsed.externalService }
     };
   }
 

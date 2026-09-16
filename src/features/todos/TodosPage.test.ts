@@ -95,6 +95,8 @@ function snapshot(): WorkspaceSnapshot {
 function callbacks(overrides: Partial<TodosPageProps> = {}): TodosPageProps {
   return {
     snapshot: snapshot(),
+    onCapture: vi.fn(() => "todo-captured"),
+    onUndoCapture: vi.fn(),
     onUpdateTodo: vi.fn(),
     onCompleteTodo: vi.fn(),
     onRestoreTodo: vi.fn(),

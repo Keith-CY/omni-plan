@@ -98,7 +98,7 @@ export function exportPdfHtml(
     <meta charset="utf-8" />
     <title>${project.name} Plan Report</title>
     <style>
-      body { font-family: ui-serif, Georgia, serif; color: #20251f; margin: 40px; }
+      body { font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #262522; margin: 40px; }
       table { border-collapse: collapse; width: 100%; }
       th, td { border-bottom: 1px solid #ddd; padding: 8px; text-align: left; }
       .critical { color: #b43d2f; font-weight: 700; }

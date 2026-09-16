@@ -10,6 +10,7 @@ import { APP_SETTINGS_STORAGE_KEY, defaultAppSettings } from "./domain/settings"
 import { BrowserWorkspaceRepository, WORKSPACE_STORAGE_KEY } from "./domain/storage";
 import { FirebaseE2eeSyncClient } from "./domain/sync";
 import type { Project, WorkItem, WorkspaceSnapshot } from "./domain/types";
+import { zonedDateKey, zonedDateTimeToIso } from "./domain/time";
 import { createEmptyWorkspace } from "./domain/workspace";
 
 const bunDom = typeof window === "undefined" || typeof document === "undefined"
@@ -74,8 +75,8 @@ class MemoryStorage implements Storage {
   }
 }
 
-function calendarFixture(): { targetDay: string; workspace: WorkspaceSnapshot } {
-  const today = new Date().toISOString().slice(0, 10);
+function calendarFixture(timeZone = "UTC"): { targetDay: string; workspace: WorkspaceSnapshot } {
+  const today = zonedDateKey(new Date().toISOString(), timeZone);
   const month = today.slice(0, 7);
   const targetDate = Number(today.slice(8, 10)) === 13 ? 14 : 13;
   const targetDay = `${month}-${String(targetDate).padStart(2, "0")}`;
@@ -87,8 +88,8 @@ function calendarFixture(): { targetDay: string; workspace: WorkspaceSnapshot } 
     priority: 1,
     northStar: "Keep calendar selection explicit.",
     currentOutcome: "Clicking a date selects it.",
-    horizon: `${month}-28T00:00:00.000Z`,
-    start: `${month}-01T00:00:00.000Z`,
+    horizon: zonedDateTimeToIso(`${month}-28`, "00:00", timeZone),
+    start: zonedDateTimeToIso(`${month}-01`, "00:00", timeZone),
     reviewCadenceDays: 7
   };
   const workItem: WorkItem = {
@@ -99,7 +100,7 @@ function calendarFixture(): { targetDay: string; workspace: WorkspaceSnapshot } 
     outline: "1",
     durationSeconds: 3_600,
     estimate: { mostLikelySeconds: 3_600 },
-    constraint: { fixedStart: `${targetDay}T00:00:00.000Z` },
+    constraint: { fixedStart: zonedDateTimeToIso(targetDay, "05:00", timeZone) },
     assignmentIds: [],
     percentComplete: 0
   };
@@ -108,7 +109,7 @@ function calendarFixture(): { targetDay: string; workspace: WorkspaceSnapshot } 
     targetDay,
     workspace: {
       ...createEmptyWorkspace(),
-      timeZone: "UTC",
+      timeZone,
       projects: [project],
       workItems: [workItem]
     }
@@ -141,8 +142,8 @@ async function eventually<T>(read: () => T | undefined): Promise<T> {
   throw new Error("Calendar fixture did not render in time.");
 }
 
-async function renderCalendar() {
-  const fixture = calendarFixture();
+async function renderCalendar(timeZone = "UTC") {
+  const fixture = calendarFixture(timeZone);
   const repository = new BrowserWorkspaceRepository();
   window.localStorage.setItem(WORKSPACE_STORAGE_KEY, repository.exportWorkspace(fixture.workspace));
   window.location.hash = `#/calendar/${projectId}`;
@@ -228,6 +229,17 @@ describe("calendar day selection", () => {
 
     expect(selectedDayPanel().querySelector("h3")?.textContent?.trim()).toBe(selectedDayBeforeClick);
     expect(cell.getAttribute("aria-selected")).toBe("false");
+  });
+
+  it("groups scheduled work by workspace time zone at a UTC date boundary", async () => {
+    const { cell } = await renderCalendar("Asia/Tokyo");
+    const eventChip = cell.querySelector<HTMLElement>(".calendarEventChip");
+    expect(eventChip?.textContent).toContain("Event inside target day");
+
+    await act(async () => {
+      cell.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(selectedDayPanel().textContent).toContain("05:00");
   });
 
   it("preserves an unsupported future workspace and blocks the interactive app", async () => {

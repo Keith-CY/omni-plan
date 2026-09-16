@@ -1,4 +1,20 @@
-import type { WorkspaceSnapshot } from "./types";
+import type { Resource, WorkspaceSnapshot } from "./types";
+
+export const personalResourceId = "r-me";
+
+export function createPersonalResource(): Resource {
+  return {
+    id: personalResourceId,
+    name: "我",
+    role: "Owner",
+    capacityByAttention: {
+      deep: 4 * 60 * 60,
+      medium: 3 * 60 * 60,
+      shallow: 2 * 60 * 60
+    },
+    hourlyRate: 1
+  };
+}
 
 export function createEmptyWorkspace(): WorkspaceSnapshot {
   return {
@@ -10,7 +26,7 @@ export function createEmptyWorkspace(): WorkspaceSnapshot {
     workItems: [],
     recurringOccurrences: [],
     dependencies: [],
-    resources: [],
+    resources: [createPersonalResource()],
     capacities: [],
     baselines: [],
     actuals: [],

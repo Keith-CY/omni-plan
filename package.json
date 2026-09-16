@@ -6,8 +6,13 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "tsc && vite build",
+    "build:server": "tsc -p tsconfig.server.json",
     "test": "vitest run",
+    "test:server": "bun test server",
     "test:watch": "vitest",
+    "serve": "bun server/index.ts",
+    "token": "bun server/cli.ts token",
+    "vapid": "bun server/cli.ts vapid generate",
     "preview": "vite preview --host 127.0.0.1",
     "workspace:migrate": "bun scripts/migrate-workspace.ts"
   },
@@ -27,13 +32,16 @@
     "tailwind-merge": "^3.6.0",
     "tailwindcss": "^4.3.2",
     "tailwindcss-animate": "^1.0.7",
-    "vite": "^6.0.5"
+    "vite": "^6.0.5",
+    "web-push": "^3.6.7"
   },
   "devDependencies": {
+    "@types/bun": "^1.4.2",
     "@types/jsdom": "21.1.7",
     "@types/node": "^26.0.1",
     "@types/react": "^18.3.18",
     "@types/react-dom": "^18.3.5",
+    "@types/web-push": "^3.6.4",
     "jsdom": "25.0.1",
     "typescript": "^5.7.2",
     "vitest": "^2.1.8"

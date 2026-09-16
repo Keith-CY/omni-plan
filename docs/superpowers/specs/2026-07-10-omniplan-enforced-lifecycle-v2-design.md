@@ -1,5 +1,9 @@
 # OmniPlan Enforced Lifecycle V2 Design
 
+> **部分取代（2026-09-16）：** 当前默认产品体验以
+> [OmniPlan Task-first 产品规格](../../product/task-first/product-spec.md)为准。
+> 本文的调度、安全、证据、审查与迁移约束仍可复用，但强制生命周期和四入口信息架构不再适用于所有任务。
+
 **Status:** Approved design
 
 **Date:** 2026-07-10

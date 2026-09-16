@@ -1,0 +1,9 @@
+.git
+.data
+.env
+.env.*
+!.env.example
+node_modules
+dist
+design-qa.md
+apple/OmniPlanCompanion

@@ -131,6 +131,10 @@ export function createTodo(input: CreateTodoInput, now = input.capturedAt ?? new
       : { lastRepeatCompletedAt: input.lastRepeatCompletedAt }),
     checklist: cloneChecklist(input.checklist ?? []),
     ...(input.plannedForDate === undefined ? {} : { plannedForDate: input.plannedForDate }),
+    ...(input.plannedStart === undefined ? {} : { plannedStart: input.plannedStart }),
+    ...(input.plannedFinish === undefined ? {} : { plannedFinish: input.plannedFinish }),
+    ...(input.captureSource === undefined ? {} : { captureSource: input.captureSource }),
+    ...(input.captureKey === undefined ? {} : { captureKey: input.captureKey }),
     status,
     ...(status === "completed" ? { completedAt: input.completedAt ?? now } : {}),
     capturedAt: input.capturedAt ?? now,
@@ -227,10 +231,10 @@ export function reopenTodo(todo: Todo, now = new Date().toISOString()): Todo {
 
 export function todoHasInboxExitMetadata(todo: Pick<
   Todo,
-  "tags" | "flagged" | "deferUntil" | "dueAt" | "plannedForDate" | "repeatRule"
+  "tags" | "flagged" | "deferUntil" | "dueAt" | "plannedForDate" | "plannedStart" | "repeatRule"
 >): boolean {
   return Boolean(
-    todo.tags.length || todo.flagged || todo.deferUntil || todo.dueAt || todo.plannedForDate || todo.repeatRule
+    todo.tags.length || todo.flagged || todo.deferUntil || todo.dueAt || todo.plannedForDate || todo.plannedStart || todo.repeatRule
   );
 }
 
@@ -484,6 +488,7 @@ function patchTriggersInboxExit(patch: TodoPatch): boolean {
     patch.deferUntil ||
     patch.dueAt ||
     patch.plannedForDate ||
+    patch.plannedStart ||
     patch.repeatRule
   );
 }
@@ -496,10 +501,12 @@ function todayMembership(todo: Todo, today: string, timeZone: string): boolean {
   const due = optionalDateKey(todo.dueAt, timeZone);
   const deferred = optionalDateKey(todo.deferUntil, timeZone);
   const planned = optionalDateKey(todo.plannedForDate, timeZone);
+  const plannedStart = optionalDateKey(todo.plannedStart, timeZone);
   return Boolean(
     (due && due <= today) ||
     (deferred && deferred <= today) ||
-    planned === today
+    planned === today ||
+    plannedStart === today
   );
 }
 
@@ -522,6 +529,7 @@ function todayRank(todo: Todo, today: string, timeZone: string): { group: number
   if (due && due < today) return { group: 0, key: todo.dueAt ?? due };
   if (due === today) return { group: 1, key: todo.dueAt ?? due };
   const starts = [
+    optionalDateKey(todo.plannedStart, timeZone) === today ? todo.plannedStart : undefined,
     optionalDateKey(todo.plannedForDate, timeZone) === today ? todo.plannedForDate : undefined,
     optionalDateKey(todo.deferUntil, timeZone) && optionalDateKey(todo.deferUntil, timeZone)! <= today
       ? todo.deferUntil
@@ -653,6 +661,8 @@ function workItemFromTodo(
 ): WorkItem {
   const estimate = nonNegativeSeconds(todo.estimatedSeconds ?? 0);
   const constraint = {
+    ...(todo.plannedStart ? { fixedStart: todo.plannedStart } : {}),
+    ...(todo.plannedFinish ? { fixedFinish: todo.plannedFinish } : {}),
     ...(todo.deferUntil ? { noEarlierThan: todo.deferUntil } : {}),
     ...(todo.dueAt ? { noLaterThan: todo.dueAt } : {})
   };
@@ -666,6 +676,8 @@ function workItemFromTodo(
     flagged: todo.flagged,
     checklist: cloneChecklist(todo.checklist),
     ...(todo.plannedForDate === undefined ? {} : { plannedForDate: todo.plannedForDate }),
+    ...(todo.captureSource === undefined ? {} : { captureSource: todo.captureSource }),
+    ...(todo.captureKey === undefined ? {} : { captureKey: todo.captureKey }),
     capturedAt: todo.capturedAt,
     updatedAt: now,
     ...(todo.completedAt === undefined ? {} : { completedAt: todo.completedAt }),
@@ -686,7 +698,9 @@ function todoFromWorkItem(snapshot: WorkspaceSnapshot, task: WorkItem, now: ISOD
   const latestActual = snapshot.actuals
     .filter((entry) => entry.workItemId === task.id)
     .sort((left, right) => right.recordedAt.localeCompare(left.recordedAt))[0];
-  const plannedForDate = task.plannedForDate ?? task.constraint?.fixedStart?.slice(0, 10);
+  const plannedStart = task.constraint?.fixedStart;
+  const plannedFinish = task.constraint?.fixedFinish;
+  const plannedForDate = task.plannedForDate ?? plannedStart?.slice(0, 10);
   return {
     id: task.id,
     title: task.title,
@@ -703,6 +717,10 @@ function todoFromWorkItem(snapshot: WorkspaceSnapshot, task: WorkItem, now: ISOD
     ...(task.repeatRule === undefined ? {} : { repeatRule: cloneRepeatRule(task.repeatRule) }),
     checklist: cloneChecklist(task.checklist ?? []),
     ...(plannedForDate === undefined ? {} : { plannedForDate }),
+    ...(plannedStart === undefined ? {} : { plannedStart }),
+    ...(plannedFinish === undefined ? {} : { plannedFinish }),
+    ...(task.captureSource === undefined ? {} : { captureSource: task.captureSource }),
+    ...(task.captureKey === undefined ? {} : { captureKey: task.captureKey }),
     status: completed ? "completed" : "open",
     ...(completed ? { completedAt: task.completedAt ?? latestActual?.actualFinish ?? latestActual?.recordedAt ?? now } : {}),
     capturedAt: task.capturedAt ?? now,

@@ -1,0 +1,129 @@
+.quickTaskCaptureStack {
+  display: grid;
+  gap: 8px;
+}
+
+.quickTaskCapture {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 54px;
+  padding: 7px 8px 7px 16px;
+  border: 1px solid var(--flow-line-strong, #d7d0c4);
+  border-radius: 10px;
+  background: var(--flow-surface, #fffdfa);
+  transition: border-color 140ms ease, box-shadow 140ms ease;
+}
+
+.quickTaskCapture:focus-within {
+  border-color: color-mix(in srgb, var(--flow-indigo, #4a56a6) 55%, var(--flow-line, #e6e1d8));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--flow-indigo, #4a56a6) 11%, transparent);
+}
+
+.quickTaskCapture > svg {
+  width: 17px;
+  height: 17px;
+  color: var(--flow-indigo, #4a56a6);
+}
+
+.quickTaskCapture input {
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--flow-ink, #262522);
+  font-size: 15px;
+}
+
+.quickTaskCapture input::placeholder {
+  color: #99938b;
+}
+
+.quickTaskCaptureHint {
+  color: #9a958e;
+  font-size: 11px;
+}
+
+.quickTaskCapture > button {
+  min-height: 36px;
+  border: 1px solid #3f4b98;
+  border-radius: 8px;
+  padding: 0 16px;
+  background: var(--flow-indigo, #4a56a6);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.quickTaskCapture > button:disabled {
+  border-color: var(--flow-line, #e6e1d8);
+  background: #e9e6e0;
+  color: #9c978f;
+}
+
+.quickTaskCaptureReceipt {
+  display: flex;
+  width: fit-content;
+  max-width: 100%;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border: 1px solid #d4e5da;
+  border-radius: 8px;
+  background: var(--flow-sage-soft, #e9f1ec);
+  color: #38664f;
+  font-size: 12px;
+}
+
+.quickTaskCaptureReceipt > svg,
+.quickTaskCaptureReceipt button svg {
+  width: 14px;
+  height: 14px;
+}
+
+.quickTaskCaptureReceipt span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.quickTaskCaptureReceipt button {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 4px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font-weight: 700;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.quickTaskCapture :is(button, input):focus-visible,
+.quickTaskCaptureReceipt button:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--flow-indigo, #4a56a6) 70%, white);
+  outline-offset: 2px;
+}
+
+@media (max-width: 767px) {
+  .quickTaskCapture {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    min-height: 50px;
+    padding-left: 13px;
+  }
+
+  .quickTaskCaptureHint {
+    display: none;
+  }
+
+  .quickTaskCapture > button {
+    min-height: 34px;
+    padding: 0 12px;
+  }
+
+  .quickTaskCaptureReceipt span {
+    white-space: normal;
+  }
+}

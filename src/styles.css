@@ -29,39 +29,39 @@
 :root {
   color-scheme: light;
   font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  --background: oklch(0.985 0.003 247.858);
-  --foreground: oklch(0.145 0 0);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.205 0 0);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.42 0.01 248);
-  --accent: oklch(0.965 0.004 248);
-  --accent-foreground: oklch(0.205 0 0);
-  --destructive: oklch(0.577 0.245 27.325);
-  --destructive-foreground: oklch(0.985 0 0);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  --ring: oklch(0.708 0 0);
+  --background: #f7f5f0;
+  --foreground: #262522;
+  --card: #fffdfa;
+  --card-foreground: #262522;
+  --popover: #fffdfa;
+  --popover-foreground: #262522;
+  --primary: #4a56a6;
+  --primary-foreground: #ffffff;
+  --secondary: #efede7;
+  --secondary-foreground: #34322e;
+  --muted: #efede7;
+  --muted-foreground: #76716a;
+  --accent: #eceefa;
+  --accent-foreground: #343d82;
+  --destructive: #ae594a;
+  --destructive-foreground: #ffffff;
+  --border: #e6e1d8;
+  --input: #d7d0c4;
+  --ring: #4a56a6;
   --radius: 0.5rem;
-  --ink: #20251f;
-  --paper: #f8fafc;
-  --surface: #ffffff;
-  --line: #e2e8f0;
-  --line-strong: #cbd5e1;
-  --cyan: #2563eb;
-  --green: #059669;
-  --amber: #d97706;
-  --red: #dc2626;
-  --plum: #475569;
-  --text-muted: #475569;
-  --text-subtle: #64748b;
-  --shadow: 0 12px 30px rgba(15, 23, 42, 0.07);
+  --ink: #262522;
+  --paper: #f7f5f0;
+  --surface: #fffdfa;
+  --line: #e6e1d8;
+  --line-strong: #d7d0c4;
+  --cyan: #4a56a6;
+  --green: #568c72;
+  --amber: #bd7a35;
+  --red: #ae594a;
+  --plum: #6d6884;
+  --text-muted: #76716a;
+  --text-subtle: #918b83;
+  --shadow: 0 3px 12px rgba(52, 48, 42, 0.055);
 }
 
 @layer base {
@@ -131,7 +131,7 @@ body {
 .sidebarQuickCaptureButton {
   width: 100%;
   justify-content: flex-start;
-  box-shadow: 0 5px 14px rgba(15, 23, 42, 0.1);
+  box-shadow: none;
 }
 
 .desktopSidebar[data-collapsed="true"] .sidebarQuickCaptureButton {
@@ -236,7 +236,6 @@ input:focus-visible {
   margin-bottom: 12px;
   border: 2px solid #f0b84f;
   border-radius: 8px;
-  font-family: Georgia, serif;
   font-weight: 800;
 }
 
@@ -294,7 +293,6 @@ input:focus-visible {
 
 .topBar h1 {
   margin: 2px 0 0;
-  font-family: Georgia, "Times New Roman", serif;
   font-size: clamp(30px, 4vw, 54px);
   line-height: 0.98;
   letter-spacing: 0;
@@ -585,7 +583,6 @@ input:focus-visible {
 .metric strong {
   display: block;
   margin-top: 2px;
-  font-family: Georgia, serif;
   font-size: 28px;
 }
 
@@ -4524,6 +4521,10 @@ button.todayItem {
   -webkit-line-clamp: 3;
 }
 
+.outlineMobileEdit {
+  display: none;
+}
+
 .outlineItemCell span,
 .outlinePlanCell span {
   display: block;
@@ -4858,6 +4859,31 @@ button.todayItem {
 }
 
 @media (max-width: 560px) {
+  .outlineItemCell > .outlineDesktopTitle,
+  .outlineDesktopEdit {
+    display: none;
+  }
+
+  .outlineMobileEdit {
+    display: flex;
+    width: 100%;
+    min-height: 44px;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    border: 0;
+    padding: 0;
+    background: transparent;
+    text-align: left;
+  }
+
+  .outlineMobileEdit svg {
+    width: 13px;
+    height: 13px;
+    flex: none;
+    color: var(--text-muted);
+  }
+
   .metricStrip {
     grid-template-columns: 1fr;
   }

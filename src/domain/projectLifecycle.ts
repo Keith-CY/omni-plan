@@ -109,7 +109,7 @@ function normalizeTodoRecord(todo: Todo): Todo {
   const tags = [...new Set((legacy.tags ?? []).map((tag) => tag.trim()).filter(Boolean))];
   const repeatRule = todo.repeatRule ? normalizeRepeatRule(todo.id, todo.repeatRule) : undefined;
   const organized = Boolean(
-    tags.length || legacy.flagged || todo.deferUntil || todo.dueAt || todo.plannedForDate || repeatRule
+    tags.length || legacy.flagged || todo.deferUntil || todo.dueAt || todo.plannedForDate || todo.plannedStart || repeatRule
   );
   const normalized: Todo = {
     ...todo,

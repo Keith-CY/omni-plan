@@ -1,5 +1,9 @@
 # Fluent Design Migration Plan
 
+> **历史方案（2026-09-16 起不再执行）：** 当前视觉与产品方向已由
+> [OmniPlan Task-first 产品规格](./product/task-first/product-spec.md)取代。
+> 本文仅保留审计与迁移探索记录；不要继续引入 Fluent 组件或以本文作为视觉验收标准。
+
 ## Summary
 
 Goal: restyle OmniPlan Personal into a Microsoft Fluent 2 web experience while preserving the current portfolio-first project-management workflow.

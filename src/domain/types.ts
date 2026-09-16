@@ -21,6 +21,7 @@ export type RecurringOccurrenceStatus = "scheduled" | "occurred" | "exception" |
 export type RecurringSettlementSource = "on-time" | "system-catch-up" | "manual";
 export type TodoStatus = "open" | "completed";
 export type ConversionType = "todo_to_task" | "task_to_todo" | "todo_to_project";
+export type CaptureSource = "web" | "share" | "shortcut" | "alfred" | "agent";
 
 export interface TodoChecklistItem {
   id: Id;
@@ -44,6 +45,12 @@ export interface Todo {
   lastRepeatCompletedAt?: ISODate;
   checklist: TodoChecklistItem[];
   plannedForDate?: string;
+  /** Exact wall-clock placement. plannedForDate remains the date-only fallback. */
+  plannedStart?: ISODate;
+  plannedFinish?: ISODate;
+  captureSource?: CaptureSource;
+  /** Stable external idempotency key. It contains no user-visible task text. */
+  captureKey?: string;
   status: TodoStatus;
   completedAt?: ISODate;
   capturedAt: ISODate;
@@ -180,6 +187,8 @@ export interface WorkItem {
   flagged?: boolean;
   checklist?: TodoChecklistItem[];
   plannedForDate?: string;
+  captureSource?: CaptureSource;
+  captureKey?: string;
   capturedAt?: ISODate;
   updatedAt?: ISODate;
   completedAt?: ISODate;

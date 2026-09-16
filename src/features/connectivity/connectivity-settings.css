@@ -1,0 +1,266 @@
+.connectivitySettings {
+  display: grid;
+  gap: 16px;
+  border: 1px solid #e6e1d8;
+  border-radius: 12px;
+  padding: 20px;
+  background: #fffdfa;
+  color: #262522;
+}
+
+.connectivitySettingsHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.connectivitySettingsHeader p {
+  margin: 0 0 5px;
+  color: #4a56a6;
+  font-size: 10px;
+  font-weight: 760;
+  letter-spacing: 0.12em;
+}
+
+.connectivitySettingsHeader h3 {
+  margin: 0 0 5px;
+  font-size: 18px;
+}
+
+.connectivitySettingsHeader span {
+  color: #76716a;
+  font-size: 12px;
+}
+
+.connectivitySettingsHeader i {
+  display: inline-flex;
+  max-width: 330px;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid #e6e1d8;
+  border-radius: 7px;
+  padding: 6px 8px;
+  background: #f8f7f2;
+  color: #76716a;
+  font-size: 10px;
+  font-style: normal;
+}
+
+.connectivitySettingsHeader i[data-state="subscribed"] {
+  border-color: #cfe0d5;
+  background: #e9f1ec;
+  color: #38664f;
+}
+
+.connectivitySettingsHeader i svg,
+.connectivityTokenMaker > div:first-child > svg,
+.connectivityPrivacy > svg {
+  width: 15px;
+  height: 15px;
+  flex: none;
+}
+
+.connectivityNotice {
+  border: 1px solid #d9dce9;
+  border-radius: 7px;
+  padding: 8px 10px;
+  background: #f0f1f8;
+  color: #414b8e;
+  font-size: 11px;
+}
+
+.connectivityServiceForm {
+  display: grid;
+  grid-template-columns: minmax(190px, 1fr) minmax(190px, 1fr) 120px;
+  gap: 10px;
+}
+
+.connectivityServiceForm > label:not(.connectivityCheck) {
+  display: grid;
+  gap: 5px;
+}
+
+.connectivityServiceForm label > span {
+  color: #76716a;
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.connectivityServiceForm input,
+.connectivityTokenMaker input {
+  min-width: 0;
+  height: 38px;
+  border: 1px solid #d7d0c4;
+  border-radius: 7px;
+  padding: 0 10px;
+  background: #fffdfa;
+  color: #262522;
+  font: inherit;
+  font-size: 12px;
+}
+
+.connectivityCheck {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.connectivityCheck input {
+  width: 15px;
+  height: 15px;
+  accent-color: #4a56a6;
+}
+
+.connectivitySettings button {
+  display: inline-flex;
+  min-height: 36px;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 1px solid #d7d0c4;
+  border-radius: 7px;
+  padding: 0 11px;
+  background: #fffdfa;
+  color: #262522;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 680;
+}
+
+.connectivitySettings button:hover:not(:disabled) {
+  border-color: #afb4d6;
+  background: #f0f1f8;
+  color: #414b8e;
+}
+
+.connectivitySettings button:disabled {
+  cursor: default;
+  opacity: 0.48;
+}
+
+.connectivitySettings button svg {
+  width: 14px;
+  height: 14px;
+}
+
+.connectivityServiceForm > button {
+  justify-self: start;
+  border-color: #3f4b98;
+  background: #4a56a6;
+  color: white;
+}
+
+.connectivityActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  border-top: 1px solid #e6e1d8;
+  padding-top: 14px;
+}
+
+.connectivityTokenMaker {
+  display: grid;
+  gap: 10px;
+  border: 1px solid #e6e1d8;
+  border-radius: 9px;
+  padding: 13px;
+  background: #faf9f5;
+}
+
+.connectivityTokenMaker > div:first-child {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.connectivityTokenMaker > div:first-child > svg {
+  margin-top: 2px;
+  color: #4a56a6;
+}
+
+.connectivityTokenMaker > div:first-child span {
+  display: grid;
+  gap: 2px;
+}
+
+.connectivityTokenMaker strong {
+  font-size: 12px;
+}
+
+.connectivityTokenMaker small {
+  color: #76716a;
+  font-size: 10px;
+}
+
+.connectivityTokenMaker form {
+  display: flex;
+  gap: 7px;
+}
+
+.connectivityTokenMaker form input {
+  width: min(300px, 100%);
+}
+
+.connectivityCreatedToken {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  overflow: hidden;
+}
+
+.connectivityCreatedToken code {
+  min-width: 0;
+  flex: 1;
+  overflow: auto;
+  border: 1px solid #d7d0c4;
+  border-radius: 7px;
+  padding: 10px;
+  background: #fffdfa;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.connectivitySettings .connectivityRevoke {
+  justify-self: start;
+  color: #a04f3f;
+}
+
+.connectivityPrivacy {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  color: #76716a;
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+@media (max-width: 820px) {
+  .connectivitySettings {
+    padding: 15px;
+  }
+
+  .connectivitySettingsHeader {
+    display: grid;
+  }
+
+  .connectivityServiceForm {
+    grid-template-columns: 1fr;
+  }
+
+  .connectivityServiceForm > button,
+  .connectivitySettingsHeader i {
+    width: 100%;
+    max-width: none;
+  }
+
+  .connectivityTokenMaker form,
+  .connectivityCreatedToken {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .connectivityTokenMaker form input {
+    width: 100%;
+  }
+}
