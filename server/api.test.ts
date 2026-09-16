@@ -14,6 +14,34 @@ afterEach(() => {
 });
 
 describe("private capture API", () => {
+  it("publishes only non-secret browser connection defaults", async () => {
+    const api = createApi({
+      store,
+      now: () => fixedNow,
+      clientConfig: {
+        firebaseSync: {
+          projectId: "public-project",
+          apiKey: "public-web-key",
+          databaseId: "(default)",
+          collectionPath: "omniPlanSync",
+          workspaceId: "personal"
+        }
+      }
+    });
+
+    const response = await api(request("/api/client-config", "GET"));
+    expect(response?.status).toBe(200);
+    expect(await response?.json()).toEqual({
+      firebaseSync: {
+        projectId: "public-project",
+        apiKey: "public-web-key",
+        databaseId: "(default)",
+        collectionPath: "omniPlanSync",
+        workspaceId: "personal"
+      }
+    });
+  });
+
   it("accepts once per idempotency key, then lets the owner acknowledge it", async () => {
     const captureToken = store.createToken("Alfred", "capture", fixedNow.toISOString());
     const ownerToken = store.createToken("Web app", "owner", fixedNow.toISOString());

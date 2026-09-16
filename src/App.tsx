@@ -191,6 +191,12 @@ import type {
   WorkspaceSnapshot
 } from "./domain/types";
 import { createEmptyWorkspace, workspaceHasUserContent } from "./domain/workspace";
+import {
+  applyDeploymentClientConfig,
+  browserDeviceId,
+  friendlyWorkspaceSyncError,
+  loadDeploymentClientConfig
+} from "./domain/clientConfig";
 import { addSeconds, addZonedCalendarDays, secondsBetween, startOfDay, zonedDateKey, zonedDateTimeToIso, zonedTimeKey } from "./domain/time";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -1014,6 +1020,24 @@ function RoutedApp() {
     appSettingsRef.current = safeSettings;
     setAppSettings(safeSettings);
   }, [settingsRepository]);
+
+  useEffect(() => {
+    let active = true;
+    void loadDeploymentClientConfig().then((config) => {
+      if (!active || !config?.firebaseSync) return;
+      const current = appSettingsRef.current;
+      const randomId = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
+      const next = applyDeploymentClientConfig(
+        current,
+        config,
+        browserDeviceId(globalThis.navigator?.userAgent ?? "browser", randomId)
+      );
+      if (next !== current) saveAppSettings(next);
+    });
+    return () => {
+      active = false;
+    };
+  }, [saveAppSettings]);
 
   const rememberSessionPassphrase = useCallback(async () => {
     const passphrase = sessionPassphraseRef.current.trim();
@@ -7580,6 +7604,7 @@ function Settings({
   const [evidenceProjectId, setEvidenceProjectId] = useState(() => evidenceProjects[0]?.id ?? defaultProjectId);
   const [evidenceWorkItemId, setEvidenceWorkItemId] = useState<string>("project");
   const [expandedPanels, setExpandedPanels] = useState<Set<SettingsPanelId>>(() => new Set());
+  const [advancedOpen, setAdvancedOpen] = useState(false);
   const [workspaceTimeZoneDraft, setWorkspaceTimeZoneDraft] = useState(workspace.timeZone);
   const githubSecret = githubDraft.tokenSecretId ? secretVault.readEncrypted(githubDraft.tokenSecretId) : undefined;
   const aiSecret = aiDraft.apiKeySecretId ? secretVault.readEncrypted(aiDraft.apiKeySecretId) : undefined;
@@ -7942,6 +7967,95 @@ function Settings({
     }
   };
 
+  const connectThisDevice = async () => {
+    if (syncBlockedByExternalChange) {
+      setNotice("另一个标签页修改了数据。请刷新后再连接这台设备。");
+      return;
+    }
+    if (!firebaseReady) {
+      openPanel("sync");
+      setNotice("部署还没有提供同步参数。请在高级设置中补充 Firebase 连接。");
+      return;
+    }
+    if (!sessionPassphrase.trim()) {
+      setNotice("请输入工作区口令；它不是网站登录密码。");
+      return;
+    }
+
+    setNotice("正在安全地连接这台设备…");
+    setSyncBusy(true);
+    try {
+      const client = new FirebaseE2eeSyncClient(firebaseConfig());
+      const session = await client.signInAnonymously();
+      const manifest = await client.readManifest(session);
+      let revision: string;
+      let checksum: string;
+      let pulledAt = firebaseDraft.lastPulledAt;
+      let pushedAt = firebaseDraft.lastPushedAt;
+      let connectedWorkspace = workspace;
+
+      if (manifest) {
+        const localChecksum = await workspacePlaintextChecksum(workspace);
+        const hasUnsyncedLocalWorkspace = firebaseDraft.lastSyncedChecksum
+          ? localChecksum !== firebaseDraft.lastSyncedChecksum
+          : workspaceHasUserContent(workspace);
+        if (hasUnsyncedLocalWorkspace) {
+          const accepted = window.confirm("这台浏览器已有尚未同步的内容。连接前会先导出备份，再以云端工作区为准。继续吗？");
+          if (!accepted) {
+            setNotice("连接已取消；本地工作区没有改变。");
+            return;
+          }
+          downloadText(
+            `omni-plan-before-device-connect-${new Date().toISOString().replace(/[:.]/g, "-")}.json`,
+            workspaceRepository.exportWorkspace(workspace),
+            "application/json"
+          );
+        }
+        const result = await client.pullWorkspaceSnapshot(sessionPassphrase.trim(), session);
+        connectedWorkspace = result.workspace;
+        onWorkspaceImport(result.workspace);
+        revision = result.manifest.latestRevision;
+        checksum = await workspacePlaintextChecksum(result.workspace);
+        pulledAt = new Date().toISOString();
+      } else {
+        const result = await client.pushWorkspaceSnapshot(workspace, sessionPassphrase.trim(), session);
+        revision = result.manifest.latestRevision;
+        checksum = await workspacePlaintextChecksum(workspace);
+        pushedAt = result.manifest.updatedAt;
+      }
+
+      const nextFirebase: FirebaseSyncSettings = {
+        ...firebaseDraft,
+        autoSyncEnabled: true,
+        lastSyncedRevision: revision,
+        lastSyncedChecksum: checksum,
+        lastPulledAt: pulledAt,
+        lastPushedAt: pushedAt,
+        updatedAt: new Date().toISOString()
+      };
+      onSettingsSave({ ...settings, firebaseSync: nextFirebase });
+      setFirebaseDraft(nextFirebase);
+
+      let remembered = Boolean(rememberedPassphraseSavedAt);
+      if (!remembered) {
+        try {
+          await onRememberPassphrase();
+          remembered = true;
+        } catch {
+          // Sync is connected even if this browser refuses persistent key storage.
+        }
+      }
+
+      const projectCount = connectedWorkspace.projects.filter((project) => !isProjectArchived(project)).length;
+      const taskCount = connectedWorkspace.todos.length + connectedWorkspace.workItems.filter((item) => item.kind !== "phase").length;
+      setNotice(`连接完成：${projectCount} 个项目、${taskCount} 个任务已就绪${remembered ? "；这台设备会自动同步" : "；本次会话已解锁"}。`);
+    } catch (error) {
+      setNotice(friendlyWorkspaceSyncError(error));
+    } finally {
+      setSyncBusy(false);
+    }
+  };
+
   const importGitHubEvidence = async () => {
     if (!evidenceProject) {
       setNotice("Create or select a project before importing GitHub evidence.");
@@ -8103,23 +8217,23 @@ function Settings({
 
   const syncLocked = firebaseReady && !sessionPassphrase.trim();
   const syncStatus = !firebaseReady
-    ? "Needs configuration"
+    ? "需要配置"
     : syncLocked
-      ? "Locked"
+      ? "未解锁"
       : autoSyncStatus.state === "error" || autoSyncStatus.state === "conflict"
-        ? "Needs review"
-        : "Ready";
+        ? "需要处理"
+        : "正常";
   const syncPrimaryLabel = syncBlockedByExternalChange
-    ? "Reload"
+    ? "刷新"
     : !firebaseReady
-      ? "Configure sync"
+      ? "配置"
       : syncLocked
-        ? "Unlock"
+        ? "解锁"
         : syncBusy
-          ? "Syncing"
-          : "Sync now";
-  const syncBadgeVariant = syncStatus === "Ready" ? "success" : syncStatus === "Needs review" ? "destructive" : "warning";
-  const syncStatusIcon = syncStatus === "Ready" ? <CheckCircle2 /> : syncStatus === "Locked" ? <Lock /> : <AlertTriangle />;
+          ? "同步中"
+          : "立即同步";
+  const syncBadgeVariant = syncStatus === "正常" ? "success" : syncStatus === "需要处理" ? "destructive" : "warning";
+  const syncStatusIcon = syncStatus === "正常" ? <CheckCircle2 /> : syncStatus === "未解锁" ? <Lock /> : <AlertTriangle />;
   const syncPrimaryIcon = syncBlockedByExternalChange
     ? <RefreshCw />
     : !firebaseReady
@@ -8129,29 +8243,46 @@ function Settings({
         : <RefreshCw className={syncBusy ? "animate-spin" : undefined} />;
 
   const hasSecretDependency = savedSecretCount > 0 || firebaseReady || Boolean(aiDraft.apiKeySecretId || githubDraft.tokenSecretId);
-  const secretsStatus = sessionPassphrase.trim() ? "Unlocked" : hasSecretDependency ? "Locked" : "No saved secrets";
+  const secretsStatus = sessionPassphrase.trim() ? "已解锁" : hasSecretDependency ? "未解锁" : "尚未使用";
   const secretsPrimaryLabel = sessionPassphrase.trim()
-    ? rememberedPassphraseSavedAt ? "Manage" : "Remember"
-    : secretsStatus === "No saved secrets" ? "Manage" : "Unlock";
-  const secretsBadgeVariant = secretsStatus === "Unlocked" ? "success" : secretsStatus === "Locked" ? "warning" : "secondary";
-  const secretsStatusIcon = secretsStatus === "Unlocked" ? <CheckCircle2 /> : secretsStatus === "Locked" ? <Lock /> : <KeyRound />;
-  const secretsPrimaryIcon = secretsPrimaryLabel === "Remember" ? <Save /> : secretsPrimaryLabel === "Unlock" ? <KeyRound /> : <SettingsIcon />;
+    ? rememberedPassphraseSavedAt ? "管理" : "记住"
+    : secretsStatus === "尚未使用" ? "管理" : "解锁";
+  const secretsBadgeVariant = secretsStatus === "已解锁" ? "success" : secretsStatus === "未解锁" ? "warning" : "secondary";
+  const secretsStatusIcon = secretsStatus === "已解锁" ? <CheckCircle2 /> : secretsStatus === "未解锁" ? <Lock /> : <KeyRound />;
+  const secretsPrimaryIcon = secretsPrimaryLabel === "记住" ? <Save /> : secretsPrimaryLabel === "解锁" ? <KeyRound /> : <SettingsIcon />;
 
   const aiProviderConfigured = Boolean(aiDraft.baseUrl.trim() && aiDraft.model.trim() && aiDraft.apiKeySecretId);
   const aiProviderLocked = aiProviderConfigured && !sessionPassphrase.trim();
-  const aiProviderStatus = !aiProviderConfigured ? "Needs provider" : aiProviderLocked ? "Locked" : "Ready";
-  const aiProviderBadgeVariant = aiProviderStatus === "Ready" ? "success" : "warning";
-  const aiProviderPrimaryLabel = aiProviderLocked ? "Unlock" : "Configure provider";
-  const aiProviderStatusIcon = aiProviderStatus === "Ready" ? <CheckCircle2 /> : aiProviderStatus === "Locked" ? <Lock /> : <AlertTriangle />;
+  const aiProviderStatus = !aiProviderConfigured ? "未配置" : aiProviderLocked ? "未解锁" : "正常";
+  const aiProviderBadgeVariant = aiProviderStatus === "正常" ? "success" : "warning";
+  const aiProviderPrimaryLabel = aiProviderLocked ? "解锁" : "配置";
+  const aiProviderStatusIcon = aiProviderStatus === "正常" ? <CheckCircle2 /> : aiProviderStatus === "未解锁" ? <Lock /> : <AlertTriangle />;
   const aiProviderPrimaryIcon = aiProviderLocked ? <KeyRound /> : <SettingsIcon />;
 
   const workspaceStatus = workspacePersistence.status.toLowerCase().includes("failed")
-    ? "Storage issue"
+    ? "存储异常"
     : workspacePersistence.loaded
-      ? "Saved locally"
-      : "Loading";
-  const workspaceBadgeVariant = workspaceStatus === "Storage issue" ? "destructive" : workspaceStatus === "Saved locally" ? "success" : "warning";
-  const workspaceStatusIcon = workspaceStatus === "Saved locally" ? <CheckCircle2 /> : workspaceStatus === "Loading" ? <RefreshCw className="animate-spin" /> : <AlertTriangle />;
+      ? "本地已保存"
+      : "载入中";
+  const workspaceBadgeVariant = workspaceStatus === "存储异常" ? "destructive" : workspaceStatus === "本地已保存" ? "success" : "warning";
+  const workspaceStatusIcon = workspaceStatus === "本地已保存" ? <CheckCircle2 /> : workspaceStatus === "载入中" ? <RefreshCw className="animate-spin" /> : <AlertTriangle />;
+
+  const deviceConnected = firebaseReady
+    && Boolean(sessionPassphrase.trim())
+    && firebaseDraft.autoSyncEnabled
+    && Boolean(firebaseDraft.lastSyncedRevision);
+  const latestSyncAt = [firebaseDraft.lastPulledAt, firebaseDraft.lastPushedAt]
+    .filter((value): value is string => Boolean(value))
+    .sort()
+    .pop();
+  const deviceStatus = deviceConnected
+    ? "已连接"
+    : !firebaseReady
+      ? "需要部署配置"
+      : sessionPassphrase.trim()
+        ? "可以连接"
+        : "需要工作区口令";
+  const deviceStatusTone = deviceConnected ? "success" : firebaseReady ? "warning" : "destructive";
 
   const hasSettingsNotice = notice !== idleSettingsNotice;
   const settingsNoticeTone = noticeTone(notice);
@@ -8159,25 +8290,74 @@ function Settings({
   return (
     <>
       {hasSettingsNotice && <SettingsToast message={notice} tone={settingsNoticeTone} />}
-      <section className="grid gap-4 lg:grid-cols-2">
+      <section className="settingsPage" aria-labelledby="settings-home-title">
+        <header className="settingsIntro">
+          <div>
+            <p className="settingsKicker">个人工作区</p>
+            <h2 id="settings-home-title">少设置，多记录。</h2>
+            <p>正常使用只需要连接一次。同步参数由部署提供，项目、通知和高级工具都可以以后再开。</p>
+          </div>
+          <span className="settingsQuietPromise"><CheckCircle2 /> 本地先保存</span>
+        </header>
+
         {hasSettingsNotice && (
-          <div className={cn("rounded-lg border p-3 text-sm font-medium lg:col-span-2", noticeBannerClassName(settingsNoticeTone))}>{notice}</div>
+          <div className={cn("settingsNotice", noticeBannerClassName(settingsNoticeTone))}>{notice}</div>
         )}
 
-        <Card className="lg:col-span-2">
-          <CardContent className="flex flex-wrap items-center justify-between gap-3 p-4">
-            <div className="flex min-w-0 items-start gap-3">
-              <div className="grid size-9 shrink-0 place-items-center rounded-lg bg-muted"><ClipboardCheck className="size-4" /></div>
-              <div className="min-w-0">
-                <strong className="block text-sm">Agent</strong>
-                <p className="text-sm text-muted-foreground">Read endpoints, guarded commands, and AI audit live under Settings.</p>
+        <section className="settingsDevicePanel" data-connected={deviceConnected ? "true" : "false"}>
+          <div className="settingsDeviceHeader">
+            <div className="settingsDeviceIdentity">
+              <span className="settingsDeviceIcon"><Workflow /></span>
+              <div>
+                <p>这台设备</p>
+                <h3>{deviceConnected ? "已经连接，可以直接开始" : "连接你的个人工作区"}</h3>
+                <span>{deviceConnected ? "变更会先保存在本地，再安静地同步。" : "输入一次工作区口令，其余连接信息自动完成。"}</span>
               </div>
             </div>
-            <Button asChild variant="outline"><a href={hashForRoute({ view: "agent", selectedProjectId: evidenceProject?.id ?? defaultProjectId })}>Open Agent</a></Button>
-          </CardContent>
-        </Card>
+            <Badge variant={deviceStatusTone}>{deviceStatus}</Badge>
+          </div>
 
-        <div className="lg:col-span-2">
+          {!deviceConnected && (
+            <div className="settingsSetupFlow">
+              <div className="settingsSetupStep" data-complete={firebaseReady ? "true" : "false"}>
+                <span>1</span>
+                <div><strong>连接参数</strong><small>{firebaseReady ? "已由当前部署自动提供" : "部署尚未提供，请打开高级设置"}</small></div>
+                {firebaseReady ? <CheckCircle2 /> : <AlertTriangle />}
+              </div>
+              <label className="settingsPassphraseField">
+                <span><b>2</b><strong>工作区口令</strong><small>用于解密工作区，不是网站登录密码</small></span>
+                <Input
+                  type="password"
+                  name="omniplan-workspace-key"
+                  autoComplete="off"
+                  data-1p-ignore="true"
+                  value={sessionPassphrase}
+                  onChange={(event) => onSessionPassphraseChange(event.target.value)}
+                  placeholder="输入一次即可"
+                  aria-label="工作区口令"
+                />
+              </label>
+              <Button
+                type="button"
+                className="settingsConnectButton"
+                disabled={syncBusy}
+                onClick={() => void connectThisDevice()}
+              >
+                {syncBusy ? <RefreshCw className="animate-spin" /> : <ArrowRightLeft />}
+                {syncBusy ? "正在连接" : firebaseReady ? "连接这台设备" : "打开高级设置"}
+              </Button>
+            </div>
+          )}
+
+          <div className="settingsDeviceFacts">
+            <div><span><Archive />本地保存</span><strong>{workspacePersistence.loaded ? "正常" : "检查中"}</strong></div>
+            <div><span><RefreshCw />自动同步</span><strong>{firebaseDraft.autoSyncEnabled ? "已开启" : "连接后开启"}</strong></div>
+            <div><span><KeyRound />工作区口令</span><strong>{rememberedPassphraseSavedAt ? "此设备已记住" : sessionPassphrase ? "本次已解锁" : "尚未输入"}</strong></div>
+            <div><span><CheckCircle2 />最近同步</span><strong>{latestSyncAt ? latestSyncAt.slice(0, 16).replace("T", " ") : "尚未同步"}</strong></div>
+          </div>
+        </section>
+
+        <div className="settingsConnectionsSection">
           <ConnectivitySettingsPanel
             settings={settings.externalService}
             sessionPassphrase={sessionPassphrase}
@@ -8186,12 +8366,20 @@ function Settings({
           />
         </div>
 
+        <div className="settingsSectionHeading">
+          <div>
+            <p className="settingsKicker">按需展开</p>
+            <h3>其余设置</h3>
+          </div>
+          <span>不影响日常记录</span>
+        </div>
+
       <SettingsOverviewCard
         icon={<Lock className="h-4 w-4" />}
-        title="Sync"
+        title="同步与项目证据"
         status={syncStatus}
         statusIcon={syncStatusIcon}
-        description={autoSyncStatus.message}
+        description={deviceConnected ? "自动同步已开启；Firebase 与 GitHub 细节按需展开" : "Firebase、GitHub 与手动同步工具"}
         badgeVariant={syncBadgeVariant}
         primaryActionLabel={syncPrimaryLabel}
         primaryActionIcon={syncPrimaryIcon}
@@ -8213,8 +8401,8 @@ function Settings({
         <div className="grid gap-4">
           <div className="rounded-lg border bg-muted/20 p-3">
             <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-              <h3 className="text-sm font-semibold">Firebase Workspace Sync</h3>
-              <Badge variant={firebaseReady ? "success" : "warning"}>{firebaseReady ? "Ready" : "Needs Firebase config"}</Badge>
+              <h3 className="text-sm font-semibold">Firebase 工作区同步</h3>
+              <Badge variant={firebaseReady ? "success" : "warning"}>{firebaseReady ? "已就绪" : "需要连接参数"}</Badge>
             </div>
             <div className="grid gap-3 md:grid-cols-2">
               <SettingsRow label="Workspace" value={firebaseDraft.workspaceId || "personal"} />
@@ -8257,8 +8445,8 @@ function Settings({
 
           <div className="rounded-lg border bg-muted/20 p-3">
             <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-              <h3 className="text-sm font-semibold">GitHub ChangeSets and Evidence</h3>
-              <Badge variant={gitHubReady ? "success" : "warning"}>{gitHubReady ? "Ready" : "Needs repo and PAT"}</Badge>
+              <h3 className="text-sm font-semibold">GitHub ChangeSets 与证据</h3>
+              <Badge variant={gitHubReady ? "success" : "warning"}>{gitHubReady ? "已就绪" : "可选，尚未配置"}</Badge>
             </div>
             <div className="grid gap-3 md:grid-cols-2">
               <SettingsRow label="Remote repo" value={githubDraft.owner && githubDraft.repo ? `${githubDraft.owner}/${githubDraft.repo}` : "not configured"} />
@@ -8331,15 +8519,15 @@ function Settings({
 
       <SettingsOverviewCard
         icon={<KeyRound className="h-4 w-4" />}
-        title="Secrets"
+        title="工作区口令"
         status={secretsStatus}
         statusIcon={secretsStatusIcon}
-        description={sessionPassphrase.trim() ? "Workspace passphrase entered for this browser session" : "Enter the workspace passphrase here before syncing"}
+        description={sessionPassphrase.trim() ? "这台浏览器当前已能解密工作区" : "仅在更换或管理工作区口令时展开"}
         badgeVariant={secretsBadgeVariant}
         primaryActionLabel={secretsPrimaryLabel}
         primaryActionIcon={secretsPrimaryIcon}
         onPrimaryAction={() => {
-          if (secretsPrimaryLabel === "Remember") {
+          if (secretsPrimaryLabel === "记住") {
             void rememberPassphrase();
           } else {
             openPanel("secrets");
@@ -8358,16 +8546,17 @@ function Settings({
           </div>
           <div className="grid gap-3 md:grid-cols-[1fr_auto]">
             <label className="block">
-              <span className="text-sm font-medium">Workspace passphrase</span>
+              <span className="text-sm font-medium">工作区口令（不是登录密码）</span>
               <Input
                 className="mt-2"
                 type="password"
-                name="workspace-passphrase"
-                autoComplete="current-password"
+                name="omniplan-workspace-key-advanced"
+                autoComplete="off"
+                data-1p-ignore="true"
                 value={sessionPassphrase}
                 onChange={(event) => onSessionPassphraseChange(event.target.value)}
-                placeholder="Set or enter workspace passphrase"
-                aria-label="Workspace passphrase"
+                placeholder="输入工作区口令"
+                aria-label="工作区口令"
               />
             </label>
             <div className="rounded-lg border bg-background p-3 text-sm">
@@ -8378,11 +8567,11 @@ function Settings({
           <div className="flex flex-wrap items-center gap-2">
             <Button type="button" variant="outline" onClick={() => void rememberPassphrase()} disabled={!sessionPassphrase.trim()}>
               <KeyRound size={15} />
-              Remember in IndexedDB
+              在此设备记住
             </Button>
             <Button type="button" variant="outline" onClick={() => void forgetPassphrase()} disabled={!rememberedPassphraseSavedAt}>
               <Lock size={15} />
-              Forget remembered passphrase
+              忘记此设备保存的口令
             </Button>
             <Badge variant="outline">This browser only</Badge>
           </div>
@@ -8391,10 +8580,10 @@ function Settings({
 
       <SettingsOverviewCard
         icon={<Zap className="h-4 w-4" />}
-        title="AI Provider"
+        title="AI Provider（可选）"
         status={aiProviderStatus}
         statusIcon={aiProviderStatusIcon}
-        description={aiProviderConfigured ? `${aiDraft.label} / ${aiDraft.model}` : "OpenAI-compatible provider not ready"}
+        description={aiProviderConfigured ? `${aiDraft.label} / ${aiDraft.model}` : "不影响任务、同步与通知"}
         badgeVariant={aiProviderBadgeVariant}
         primaryActionLabel={aiProviderPrimaryLabel}
         primaryActionIcon={aiProviderPrimaryIcon}
@@ -8443,12 +8632,12 @@ function Settings({
 
       <SettingsOverviewCard
         icon={<Archive className="h-4 w-4" />}
-        title="Workspace"
+        title="数据与备份"
         status={workspaceStatus}
         statusIcon={workspaceStatusIcon}
         description={workspacePersistence.lastSavedAt ? `Last saved ${workspacePersistence.lastSavedAt.slice(0, 19).replace("T", " ")}` : workspacePersistence.status}
         badgeVariant={workspaceBadgeVariant}
-        primaryActionLabel="Export backup"
+        primaryActionLabel="导出备份"
         primaryActionIcon={<FileDown />}
         onPrimaryAction={exportWorkspace}
         expanded={expandedPanels.has("workspace")}
@@ -8506,10 +8695,10 @@ type NoticeTone = "success" | "warning" | "danger" | "loading" | "neutral";
 
 function noticeTone(message: string): NoticeTone {
   const normalized = message.toLowerCase();
-  if (normalized.includes("failed") || normalized.includes("error") || normalized.includes("newer") || normalized.includes("conflict")) return "danger";
-  if (normalized.includes("testing") || normalized.includes("pushing") || normalized.includes("pulling") || normalized.includes("importing")) return "loading";
-  if (normalized.startsWith("enter ") || normalized.startsWith("set ") || normalized.startsWith("save ") || normalized.includes("before ")) return "warning";
-  if (normalized.includes("connected") || normalized.includes("saved") || normalized.includes("pushed") || normalized.includes("pulled") || normalized.includes("remembered")) return "success";
+  if (normalized.includes("failed") || normalized.includes("error") || normalized.includes("newer") || normalized.includes("conflict") || normalized.includes("失败") || normalized.includes("不正确")) return "danger";
+  if (normalized.includes("testing") || normalized.includes("pushing") || normalized.includes("pulling") || normalized.includes("importing") || normalized.includes("正在")) return "loading";
+  if (normalized.startsWith("enter ") || normalized.startsWith("set ") || normalized.startsWith("save ") || normalized.includes("before ") || normalized.includes("请输入") || normalized.includes("尚未") || normalized.includes("需要")) return "warning";
+  if (normalized.includes("connected") || normalized.includes("saved") || normalized.includes("pushed") || normalized.includes("pulled") || normalized.includes("remembered") || normalized.includes("完成") || normalized.includes("已保存") || normalized.includes("已连接")) return "success";
   return "neutral";
 }
 
@@ -8584,35 +8773,35 @@ function SettingsOverviewCard({
   children: ReactNode;
 }) {
   return (
-    <Card className="min-w-0">
-      <CardHeader className="compactCardHeader">
-        <div className="flex items-center justify-between gap-3">
-          <div className="min-w-0 flex-1">
-            <CardTitle className="flex items-center gap-2" title={description}>{icon}{title}</CardTitle>
-          </div>
-          <div className="flex shrink-0 items-center gap-1.5">
-            <IconStatusBadge variant={badgeVariant} status={status} icon={statusIcon} />
-            <IconActionButton label={primaryActionLabel} type="button" onClick={onPrimaryAction} disabled={primaryDisabled}>
-              {primaryActionIcon}
-            </IconActionButton>
-            <IconActionButton
-              label={expanded ? "Hide configure" : "Configure"}
-              type="button"
-              variant="outline"
-              onClick={onToggle}
-              aria-expanded={expanded}
-            >
-              {expanded ? <ChevronUp /> : <ChevronDown />}
-            </IconActionButton>
-          </div>
+    <section className="settingsOverviewRow" data-expanded={expanded ? "true" : "false"}>
+      <div className="settingsOverviewSummary">
+        <span className="settingsOverviewIcon">{icon}</span>
+        <div className="settingsOverviewCopy">
+          <h3>{title}</h3>
+          <p>{description}</p>
         </div>
-      </CardHeader>
+        <Badge variant={badgeVariant} className="settingsOverviewStatus">{statusIcon}<span>{status}</span></Badge>
+        <div className="settingsOverviewActions">
+          <Button className="settingsOverviewPrimary" type="button" variant="outline" onClick={onPrimaryAction} disabled={primaryDisabled}>
+            {primaryActionIcon}<span>{primaryActionLabel}</span>
+          </Button>
+          <IconActionButton
+            label={expanded ? "收起设置" : "展开设置"}
+            type="button"
+            variant="ghost"
+            onClick={onToggle}
+            aria-expanded={expanded}
+          >
+            {expanded ? <ChevronUp /> : <ChevronDown />}
+          </IconActionButton>
+        </div>
+      </div>
       {expanded && (
-        <CardContent className="border-t pt-4">
+        <div className="settingsOverviewBody">
           {children}
-        </CardContent>
+        </div>
       )}
-    </Card>
+    </section>
   );
 }
 

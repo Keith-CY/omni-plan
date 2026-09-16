@@ -1,7 +1,23 @@
 import { describe, expect, it } from "bun:test";
-import { createServerRuntime } from "./index";
+import { createServerRuntime, publicClientConfig } from "./index";
 
 describe("server transport guard", () => {
+  it("derives browser defaults without exposing server secrets", () => {
+    expect(publicClientConfig({
+      OMNIPLAN_API_ADMIN_TOKEN: "must-not-leak",
+      OMNIPLAN_FIREBASE_PROJECT_ID: "project-id",
+      OMNIPLAN_FIREBASE_WEB_API_KEY: "public-web-key"
+    })).toEqual({
+      firebaseSync: {
+        projectId: "project-id",
+        apiKey: "public-web-key",
+        databaseId: "(default)",
+        collectionPath: "omniPlanSync",
+        workspaceId: "personal"
+      }
+    });
+  });
+
   it("rejects plaintext requests when HTTPS is required", async () => {
     const runtime = createServerRuntime({ OMNIPLAN_DB_PATH: ":memory:", OMNIPLAN_REQUIRE_HTTPS: "1" });
     try {

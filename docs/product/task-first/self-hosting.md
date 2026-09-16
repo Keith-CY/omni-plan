@@ -25,11 +25,24 @@ bun run serve
 
 将 VAPID 命令输出写进部署环境的 `VAPID_PUBLIC_KEY` 与 `VAPID_PRIVATE_KEY`，把私钥作为 secret 管理，不要提交到仓库。Owner Token 只显示一次，也应立即放入密码管理器。`OMNIPLAN_API_ADMIN_TOKEN` 与 `OMNIPLAN_CRON_TOKEN` 使用各自独立的高熵随机值。
 
-浏览器设置页需要：
+同时把 Firebase Web 的公开传输参数写入部署环境：
 
-1. 输入工作区口令，使 Owner Token 能加密保存在当前浏览器。
-2. 填入服务的 HTTPS 根地址和一次性显示的 `op_owner_…` Token。
-3. 开启自动拉取；需要通知时，由用户点击“开启通知”。
+```text
+OMNIPLAN_FIREBASE_PROJECT_ID=...
+OMNIPLAN_FIREBASE_WEB_API_KEY=...
+OMNIPLAN_FIREBASE_DATABASE_ID=(default)
+OMNIPLAN_FIREBASE_COLLECTION_PATH=omniPlanSync
+OMNIPLAN_FIREBASE_WORKSPACE_ID=personal
+```
+
+服务只会通过 `/api/client-config` 返回这些公开 Web 参数；工作区口令、Owner Token、VAPID 私钥与管理 Token 绝不能进入这个响应。
+
+浏览器第一次连接核心 Workspace 只需要：
+
+1. 输入工作区口令。
+2. 点击“连接这台设备”；页面会先验证解密，再拉取 Workspace、记住本机口令并开启自动同步。
+
+需要通知、Shortcut 或 Alfred 时，再展开“私人服务连接”，填入一次性显示的 `op_owner_…` Token。HTTPS 根地址默认使用当前域名，轮询间隔与 Firebase 原始字段都留在高级设置中。
 
 ## Docker 部署
 

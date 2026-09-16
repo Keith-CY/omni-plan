@@ -10,6 +10,11 @@ export interface ServerEnvironment {
   VAPID_PUBLIC_KEY?: string;
   VAPID_PRIVATE_KEY?: string;
   VAPID_SUBJECT?: string;
+  OMNIPLAN_FIREBASE_PROJECT_ID?: string;
+  OMNIPLAN_FIREBASE_WEB_API_KEY?: string;
+  OMNIPLAN_FIREBASE_DATABASE_ID?: string;
+  OMNIPLAN_FIREBASE_COLLECTION_PATH?: string;
+  OMNIPLAN_FIREBASE_WORKSPACE_ID?: string;
   PORT?: string;
   OMNIPLAN_REQUIRE_HTTPS?: string;
 }
@@ -22,6 +27,7 @@ export function createServerRuntime(environment: ServerEnvironment = process.env
     adminToken: environment.OMNIPLAN_API_ADMIN_TOKEN,
     cronToken: environment.OMNIPLAN_CRON_TOKEN,
     vapidPublicKey: environment.VAPID_PUBLIC_KEY,
+    clientConfig: publicClientConfig(environment),
     pushSender
   });
   const distRoot = resolve(process.cwd(), "dist");
@@ -42,6 +48,22 @@ export function createServerRuntime(environment: ServerEnvironment = process.env
   };
 
   return { store, pushSender, fetch };
+}
+
+export function publicClientConfig(environment: ServerEnvironment) {
+  const projectId = environment.OMNIPLAN_FIREBASE_PROJECT_ID?.trim();
+  const apiKey = environment.OMNIPLAN_FIREBASE_WEB_API_KEY?.trim();
+  return {
+    firebaseSync: projectId && apiKey
+      ? {
+          projectId,
+          apiKey,
+          databaseId: environment.OMNIPLAN_FIREBASE_DATABASE_ID?.trim() || "(default)",
+          collectionPath: environment.OMNIPLAN_FIREBASE_COLLECTION_PATH?.trim() || "omniPlanSync",
+          workspaceId: environment.OMNIPLAN_FIREBASE_WORKSPACE_ID?.trim() || "personal"
+        }
+      : null
+  };
 }
 
 function createWebPushSender(environment: ServerEnvironment): PushSender | undefined {

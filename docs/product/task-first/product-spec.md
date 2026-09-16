@@ -330,6 +330,14 @@ Apple 已确认 iOS/iPadOS 16.4 起，加入主屏幕的 Web App 可使用标准
 - 网络失败时进入本地重试队列并给出可理解反馈。
 - Alfred 配置页仅需要服务地址和设备 Token。
 
+### 13.4 新设备连接
+
+- 同一自托管部署通过 `/api/client-config` 提供 Firebase 的公开 Web 传输参数；这些参数不包含工作区口令、Owner Token 或任何可解密数据。
+- 新设备默认只显示一个工作区口令输入和“连接这台设备”动作；成功后自动拉取、记住本机口令并开启自动同步。
+- 连接完成前先解密验证；口令错误必须显示可理解的提示，并保证本地 Workspace 不变。
+- Owner Token 只属于可选的通知、Shortcut 和 Alfred 能力，不再成为核心 Workspace 同步的前置步骤。
+- Firebase 原始字段、轮询间隔、GitHub 与 AI Provider 统一放入按需展开的高级区。
+
 ## 14. 技术方向
 
 ### 14.1 前端

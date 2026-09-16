@@ -11,6 +11,15 @@ export interface ApiOptions {
   adminToken?: string;
   cronToken?: string;
   vapidPublicKey?: string;
+  clientConfig?: {
+    firebaseSync: {
+      projectId: string;
+      apiKey: string;
+      databaseId: string;
+      collectionPath: string;
+      workspaceId: string;
+    } | null;
+  };
   pushSender?: PushSender;
   now?: () => Date;
   rateLimitPerMinute?: number;
@@ -27,6 +36,9 @@ export function createApi(options: ApiOptions) {
       if (request.method === "OPTIONS") return response(null, 204);
       if (request.method === "GET" && url.pathname === "/api/health") {
         return json({ ok: true, service: "omni-plan-personal", time: now().toISOString() });
+      }
+      if (request.method === "GET" && url.pathname === "/api/client-config") {
+        return json(options.clientConfig ?? { firebaseSync: null });
       }
       if (request.method === "GET" && url.pathname === "/api/push/public-key") {
         if (!options.vapidPublicKey) return problem(503, "push_not_configured", "Web Push is not configured on this server.");
