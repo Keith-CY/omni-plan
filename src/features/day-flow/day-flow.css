@@ -12,7 +12,7 @@
   --flow-amber: #bd7a35;
   --flow-amber-soft: #f8ecdd;
   display: grid;
-  gap: 18px;
+  gap: 14px;
   width: min(100%, 1440px);
   margin: 0 auto;
   color: var(--flow-ink);
@@ -28,12 +28,12 @@
   align-items: flex-end;
   justify-content: space-between;
   gap: 24px;
-  padding: 12px 2px 0;
+  padding: 6px 2px 0;
 }
 
 .dayFlowHero h2 {
   margin: 3px 0 4px;
-  font-size: clamp(27px, 3vw, 38px);
+  font-size: clamp(26px, 2.2vw, 32px);
   font-weight: 690;
   letter-spacing: -0.035em;
   line-height: 1.08;
@@ -401,11 +401,11 @@
   overflow: hidden;
   border: 0;
   border-radius: 5px;
-  padding: 0 8px;
+  padding: 0 6px;
   color: #fff;
-  font-size: 9px;
+  font-size: 10px;
   font-weight: 650;
-  text-align: left;
+  text-align: center;
   white-space: nowrap;
 }
 
@@ -512,7 +512,7 @@
 
 .dayFlowInspector {
   display: grid;
-  grid-template-columns: minmax(180px, 0.8fr) minmax(400px, 1.7fr);
+  grid-template-columns: minmax(270px, 38%) minmax(460px, 1fr);
   gap: 16px 24px;
   padding: 16px 20px;
   border-bottom: 1px solid var(--flow-line);

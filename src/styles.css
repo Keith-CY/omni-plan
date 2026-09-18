@@ -3604,7 +3604,7 @@ th {
 .quickCaptureForm {
   display: grid;
   gap: 14px;
-  margin-top: 24px;
+  margin-top: 20px;
 }
 
 .quickCaptureTitleField {
@@ -3619,17 +3619,17 @@ th {
 }
 
 .quickCaptureTitleField input {
-  height: 48px;
+  height: 44px;
   border-color: var(--line-strong);
   background: var(--surface);
-  font-size: 15px;
+  font-size: 14px;
   font-weight: 700;
   box-shadow: 0 4px 14px rgba(15, 23, 42, 0.04);
 }
 
 .quickCaptureTodayToggle {
   display: grid;
-  min-height: 64px;
+  min-height: 60px;
   grid-template-columns: 18px 36px minmax(0, 1fr);
   align-items: center;
   gap: 10px;
@@ -4328,9 +4328,13 @@ button.todayItem {
   gap: 4px;
   color: var(--text-muted);
   font-size: 10px;
-  font-weight: 950;
+  font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;
+}
+
+.projectOutcomeSaveButton > span {
+  display: none;
 }
 
 .projectSignalTiles {
@@ -5064,6 +5068,478 @@ button.todayItem {
   }
 }
 
+/* Task-first product surfaces ------------------------------------------------ */
+
+.productPage {
+  display: grid;
+  gap: 14px;
+  width: min(100%, 1440px);
+  margin: 0 auto;
+}
+
+.productPageHeader {
+  display: flex;
+  min-width: 0;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 8px 2px 4px;
+}
+
+.productPageHeader > div:first-child {
+  min-width: 0;
+}
+
+.productPageHeader h2,
+.calendarPageHeader h3 {
+  margin: 3px 0 0;
+  color: var(--ink);
+  font-size: clamp(26px, 2.2vw, 32px);
+  font-weight: 690;
+  letter-spacing: -0.035em;
+  line-height: 1.08;
+}
+
+.productPageKicker {
+  margin: 0;
+  color: var(--primary);
+  font-size: 10px;
+  font-weight: 780;
+  letter-spacing: 0.13em;
+}
+
+.productPageLead {
+  max-width: 720px;
+  margin: 7px 0 0;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.optionalSurface,
+.projectMetaDisclosure,
+.projectSignalsDisclosure,
+.projectToolSwitcher {
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.optionalSurface > summary,
+.projectMetaDisclosure > summary,
+.projectSignalsDisclosure > summary,
+.projectToolSwitcher > summary {
+  display: grid;
+  min-height: 52px;
+  grid-template-columns: minmax(0, auto) minmax(0, 1fr) 18px;
+  align-items: center;
+  gap: 12px;
+  padding: 0 16px;
+  color: var(--ink);
+  cursor: pointer;
+  list-style: none;
+}
+
+.optionalSurface > summary::-webkit-details-marker,
+.projectMetaDisclosure > summary::-webkit-details-marker,
+.projectSignalsDisclosure > summary::-webkit-details-marker,
+.projectToolSwitcher > summary::-webkit-details-marker {
+  display: none;
+}
+
+.optionalSurface > summary > span,
+.projectMetaDisclosure > summary > span,
+.projectSignalsDisclosure > summary > span,
+.projectToolSwitcher > summary > span {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 720;
+}
+
+.optionalSurface > summary > span svg,
+.projectMetaDisclosure > summary > span svg,
+.projectToolSwitcher > summary > span svg {
+  width: 16px;
+  height: 16px;
+  color: var(--primary);
+}
+
+.optionalSurface > summary small,
+.projectMetaDisclosure > summary small,
+.projectSignalsDisclosure > summary small,
+.projectToolSwitcher > summary small {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.optionalSurface > summary > svg,
+.projectMetaDisclosure > summary > svg,
+.projectSignalsDisclosure > summary > svg,
+.projectToolSwitcher > summary > svg {
+  width: 16px;
+  height: 16px;
+  color: var(--text-subtle);
+  transition: transform 160ms ease;
+}
+
+.optionalSurface[open] > summary > svg,
+.projectMetaDisclosure[open] > summary > svg,
+.projectSignalsDisclosure[open] > summary > svg,
+.projectToolSwitcher[open] > summary > svg {
+  transform: rotate(180deg);
+}
+
+.optionalSurface[open] > summary,
+.projectMetaDisclosure[open] > summary,
+.projectSignalsDisclosure[open] > summary,
+.projectToolSwitcher[open] > summary {
+  border-bottom: 1px solid var(--line);
+}
+
+.optionalSurfaceBody {
+  display: grid;
+  gap: 12px;
+  padding: 12px;
+  background: #faf9f5;
+}
+
+.projectCollectionList {
+  display: grid;
+  padding: 0 14px 14px;
+}
+
+.projectCollectionRow {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: 36px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  min-height: 82px;
+  border-top: 1px solid var(--line);
+  color: inherit;
+  text-decoration: none;
+}
+
+.projectCollectionRow:first-child {
+  border-top: 0;
+}
+
+.projectCollectionRow:hover .projectCollectionTitle strong,
+.projectCollectionRow:focus-visible .projectCollectionTitle strong {
+  color: var(--primary);
+}
+
+.projectCollectionMark {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border-radius: 8px;
+  background: var(--accent);
+  color: var(--primary);
+}
+
+.projectCollectionMark svg {
+  width: 17px;
+  height: 17px;
+}
+
+.projectCollectionMain {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.projectCollectionTitle {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.projectCollectionTitle strong {
+  overflow: hidden;
+  font-size: 14px;
+  font-weight: 720;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.projectCollectionOutcome,
+.projectCollectionNext {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.projectCollectionNext {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--ink);
+  font-weight: 620;
+}
+
+.projectCollectionNext svg {
+  width: 12px;
+  height: 12px;
+  color: var(--green);
+}
+
+.projectCollectionAside {
+  display: grid;
+  grid-template-columns: auto auto 20px;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.projectCollectionAside em {
+  border-radius: 999px;
+  padding: 3px 7px;
+  background: #f8ecdd;
+  color: #8b5b27;
+  font-style: normal;
+  font-weight: 680;
+}
+
+.projectCollectionAside em.isClear {
+  background: #e9f1ec;
+  color: #3f6f58;
+}
+
+.projectCollectionAside svg {
+  width: 16px;
+  height: 16px;
+}
+
+.portfolioOptionalSurface .optionalSurfaceBody > .grid,
+.portfolioOptionalSurface .optionalSurfaceBody > .rounded-lg {
+  min-width: 0;
+}
+
+.projectHomeHeader {
+  align-items: center;
+}
+
+.projectHome > .rounded-lg {
+  box-shadow: none;
+}
+
+.projectHome .projectDailySurface {
+  gap: 12px;
+  padding: 14px;
+}
+
+.projectHome .projectDailyControls {
+  grid-template-columns: minmax(240px, 480px) auto;
+  align-items: end;
+  justify-content: space-between;
+}
+
+.projectHome .projectPickerGrid {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.projectMetaDisclosureBody {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.7fr) minmax(180px, 0.7fr) minmax(260px, 1fr);
+  align-items: end;
+  gap: 10px;
+  padding: 12px;
+  background: #faf9f5;
+}
+
+.projectMetaBadges {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-height: 38px;
+}
+
+.projectHome .projectSignalTiles {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: stretch;
+}
+
+.projectSignalsDisclosure > summary {
+  height: 100%;
+  min-height: 72px;
+}
+
+.projectSignalsDisclosure > div {
+  display: grid;
+  gap: 8px;
+  padding: 8px;
+  background: #faf9f5;
+}
+
+.projectToolSwitcher {
+  margin-bottom: 12px;
+}
+
+.projectToolSwitcher .projectTabs {
+  border: 0;
+  border-radius: 0;
+  padding: 6px;
+  background: #faf9f5;
+}
+
+.reviewAdvancedGrid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.reviewAdvancedGrid > .rounded-lg:last-child {
+  grid-column: 1 / -1;
+}
+
+.reportsDetailsBody,
+.agentEndpointGrid {
+  display: grid;
+  gap: 12px;
+}
+
+.agentEndpointGrid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.calendarSummaryStrip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.calendarSummaryStrip .summaryTile {
+  min-height: 66px;
+  padding: 10px 12px;
+}
+
+.calendarSummaryStrip .summaryTile strong {
+  font-size: 18px;
+}
+
+@media (max-width: 900px) {
+  .productPageHeader {
+    align-items: flex-start;
+  }
+
+  .projectCollectionAside {
+    grid-template-columns: auto 18px;
+  }
+
+  .projectCollectionAside > span:first-child {
+    display: none;
+  }
+
+  .projectMetaDisclosureBody,
+  .reviewAdvancedGrid,
+  .agentEndpointGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .reviewAdvancedGrid > .rounded-lg:last-child {
+    grid-column: auto;
+  }
+
+  .calendarSummaryStrip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 640px) {
+  .productPage {
+    gap: 12px;
+  }
+
+  .productPageHeader {
+    display: grid;
+    gap: 12px;
+    padding-top: 2px;
+  }
+
+  .productPageHeader h2,
+  .calendarPageHeader h3 {
+    font-size: 26px;
+  }
+
+  .productPageHeader > :last-child:not(:first-child) {
+    justify-self: start;
+  }
+
+  .optionalSurface > summary,
+  .projectMetaDisclosure > summary,
+  .projectSignalsDisclosure > summary,
+  .projectToolSwitcher > summary {
+    grid-template-columns: minmax(0, 1fr) 16px;
+  }
+
+  .optionalSurface > summary small,
+  .projectMetaDisclosure > summary small,
+  .projectSignalsDisclosure > summary small,
+  .projectToolSwitcher > summary small {
+    display: none;
+  }
+
+  .projectCollectionRow {
+    grid-template-columns: 32px minmax(0, 1fr) 18px;
+    gap: 9px;
+    min-height: 78px;
+  }
+
+  .projectCollectionAside {
+    display: block;
+  }
+
+  .projectCollectionAside > span,
+  .projectCollectionAside > em {
+    display: none;
+  }
+
+  .projectHome .projectDailyControls,
+  .projectHome .projectOutcomeForm,
+  .projectHome .projectSignalTiles,
+  .projectMetaDisclosureBody {
+    grid-template-columns: 1fr;
+  }
+
+  .projectHome .projectDailyActions {
+    justify-content: flex-start;
+  }
+
+  .projectHome .projectOutcomeForm > button {
+    width: 100%;
+  }
+
+  .projectOutcomeSaveButton > span {
+    display: inline;
+  }
+
+  .calendarSummaryStrip {
+    display: flex;
+    overflow-x: auto;
+    scroll-snap-type: x proximity;
+  }
+
+  .calendarSummaryStrip .summaryTile {
+    min-width: 150px;
+    flex: 0 0 auto;
+    scroll-snap-align: start;
+  }
+}
+
 /* Settings follows the task-first "warm tool" language: one clear path,
    quiet status rows, and technical controls only after disclosure. */
 .settingsPage {
@@ -5558,14 +6034,14 @@ button.todayItem {
   gap: 0.75rem;
   min-height: 3.25rem;
   padding: 0.75rem;
-  border: 1px solid hsl(var(--border));
+  border: 1px solid var(--border);
   border-radius: var(--radius);
   cursor: pointer;
 }
 
 .projectMethodChoice label[data-selected="true"] {
-  border-color: hsl(var(--primary));
-  background: hsl(var(--accent));
+  border-color: var(--primary);
+  background: var(--accent);
 }
 
 .projectMethodChoice input {
@@ -5578,17 +6054,18 @@ button.todayItem {
 }
 
 .projectAdvancedPlanning {
-  border: 1px solid hsl(var(--border));
-  border-radius: var(--radius);
-  background: hsl(var(--muted) / 0.18);
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
 }
 
 .projectAdvancedPlanning > summary {
   display: flex;
-  min-height: 3rem;
+  min-height: 52px;
   align-items: center;
   gap: 0.5rem;
-  padding: 0.75rem 1rem;
+  padding: 0 16px;
   cursor: pointer;
   font-size: 0.875rem;
   font-weight: 600;
@@ -5601,13 +6078,13 @@ button.todayItem {
 
 .projectAdvancedPlanning > summary span {
   margin-left: auto;
-  color: hsl(var(--muted-foreground));
+  color: var(--muted-foreground);
   font-size: 0.75rem;
   font-weight: 400;
 }
 
 .projectAdvancedPlanning[open] > summary {
-  border-bottom: 1px solid hsl(var(--border));
+  border-bottom: 1px solid var(--border);
 }
 
 .projectAdvancedPlanning > div {
@@ -5638,7 +6115,7 @@ button.todayItem {
 
 .projectMethodChoice small {
   margin-top: 0.2rem;
-  color: hsl(var(--muted-foreground));
+  color: var(--muted-foreground);
   font-weight: 400;
   line-height: 1.35;
 }

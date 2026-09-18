@@ -476,6 +476,14 @@ function dependencyLabel(type: DependencyType) {
   return `${type[0]}->${type[1]}`;
 }
 
+function projectModeLabel(mode: ProjectMode) {
+  return ({ explore: "探索", build: "构建", ship: "交付", maintain: "维护" } satisfies Record<ProjectMode, string>)[mode];
+}
+
+function workItemKindLabel(kind: WorkItemKind) {
+  return ({ phase: "阶段", task: "任务", milestone: "里程碑", hammock: "区间任务" } satisfies Record<WorkItemKind, string>)[kind];
+}
+
 function formatLag(seconds: number) {
   const days = Math.round(seconds / daySeconds);
   if (days === 0) return "0d";
@@ -579,7 +587,7 @@ function addCalendarMonths(dateKey: string, months: number) {
 }
 
 function monthLabel(dateKey: string) {
-  return new Intl.DateTimeFormat("en", { month: "long", timeZone: "UTC", year: "numeric" }).format(new Date(`${dateKey}T00:00:00.000Z`));
+  return new Intl.DateTimeFormat("zh-CN", { month: "long", timeZone: "UTC", year: "numeric" }).format(new Date(`${dateKey}T00:00:00.000Z`));
 }
 
 function buildCalendarDays(monthStart: string) {
@@ -3085,7 +3093,7 @@ function RoutedApp() {
   const openHardGateCount = model.gates.filter((gate) => activePlanningProjectIds.has(gate.projectId) && gate.severity === "hard" && gate.status !== "cleared").length;
   const todayTodos = selectTodayTodos(workspace.todos, clockNow, workspace.timeZone);
   const todayDeepLink = todayTarget(route.target);
-  const asOfLabel = `As of ${zonedDateKey(clockNow, workspace.timeZone)}`;
+  const asOfLabel = `截至 ${zonedDateKey(clockNow, workspace.timeZone)}`;
 
   if (!workspacePersistence.loaded) {
     return (
@@ -3155,8 +3163,8 @@ function RoutedApp() {
           <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary text-sm font-bold text-primary-foreground">OP</div>
           {!sidebarCollapsed && (
           <div className="min-w-0">
-            <div className="text-sm font-semibold">OmniPlan Personal</div>
-            <div className="text-xs text-muted-foreground">AI-era project OS</div>
+            <div className="whitespace-nowrap text-[13px] font-semibold">OmniPlan Personal</div>
+            <div className="text-xs text-muted-foreground">先记录，再安排</div>
           </div>
           )}
           <Button
@@ -3181,7 +3189,7 @@ function RoutedApp() {
           className={cn("sidebarQuickCaptureButton mt-3", sidebarCollapsed && "justify-center px-0")}
           aria-label="快速记录"
           aria-keyshortcuts="Meta+N Control+N"
-          title={sidebarCollapsed ? "Add Todo (Cmd/Ctrl+N)" : undefined}
+          title={sidebarCollapsed ? "快速记录（Cmd/Ctrl+N）" : undefined}
           onClick={() => openQuickCapture(false)}
         >
           <Plus aria-hidden="true" />
@@ -3433,7 +3441,7 @@ function RoutedApp() {
         )}
         </main>
       </div>
-      {view !== "today" && (
+      {view !== "today" && view !== "todos" && view !== "project" && (
         <Button
           type="button"
           size="icon"
@@ -3458,34 +3466,78 @@ function RoutedApp() {
 function viewTitle(view: View, projectName: string) {
   switch (view) {
     case "todos":
-      return "Todos";
+      return "收件箱";
     case "projects":
     case "portfolio":
-      return "Projects";
+      return "项目";
     case "project":
       return projectName;
     case "calendar":
-      return "Today Calendar";
+      return "月历";
     case "today":
-      return "Today";
+      return "今天";
     case "review":
     case "audit":
-      return "Review";
+      return "回顾";
     case "reports":
-      return "Reports";
+      return "报告";
     case "agent":
-      return "Settings / Agent";
+      return "设置 / 自动化";
     case "settings":
-      return "Settings";
+      return "设置";
   }
 }
 
 function breadcrumbFor(view: View, projectName: string) {
-  if (view === "projects" || view === "portfolio") return "Projects";
-  if (view === "project") return `Projects / ${projectName}`;
-  if (view === "calendar") return "Today / Calendar";
-  if (view === "agent") return "Settings / Agent";
+  if (view === "projects" || view === "portfolio") return "项目";
+  if (view === "project") return `项目 / ${projectName}`;
+  if (view === "calendar") return "今天 / 月历";
+  if (view === "agent") return "设置 / 自动化";
   return viewTitle(view, projectName);
+}
+
+function projectStatusLabel(project: Project) {
+  if (isProjectArchived(project)) return "已归档";
+  switch (projectLifecycleStatus(project)) {
+    case "active":
+      return "进行中";
+    case "waiting":
+      return "等待中";
+    case "paused":
+      return "已暂停";
+    case "done":
+      return "已完成";
+    case "archived":
+      return "已归档";
+  }
+}
+
+function projectStatusValueLabel(status: ProjectStatus) {
+  switch (status) {
+    case "active":
+      return "进行中";
+    case "waiting":
+      return "等待中";
+    case "paused":
+      return "已暂停";
+    case "done":
+      return "已完成";
+    case "archived":
+      return "已归档";
+  }
+}
+
+function projectStageLabel(stage: OmniPlanStage) {
+  switch (stage) {
+    case "plan":
+      return "规划";
+    case "execute":
+      return "执行";
+    case "review":
+      return "回顾";
+    case "close":
+      return "收尾";
+  }
 }
 
 function NavButton({
@@ -3556,11 +3608,11 @@ function QuickCaptureSheet({
         <SheetHeader>
           <div className="quickCaptureSheet__context">
             <span>{planForToday ? <Timer aria-hidden="true" /> : <Inbox aria-hidden="true" />}</span>
-            {planForToday ? `Today · ${todayLabel}` : "Inbox"}
+            {planForToday ? `今天 · ${todayLabel}` : "收件箱"}
           </div>
-          <SheetTitle>Quick capture</SheetTitle>
+          <SheetTitle>快速记录</SheetTitle>
           <SheetDescription>
-            Start with a Todo. You can promote it to a Task or Project when it needs structure.
+            先记成一条待办；需要结构时，再把它升级为任务或项目。
           </SheetDescription>
         </SheetHeader>
         <form
@@ -3569,7 +3621,7 @@ function QuickCaptureSheet({
             event.preventDefault();
             const nextTitle = title.trim();
             if (!nextTitle) {
-              setError("Write the next thing you want to remember.");
+              setError("写下你接下来想记住的事情。");
               titleInputRef.current?.focus();
               return;
             }
@@ -3579,12 +3631,12 @@ function QuickCaptureSheet({
               setError("");
               onOpenChange(false);
             } catch (captureError) {
-              setError(captureError instanceof Error ? captureError.message : "This Todo could not be captured.");
+              setError(captureError instanceof Error ? captureError.message : "这条待办暂时无法保存。");
             }
           }}
         >
           <label className="quickCaptureTitleField">
-            <span>Todo</span>
+            <span>待办</span>
             <Input
               ref={titleInputRef}
               value={title}
@@ -3592,7 +3644,7 @@ function QuickCaptureSheet({
                 setTitle(event.target.value);
                 if (error) setError("");
               }}
-              placeholder="What needs your attention?"
+              placeholder="现在最需要记住什么？"
               autoComplete="off"
               enterKeyHint="done"
             />
@@ -3605,17 +3657,17 @@ function QuickCaptureSheet({
             />
             <span className="quickCaptureTodayToggle__icon"><CalendarClock aria-hidden="true" /></span>
             <span>
-              <strong>Plan for Today</strong>
-              <small>{planForToday ? `Visible in Today for ${todayLabel}` : "Keep it in Inbox until you triage it"}</small>
+              <strong>安排到今天</strong>
+              <small>{planForToday ? `会显示在 ${todayLabel} 的“今天”中` : "先留在收件箱，稍后再整理"}</small>
             </span>
           </label>
           {error && <p className="quickCaptureError" role="alert">{error}</p>}
           <div className="quickCaptureActions">
             <SheetClose asChild>
-              <Button type="button" variant="outline">Cancel</Button>
+              <Button type="button" variant="outline">取消</Button>
             </SheetClose>
             <Button type="submit" disabled={!title.trim()}>
-              <Plus aria-hidden="true" /> Add Todo <kbd>Enter</kbd>
+              <Plus aria-hidden="true" /> 保存待办 <kbd>Enter</kbd>
             </Button>
           </div>
         </form>
@@ -3934,15 +3986,14 @@ function PortfolioDashboard({
   ];
   if (!visibleProjects.length) {
     return (
-      <section className="grid gap-3">
-        <div className="portfolioHeader">
+      <section className="productPage projectsHome">
+        <div className="portfolioHeader productPageHeader">
           <div className="min-w-0">
-            <h2 className="text-lg font-semibold tracking-tight">Projects</h2>
+            <p className="productPageKicker">按需展开</p>
+            <h2>先记录任务，需要时再建项目。</h2>
+            <p className="productPageLead">项目适合有多个步骤、依赖或资源安排的工作；单件事情留在收件箱即可。</p>
             <div className="compactBadgeRow">
-              <Badge variant="outline" className="iconBadge" title="No local projects"><Layers3 />0 active</Badge>
-              <Badge variant="success" className="iconBadge" title="No hard gates"><AlertTriangle />0</Badge>
-              <Badge variant="outline" className="iconBadge" title="No critical path items"><Network />0 CP</Badge>
-              <Badge variant="success" className="iconBadge" title="No overloads"><CalendarClock />0</Badge>
+              <Badge variant="outline" className="iconBadge" title="没有进行中的项目"><Layers3 />0 个项目</Badge>
             </div>
           </div>
           <div className="flex items-center gap-2">
@@ -3957,12 +4008,12 @@ function PortfolioDashboard({
           <Card className="border-dashed">
             <CardHeader className="compactCardHeader">
               <div className="cardHeaderLine">
-                <CardTitle className="flex items-center gap-2 text-balance"><Archive className="h-4 w-4" /> No active projects</CardTitle>
+                <CardTitle className="flex items-center gap-2 text-balance"><Archive className="h-4 w-4" /> 没有进行中的项目</CardTitle>
                 <Badge variant="outline" className="iconBadge" title={`${projects.length} archived projects`}><Archive />{projects.length}</Badge>
               </div>
             </CardHeader>
             <CardContent>
-              <p className="max-w-xl text-pretty text-sm text-muted-foreground">Restore a project from the archive or create a new project to resume active planning.</p>
+              <p className="max-w-xl text-pretty text-sm text-muted-foreground">可以恢复已归档项目，也可以从一个清晰的目标开始新项目。</p>
             </CardContent>
           </Card>
         ) : (
@@ -4020,15 +4071,15 @@ function PortfolioDashboard({
     : "No high-pressure cluster is visible; keep paused backlog work parked until you choose to promote it.";
 
   return (
-    <section className="grid gap-3">
-      <div className="portfolioHeader">
+    <section className="productPage projectsHome">
+      <div className="portfolioHeader productPageHeader">
         <div className="min-w-0">
-          <h2 className="text-lg font-semibold tracking-tight">Projects</h2>
+          <p className="productPageKicker">按需展开</p>
+          <h2>先做任务，需要时再变成项目。</h2>
+          <p className="productPageLead">这里先回答“下一步是什么”。进度、风险和组合分析都放在下面，需要时再打开。</p>
           <div className="compactBadgeRow">
-            <Badge variant="secondary" className="iconBadge" title="Active delivery projects"><Layers3 />{activeDeliveryProjects.length} active</Badge>
-            <Badge variant={openHardGates ? "destructive" : "success"} className="iconBadge" title="Open hard gates"><AlertTriangle />{openHardGates}</Badge>
-            <Badge variant="outline" className="iconBadge" title="Critical path items"><Network />{criticalCount} CP</Badge>
-            <Badge variant={overloads.length ? "warning" : "success"} className="iconBadge" title="Attention overloads"><CalendarClock />{overloads.length}</Badge>
+            <Badge variant="secondary" className="iconBadge" title="进行中的项目"><Layers3 />{activeDeliveryProjects.length} 个进行中</Badge>
+            <Badge variant={openHardGates ? "destructive" : "success"} className="iconBadge" title="需要回顾"><AlertTriangle />{openHardGates} 个需回顾</Badge>
           </div>
         </div>
         <div className="flex items-center gap-2">
@@ -4039,6 +4090,53 @@ function PortfolioDashboard({
           <CreateProjectSheet onCreate={onProjectCreate} />
         </div>
       </div>
+
+      <Card className="projectCollection">
+        <CardHeader className="compactCardHeader">
+          <div className="cardHeaderLine">
+            <CardTitle className="flex items-center gap-2"><Layers3 className="h-4 w-4" /> 我的项目</CardTitle>
+            <Badge variant="outline">{visibleProjects.length}</Badge>
+          </div>
+        </CardHeader>
+        <CardContent className="projectCollectionList">
+          {visibleProjects.map((candidate) => {
+            const candidateHealth = health.find((item) => item.projectId === candidate.id);
+            const candidateSchedule = schedules.find((item) => item.projectId === candidate.id);
+            const candidateNext = candidateSchedule ? nextScheduledItem(candidateSchedule.items) : undefined;
+            const openItems = candidateSchedule?.items.filter((item) => item.workItem.kind !== "phase" && item.workItem.percentComplete < 100).length ?? 0;
+            return (
+              <a
+                key={candidate.id}
+                className="projectCollectionRow"
+                href={hashForRoute({ view: "project", selectedProjectId: candidate.id })}
+              >
+                <span className="projectCollectionMark"><Layers3 /></span>
+                <span className="projectCollectionMain">
+                  <span className="projectCollectionTitle">
+                    <strong>{candidate.name}</strong>
+                    <Badge variant={candidate.status === "active" ? "success" : "secondary"}>{projectStatusLabel(candidate)}</Badge>
+                  </span>
+                  <span className="projectCollectionOutcome">{candidate.currentOutcome || candidate.northStar || "还没有写项目目标"}</span>
+                  <span className="projectCollectionNext"><Timer />{candidateNext ? `下一步 · ${candidateNext.workItem.title}` : "还没有安排下一步"}</span>
+                </span>
+                <span className="projectCollectionAside">
+                  <span>{openItems} 项未完成</span>
+                  {candidateHealth?.openHardGates ? <em>{candidateHealth.openHardGates} 个需回顾</em> : <em className="isClear">状态正常</em>}
+                  <ChevronRight aria-hidden="true" />
+                </span>
+              </a>
+            );
+          })}
+        </CardContent>
+      </Card>
+
+      <details className="optionalSurface portfolioOptionalSurface">
+        <summary>
+          <span><BarChart3 /> 项目分析</span>
+          <small>Shape Up、风险、关键路径和审查信号</small>
+          <ChevronDown aria-hidden="true" />
+        </summary>
+        <div className="optionalSurfaceBody">
 
       <Card id="shape-up-streams">
         <CardHeader className="compactCardHeader">
@@ -4296,6 +4394,8 @@ function PortfolioDashboard({
           <SignalList gates={gates.filter((gate) => planningProjectIds.has(gate.projectId)).slice(0, 7)} compact />
         </CardContent>
       </Card>
+        </div>
+      </details>
     </section>
   );
 }
@@ -4321,18 +4421,18 @@ function CreateProjectSheet({ onCreate }: { onCreate: (values: ProjectCreateValu
       <SheetTrigger asChild>
         <Button>
           <Plus />
-          New Project
+          新建项目
         </Button>
       </SheetTrigger>
       <SheetContent className="w-[94vw] overflow-y-auto sm:max-w-lg">
         <SheetHeader>
-          <SheetTitle>New project</SheetTitle>
-          <SheetDescription>Capture the work first. Advanced strategy and scheduling can be filled in later.</SheetDescription>
+          <SheetTitle>新建项目</SheetTitle>
+          <SheetDescription>只需要先写清楚要做什么；排期、资源和方法都可以以后再补。</SheetDescription>
         </SheetHeader>
         <form className="quickProjectForm" onSubmit={submit}>
-          <FormTextarea label="Title / problem" value={draft.title} onChange={(value) => update({ title: value })} placeholder="What needs to be made visible and actionable?" />
+          <FormTextarea label="项目名称 / 要解决的问题" value={draft.title} onChange={(value) => update({ title: value })} placeholder="这件事要达成什么结果？" />
           <fieldset className="projectMethodChoice">
-            <legend>Planning method</legend>
+            <legend>组织方式</legend>
             <label data-selected={draft.planningMethod === "omniplan" ? "true" : "false"}>
               <input
                 type="radio"
@@ -4341,7 +4441,7 @@ function CreateProjectSheet({ onCreate }: { onCreate: (values: ProjectCreateValu
                 checked={draft.planningMethod === "omniplan"}
                 onChange={() => update({ planningMethod: "omniplan" })}
               />
-              <span><strong>OmniPlan</strong><small>Start with tasks; add scheduling depth when needed.</small></span>
+              <span><strong>时间计划</strong><small>从任务开始，需要时再加甘特图、依赖和资源。</small></span>
             </label>
             <label data-selected={draft.planningMethod === "shape-up" ? "true" : "false"}>
               <input
@@ -4351,7 +4451,7 @@ function CreateProjectSheet({ onCreate }: { onCreate: (values: ProjectCreateValu
                 checked={draft.planningMethod === "shape-up"}
                 onChange={() => update({ planningMethod: "shape-up" })}
               />
-              <span><strong>Shape Up</strong><small>Shape, bet, then build inside confirmed scope.</small></span>
+              <span><strong>Shape Up</strong><small>先塑形与下注，再在确认范围内推进。</small></span>
             </label>
           </fieldset>
           <div className="quickProjectDefaults" aria-label="Project defaults">
@@ -4359,7 +4459,7 @@ function CreateProjectSheet({ onCreate }: { onCreate: (values: ProjectCreateValu
             <Badge variant="secondary" className="iconBadge" title="Opening stage"><Layers3 />{draft.planningMethod === "shape-up" ? "Shape" : "Plan"}</Badge>
             <Badge variant="outline" className="iconBadge" title="Method is permanent"><Lock />fixed</Badge>
           </div>
-          <Button type="submit" disabled={!draft.title.trim()}><Plus />Create project</Button>
+          <Button type="submit" disabled={!draft.title.trim()}><Plus />创建项目</Button>
         </form>
       </SheetContent>
     </Sheet>
@@ -4489,6 +4589,7 @@ function ProjectWorkspace({
     currentOutcome: project.currentOutcome
   });
   const [advancedPlanningOpen, setAdvancedPlanningOpen] = useState(false);
+  const [toolSwitcherOpen, setToolSwitcherOpen] = useState(tabTarget !== "plan");
   useEffect(() => {
     setDailyDraft({
       northStar: project.northStar,
@@ -4496,46 +4597,30 @@ function ProjectWorkspace({
     });
   }, [project.id, project.northStar, project.currentOutcome]);
   useEffect(() => setAdvancedPlanningOpen(false), [project.id]);
+  useEffect(() => setToolSwitcherOpen(tabTarget !== "plan"), [project.id, tabTarget]);
   const dailyDirty = dailyDraft.northStar !== project.northStar || dailyDraft.currentOutcome !== project.currentOutcome;
 
   return (
-    <section className="grid gap-3">
+    <section className="productPage projectHome">
+      <header className="productPageHeader projectHomeHeader">
+        <div>
+          <p className="productPageKicker">项目</p>
+          <h2>{project.name}</h2>
+          <p className="productPageLead">先看目标、下一步和任务；甘特图、资源、证据与审查都在需要时再展开。</p>
+        </div>
+        <Badge variant={project.status === "active" ? "success" : "secondary"}>{projectStatusLabel(project)}</Badge>
+      </header>
       <Card>
         <CardContent className="projectDailySurface">
           <div className="projectDailyControls">
             <div className="projectPickerGrid">
               <NativeSelectField
-                label="Project"
+                label="切换项目"
                 value={project.id}
                 onChange={onProjectChange}
                 options={projectSelectorProjects.map((candidate) => ({ value: candidate.id, label: candidate.name }))}
                 testId="project-selector"
               />
-              <NativeSelectField
-                label="Status"
-                value={projectLifecycleStatus(project)}
-                onChange={(value) => onProjectStatusUpdate(project.id, value as ProjectStatus)}
-                options={projectStatuses.map((status) => ({ value: status, label: status }))}
-                testId="project-status-selector"
-                disabled={projectArchived}
-              />
-              {!isShapeUpProject(project) && (
-                <NativeSelectField
-                  label="Stage"
-                  value={(project.stage ?? "plan") as OmniPlanStage}
-                  onChange={(value) => onOmniPlanStageUpdate(project.id, value as OmniPlanStage)}
-                  options={omniPlanStages.map((stage) => ({ value: stage, label: stage }))}
-                  testId="project-planning-stage-selector"
-                  disabled={projectArchived}
-                />
-              )}
-            </div>
-            <div className="flex flex-wrap gap-2">
-              <Badge variant="secondary" className="iconBadge" title="Planning method"><Workflow />{isShapeUpProject(project) ? "Shape Up" : "OmniPlan"}</Badge>
-              <Badge variant="outline" className="iconBadge" title="Planning method is permanent"><Lock />{project.stage ?? (isShapeUpProject(project) ? "shape" : "plan")}</Badge>
-              {projectArchived && <Badge variant="outline" className="iconBadge" title="Archived project is read-only"><Lock />read only</Badge>}
-              <Badge variant="outline" className="iconBadge" title="Horizon"><CalendarClock />{zonedDateKey(project.horizon, timeZone).slice(5)}</Badge>
-              <Badge variant={blockingGate ? "warning" : "success"} className="iconBadge" title={blockingGate?.reason ?? "No priority review signal"}>{blockingGate ? <ClipboardCheck /> : <CheckCircle2 />}{blockingGate ? "review" : "clear"}</Badge>
             </div>
             <div className="projectDailyActions">
               {projectArchived && (
@@ -4558,6 +4643,36 @@ function ProjectWorkspace({
             </div>
           </div>
 
+          <details className="projectMetaDisclosure">
+            <summary><span><SettingsIcon /> 项目状态与方法</span><small>{projectStatusLabel(project)} · {isShapeUpProject(project) ? "Shape Up" : "时间计划"}</small><ChevronDown /></summary>
+            <div className="projectMetaDisclosureBody">
+              <NativeSelectField
+                label="状态"
+                value={projectLifecycleStatus(project)}
+                onChange={(value) => onProjectStatusUpdate(project.id, value as ProjectStatus)}
+                options={projectStatuses.map((status) => ({ value: status, label: projectStatusValueLabel(status) }))}
+                testId="project-status-selector"
+                disabled={projectArchived}
+              />
+              {!isShapeUpProject(project) && (
+                <NativeSelectField
+                  label="阶段"
+                  value={(project.stage ?? "plan") as OmniPlanStage}
+                  onChange={(value) => onOmniPlanStageUpdate(project.id, value as OmniPlanStage)}
+                  options={omniPlanStages.map((stage) => ({ value: stage, label: projectStageLabel(stage) }))}
+                  testId="project-planning-stage-selector"
+                  disabled={projectArchived}
+                />
+              )}
+              <div className="projectMetaBadges">
+                <Badge variant="secondary" className="iconBadge" title="规划方法"><Workflow />{isShapeUpProject(project) ? "Shape Up" : "时间计划"}</Badge>
+                {projectArchived && <Badge variant="outline" className="iconBadge" title="归档项目为只读"><Lock />只读</Badge>}
+                <Badge variant="outline" className="iconBadge" title="计划范围"><CalendarClock />至 {zonedDateKey(project.horizon, timeZone).slice(5)}</Badge>
+                <Badge variant={blockingGate ? "warning" : "success"} className="iconBadge" title={blockingGate?.reason ?? "没有需要优先回顾的信号"}>{blockingGate ? <ClipboardCheck /> : <CheckCircle2 />}{blockingGate ? "需回顾" : "正常"}</Badge>
+              </div>
+            </div>
+          </details>
+
           <form
             className="projectOutcomeForm"
             onSubmit={(event) => {
@@ -4567,36 +4682,42 @@ function ProjectWorkspace({
             }}
           >
             <label>
-              <span><Target size={13} />Outcome</span>
+              <span><Target size={13} />当前目标</span>
               <Input
                 name={`project-outcome-${project.id}`}
                 value={dailyDraft.currentOutcome}
                 onChange={(event) => setDailyDraft((current) => ({ ...current, currentOutcome: event.target.value }))}
-                placeholder="Current visible result"
+                placeholder="完成后能看到什么结果？"
                 autoComplete="off"
                 disabled={projectArchived}
               />
             </label>
             <label>
-              <span><FileText size={13} />North star</span>
+              <span><FileText size={13} />为什么要做</span>
               <Input
                 name={`project-northstar-${project.id}`}
                 value={dailyDraft.northStar}
                 onChange={(event) => setDailyDraft((current) => ({ ...current, northStar: event.target.value }))}
-                placeholder="Why this project matters"
+                placeholder="这个项目为什么值得继续？"
                 autoComplete="off"
                 disabled={projectArchived}
               />
             </label>
-            <Button type="submit" size="icon" disabled={projectArchived || !dailyDirty} title={projectArchived ? "Restore this project before editing." : "Save project summary"} aria-label="Save project summary">
+            <Button className="projectOutcomeSaveButton" type="submit" size="icon" disabled={projectArchived || !dailyDirty} title={projectArchived ? "Restore this project before editing." : "Save project summary"} aria-label="Save project summary">
               <Save />
+              <span>保存目标</span>
             </Button>
           </form>
 
           <div className="projectSignalTiles">
-            <SummaryTile label={next ? `${scheduleTiming(next)} action` : "Next action"} value={next?.workItem.title ?? "No open scheduled work"} detail={next ? `${formatScheduleRange(next, timeZone)} / ${next.isCritical ? "critical path" : "non-critical"}` : "Review baselines before adding more work."} />
-            <SummaryTile label="Review" value={blockingGate ? "Priority signal" : "No priority signal"} detail={blockingGate?.reason ?? "Review stays advisory during execution."} tone={blockingGate ? "warning" : "default"} />
-            <SummaryTile label="Evidence" value={formatFreshness(health?.evidenceFreshnessDays)} detail={latestEvidence?.summary ?? "Attach evidence before marking the next milestone complete."} />
+            <SummaryTile label="下一步" value={next?.workItem.title ?? "还没有安排下一步"} detail={next ? `${formatScheduleRange(next, timeZone)}${next.isCritical ? " · 关键路径" : ""}` : "先添加一项可以推进的任务。"} />
+            <details className="projectSignalsDisclosure">
+              <summary><span>项目健康</span><small>{blockingGate ? "有事项需要回顾" : "目前没有阻塞"}</small><ChevronDown /></summary>
+              <div>
+                <SummaryTile label="回顾" value={blockingGate ? "需要决定" : "状态正常"} detail={blockingGate?.reason ?? "需要时再打开回顾页面。"} tone={blockingGate ? "warning" : "default"} />
+                <SummaryTile label="证据" value={formatFreshness(health?.evidenceFreshnessDays)} detail={latestEvidence?.summary ?? "还没有附加证据。"} />
+              </div>
+            </details>
           </div>
         </CardContent>
       </Card>
@@ -4617,20 +4738,23 @@ function ProjectWorkspace({
       )}
 
       <Tabs key={`${project.id}-${tabTarget}`} defaultValue={tabTarget} className="w-full">
-        <TabsList className="projectTabs grid h-auto min-h-9 w-full grid-cols-3 gap-1 sm:grid-cols-6 lg:w-auto">
-          <TabsTrigger value="plan">Plan</TabsTrigger>
-          <TabsTrigger value="recurring">Recurring</TabsTrigger>
-          <TabsTrigger value="evidence">Evidence</TabsTrigger>
-          <TabsTrigger value="audit">Audit</TabsTrigger>
-          <TabsTrigger value="baselines">Baselines</TabsTrigger>
-          <TabsTrigger value="reports">Reports</TabsTrigger>
-        </TabsList>
+        <details className="projectToolSwitcher" open={toolSwitcherOpen} onToggle={(event) => setToolSwitcherOpen(event.currentTarget.open)}>
+          <summary><span><SettingsIcon /> 更多项目工具</span><small>重复任务、证据、审查、基线与报告</small><ChevronDown /></summary>
+          <TabsList className="projectTabs grid h-auto min-h-9 w-full grid-cols-3 gap-1 sm:grid-cols-6">
+            <TabsTrigger value="plan">任务</TabsTrigger>
+            <TabsTrigger value="recurring">重复</TabsTrigger>
+            <TabsTrigger value="evidence">证据</TabsTrigger>
+            <TabsTrigger value="audit">审查</TabsTrigger>
+            <TabsTrigger value="baselines">基线</TabsTrigger>
+            <TabsTrigger value="reports">报告</TabsTrigger>
+          </TabsList>
+        </details>
         <TabsContent value="plan" className="grid gap-4">
           <fieldset disabled={projectArchived} aria-disabled={projectArchived || undefined} className="contents">
           <Card>
             <CardHeader className="compactCardHeader">
               <div className="cardHeaderLine">
-                <CardTitle className="flex items-center gap-2"><Workflow className="h-4 w-4" /> Outline</CardTitle>
+                <CardTitle className="flex items-center gap-2"><Workflow className="h-4 w-4" /> 项目任务</CardTitle>
                 <div className="cardHeaderBadges">
                   <Badge variant="outline" className="iconBadge" title="Scheduled work items"><Layers3 />{schedule.items.length}</Badge>
                   <Badge variant={gates.length ? "warning" : "success"} className="iconBadge" title="Open gates"><Lock />{gates.length}</Badge>
@@ -4643,6 +4767,7 @@ function ProjectWorkspace({
                 items={schedule.items.map((item) => item.workItem)}
                 resources={resources}
                 onCreate={onWorkItemCreate}
+                triggerLabel="添加任务"
               />
               {schedule.items.length > 0 && (
                 <OutlineTable
@@ -4704,7 +4829,7 @@ function ProjectWorkspace({
             open={advancedPlanningOpen}
             onToggle={(event) => setAdvancedPlanningOpen(event.currentTarget.open)}
           >
-            <summary><SettingsIcon />Advanced planning <span>Gantt, dependencies, baseline, evidence checks, and close controls</span></summary>
+            <summary><SettingsIcon />高级计划 <span>甘特图、直接依赖、资源、基线和项目收尾</span></summary>
             {advancedPlanningOpen && <div className="grid gap-4">
             <ProjectResourcesPanel
               projectId={project.id}
@@ -4934,14 +5059,14 @@ function ProjectAdvancedSheet({
   return (
     <Sheet>
       <SheetTrigger asChild>
-        <Button type="button" variant="outline" size="sm" className="projectAdvancedTrigger" title="Advanced project settings">
+        <Button type="button" variant="outline" size="sm" className="projectAdvancedTrigger" title="项目详细设置">
           <SettingsIcon />
-          Advanced
+          详细设置
         </Button>
       </SheetTrigger>
       <SheetContent className="w-[94vw] overflow-y-auto sm:max-w-3xl">
         <SheetHeader>
-          <SheetTitle>Advanced project settings</SheetTitle>
+          <SheetTitle>项目详细设置</SheetTitle>
           <SheetDescription>{project.name}</SheetDescription>
         </SheetHeader>
         <div className="projectAdvancedBody">
@@ -4961,31 +5086,31 @@ function ProjectAdvancedSheet({
           >
             <section className="advancedSection">
               <div className="advancedSectionHeader">
-                <h3><FileText />Identity</h3>
-                <Badge variant="secondary" className="iconBadge" title="Project mode"><Workflow />{detailsDraft.mode}</Badge>
+                <h3><FileText />基本信息</h3>
+                <Badge variant="secondary" className="iconBadge" title="项目模式"><Workflow />{projectModeLabel(detailsDraft.mode)}</Badge>
               </div>
               <div className="advancedFieldGrid">
-                <SettingsInput label="Name" name={`advanced-project-name-${project.id}`} value={detailsDraft.name} onChange={(value) => setDetailsDraft((current) => ({ ...current, name: value }))} placeholder="Project name" autoComplete="off" />
+                <SettingsInput label="名称" name={`advanced-project-name-${project.id}`} value={detailsDraft.name} onChange={(value) => setDetailsDraft((current) => ({ ...current, name: value }))} placeholder="项目名称" autoComplete="off" />
                 <NativeSelectField
-                  label="Mode"
+                  label="模式"
                   value={detailsDraft.mode}
                   onChange={(value) => setDetailsDraft((current) => ({ ...current, mode: value as ProjectMode }))}
-                  options={projectModes.map((mode) => ({ value: mode, label: mode }))}
+                  options={projectModes.map((mode) => ({ value: mode, label: projectModeLabel(mode) }))}
                 />
               </div>
             </section>
             <section className="advancedSection">
               <div className="advancedSectionHeader">
-                <h3><CalendarClock />Scheduling</h3>
-                <Badge variant="outline" className="iconBadge" title="Review cadence"><RefreshCw />{detailsDraft.reviewCadenceDays || 7}d</Badge>
+                <h3><CalendarClock />时间规划</h3>
+                <Badge variant="outline" className="iconBadge" title="回顾周期"><RefreshCw />{detailsDraft.reviewCadenceDays || 7}天</Badge>
               </div>
               <div className="advancedFieldGrid">
-                <SettingsInput label="Start date" name={`advanced-project-start-${project.id}`} value={detailsDraft.startDate} onChange={(value) => setDetailsDraft((current) => ({ ...current, startDate: value }))} placeholder="2026-07-01" autoComplete="off" />
-                <SettingsInput label="Horizon date" name={`advanced-project-horizon-${project.id}`} value={detailsDraft.horizonDate} onChange={(value) => setDetailsDraft((current) => ({ ...current, horizonDate: value }))} placeholder="2026-07-15" autoComplete="off" />
-                <SettingsInput label="Review cadence days" name={`advanced-project-review-${project.id}`} value={detailsDraft.reviewCadenceDays} onChange={(value) => setDetailsDraft((current) => ({ ...current, reviewCadenceDays: value }))} placeholder="7" autoComplete="off" />
+                <SettingsInput label="开始日期" name={`advanced-project-start-${project.id}`} value={detailsDraft.startDate} onChange={(value) => setDetailsDraft((current) => ({ ...current, startDate: value }))} placeholder="2026-07-01" autoComplete="off" />
+                <SettingsInput label="规划截止日期" name={`advanced-project-horizon-${project.id}`} value={detailsDraft.horizonDate} onChange={(value) => setDetailsDraft((current) => ({ ...current, horizonDate: value }))} placeholder="2026-07-15" autoComplete="off" />
+                <SettingsInput label="回顾间隔（天）" name={`advanced-project-review-${project.id}`} value={detailsDraft.reviewCadenceDays} onChange={(value) => setDetailsDraft((current) => ({ ...current, reviewCadenceDays: value }))} placeholder="7" autoComplete="off" />
               </div>
               <div className="advancedSectionActions">
-                <Button type="submit" size="sm" disabled={!detailsDirty || !detailsDraft.name.trim()}><Save />Save settings</Button>
+                <Button type="submit" size="sm" disabled={!detailsDirty || !detailsDraft.name.trim()}><Save />保存设置</Button>
               </div>
             </section>
           </form>
@@ -6033,8 +6158,8 @@ function WorkItemComposer({
       </SheetTrigger>
       <SheetContent className="w-[92vw] overflow-y-auto sm:max-w-2xl">
         <SheetHeader>
-          <SheetTitle>Add work item</SheetTitle>
-          <SheetDescription>{contextDescription ?? `${items.length} items in this project`}</SheetDescription>
+          <SheetTitle>添加项目任务</SheetTitle>
+          <SheetDescription>{contextDescription ?? `这个项目已有 ${items.length} 个事项`}</SheetDescription>
         </SheetHeader>
         <form
           className="workItemSheetForm"
@@ -6044,16 +6169,16 @@ function WorkItemComposer({
           }}
         >
           <div className="workItemQuickCreate">
-            <SettingsInput label="Title" name={`work-title-${projectId}`} value={draft.title} onChange={(value) => update({ title: value })} placeholder="Task or milestone title" autoComplete="off" />
-            <SettingsInput label="Description" name={`work-description-${projectId}`} value={draft.description} onChange={(value) => update({ description: value })} placeholder="What happens or what needs to be done?" autoComplete="off" />
-            <div className="quickProjectDefaults" aria-label="Work item defaults">
-              <Badge variant="secondary" className="iconBadge" title="Kind"><Workflow />{draft.kind}</Badge>
-              <Badge variant="outline" className="iconBadge" title="Duration"><CalendarClock />{draft.durationDays}d</Badge>
-              <Badge variant="outline" className="iconBadge" title="Effort"><Timer />{draft.effortHours}h</Badge>
-              {draft.constraintMode !== "none" && <Badge variant="outline" className="iconBadge" title="Start date"><CalendarClock />{draft.constraintDate}</Badge>}
+            <SettingsInput label="标题" name={`work-title-${projectId}`} value={draft.title} onChange={(value) => update({ title: value })} placeholder="任务或里程碑" autoComplete="off" />
+            <SettingsInput label="说明" name={`work-description-${projectId}`} value={draft.description} onChange={(value) => update({ description: value })} placeholder="要做什么？" autoComplete="off" />
+            <div className="quickProjectDefaults" aria-label="任务默认值">
+              <Badge variant="secondary" className="iconBadge" title="类型"><Workflow />{workItemKindLabel(draft.kind)}</Badge>
+              <Badge variant="outline" className="iconBadge" title="工期"><CalendarClock />{draft.durationDays}天</Badge>
+              <Badge variant="outline" className="iconBadge" title="工作量"><Timer />{draft.effortHours}小时</Badge>
+              {draft.constraintMode !== "none" && <Badge variant="outline" className="iconBadge" title="开始日期"><CalendarClock />{draft.constraintDate}</Badge>}
               <Button type="button" variant="outline" size="sm" onClick={() => setAdvancedOpen((current) => !current)} aria-expanded={advancedOpen}>
                 <SettingsIcon />
-                Advanced
+                更多选项
               </Button>
             </div>
           </div>
@@ -6061,41 +6186,41 @@ function WorkItemComposer({
             <div className="workItemAdvancedPanel">
               <div className="advancedFieldGrid">
                 <NativeSelectField
-                  label="Kind"
+                  label="类型"
                   value={draft.kind}
                   onChange={(value) => update({ kind: value as WorkItemKind })}
-                  options={workItemKinds.map((kind) => ({ value: kind, label: kind }))}
+                  options={workItemKinds.map((kind) => ({ value: kind, label: workItemKindLabel(kind) }))}
                   testId="work-item-kind"
                 />
                 <NativeSelectField
-                  label="Parent phase"
+                  label="所属阶段"
                   value={draft.parentId ?? "none"}
                   onChange={(value) => update({ parentId: value === "none" ? undefined : value })}
-                  options={[{ value: "none", label: "No parent" }, ...parentOptions.map((item) => ({ value: item.id, label: `${item.outline} ${item.title}` }))]}
+                  options={[{ value: "none", label: "无" }, ...parentOptions.map((item) => ({ value: item.id, label: `${item.outline} ${item.title}` }))]}
                   testId="work-item-parent"
                 />
                 <label className="block">
-                  <span className="text-sm font-medium">Duration days</span>
+                  <span className="text-sm font-medium">工期（天）</span>
                   <Input className="mt-2" type="number" min={0} step={0.25} value={draft.durationDays} onChange={(event) => update({ durationDays: Number(event.target.value) || 0 })} disabled={draft.kind === "milestone"} />
                 </label>
                 <label className="block">
-                  <span className="text-sm font-medium">Effort hours</span>
+                  <span className="text-sm font-medium">工作量（小时）</span>
                   <Input className="mt-2" type="number" min={0} step={0.25} value={draft.effortHours} onChange={(event) => update({ effortHours: Number(event.target.value) || 0 })} />
                 </label>
                 <NativeSelectField
-                  label="Attention"
+                  label="专注强度"
                   value={draft.attention}
                   onChange={(value) => update({ attention: value as WorkItemCreateValues["attention"] })}
                   options={[
-                    { value: "deep", label: "deep" },
-                    { value: "medium", label: "medium" },
-                    { value: "shallow", label: "shallow" }
+                    { value: "deep", label: "深度" },
+                    { value: "medium", label: "一般" },
+                    { value: "shallow", label: "轻量" }
                   ]}
                   testId="work-item-attention"
                 />
                 {resources.length > 1 && draft.kind !== "milestone" && (
                   <NativeSelectField
-                    label="Resource"
+                    label="资源"
                     value={draft.resourceId ?? resources[0]?.id ?? "none"}
                     onChange={(value) => update({ resourceId: value === "none" ? undefined : value })}
                     options={resources.map((resource) => ({ value: resource.id, label: `${resource.name} · ${resource.role}` }))}
@@ -6103,30 +6228,30 @@ function WorkItemComposer({
                   />
                 )}
                 <NativeSelectField
-                  label="Date constraint"
+                  label="日期限制"
                   value={draft.constraintMode}
                   onChange={(value) => update({ constraintMode: value as WorkItemCreateValues["constraintMode"] })}
                   options={[
-                    { value: "none", label: "None" },
-                    { value: "noEarlierThan", label: "No earlier than" },
-                    { value: "fixedStart", label: "Fixed start" }
+                    { value: "none", label: "无" },
+                    { value: "noEarlierThan", label: "不早于" },
+                    { value: "fixedStart", label: "固定开始" }
                   ]}
                   testId="work-item-constraint-mode"
                 />
                 {draft.constraintMode !== "none" && (
-                  <SettingsInput label="Constraint date" name={`constraint-date-${projectId}`} value={draft.constraintDate} onChange={(value) => update({ constraintDate: value })} placeholder="2026-07-01" autoComplete="off" type="date" required />
+                  <SettingsInput label="限制日期" name={`constraint-date-${projectId}`} value={draft.constraintDate} onChange={(value) => update({ constraintDate: value })} placeholder="2026-07-01" autoComplete="off" type="date" required />
                 )}
               </div>
               <div className="mt-3 flex flex-wrap gap-3 text-sm">
-                <ToggleField label="Evidence required" checked={draft.evidenceRequired} onChange={(checked) => update({ evidenceRequired: checked })} />
-                <ToggleField label="Key task" checked={draft.isKeyTask} onChange={(checked) => update({ isKeyTask: checked })} />
-                <ToggleField label="Scope expansion" checked={draft.isScopeExpansion} onChange={(checked) => update({ isScopeExpansion: checked })} />
-                <ToggleField label="Fast delivery" checked={draft.isFastDelivery} onChange={(checked) => update({ isFastDelivery: checked })} />
+                <ToggleField label="需要证据" checked={draft.evidenceRequired} onChange={(checked) => update({ evidenceRequired: checked })} />
+                <ToggleField label="关键任务" checked={draft.isKeyTask} onChange={(checked) => update({ isKeyTask: checked })} />
+                <ToggleField label="范围扩张" checked={draft.isScopeExpansion} onChange={(checked) => update({ isScopeExpansion: checked })} />
+                <ToggleField label="快速交付" checked={draft.isFastDelivery} onChange={(checked) => update({ isFastDelivery: checked })} />
               </div>
             </div>
           )}
           <div className="mt-4 flex justify-end">
-            <Button type="submit" disabled={!draft.title.trim()}><Plus />Add</Button>
+            <Button type="submit" disabled={!draft.title.trim()}><Plus />添加</Button>
           </div>
         </form>
       </SheetContent>
@@ -6378,8 +6503,8 @@ function CalendarView({
   const calendarProject = projects.find((project) => project.id === selectedProjectId && !isProjectArchived(project))
     ?? projects.find((project) => !isProjectArchived(project));
   const calendarProjectItems = calendarProject ? workItems.filter((item) => item.projectId === calendarProject.id) : [];
-  const selectedLabel = new Intl.DateTimeFormat("en", { day: "2-digit", month: "short", timeZone: "UTC", weekday: "short" }).format(new Date(`${selectedDay}T00:00:00.000Z`));
-  const selectedLongLabel = new Intl.DateTimeFormat("en", { dateStyle: "long", timeZone: "UTC" }).format(new Date(`${selectedDay}T00:00:00.000Z`));
+  const selectedLabel = new Intl.DateTimeFormat("zh-CN", { day: "numeric", month: "short", timeZone: "UTC", weekday: "short" }).format(new Date(`${selectedDay}T00:00:00.000Z`));
+  const selectedLongLabel = new Intl.DateTimeFormat("zh-CN", { dateStyle: "long", timeZone: "UTC" }).format(new Date(`${selectedDay}T00:00:00.000Z`));
 
   const changeMonth = (offset: number) => {
     const nextMonth = addCalendarMonths(monthStart, offset);
@@ -6398,11 +6523,12 @@ function CalendarView({
   };
 
   return (
-    <section className="grid gap-4">
-      <div className="calendarPageHeader">
+    <section className="productPage calendarHome">
+      <div className="calendarPageHeader productPageHeader">
         <div>
+          <p className="productPageKicker">月历</p>
           <CardTitle className="flex items-center gap-2"><CalendarClock className="h-4 w-4" /> {monthLabel(monthStart)}</CardTitle>
-          <CardDescription>Scheduled work and recurring cycles across active projects.</CardDescription>
+          <CardDescription>只看已经安排时间的事项；任务详情仍留在今天和项目中。</CardDescription>
         </div>
         <div className="calendarControls">
           <Button
@@ -6415,35 +6541,35 @@ function CalendarView({
             aria-pressed={showAutomatic}
             onClick={() => setShowAutomatic((visible) => !visible)}
           ><Zap /></Button>
-          <Button type="button" variant="outline" size="icon" aria-label="Previous month" title="Previous month" onClick={() => changeMonth(-1)}><ChevronLeft /></Button>
-          <Button type="button" variant="outline" onClick={jumpToday}>Today</Button>
-          <Button type="button" variant="outline" size="icon" aria-label="Next month" title="Next month" onClick={() => changeMonth(1)}><ChevronRight /></Button>
+          <Button type="button" variant="outline" size="icon" aria-label="上个月" title="上个月" onClick={() => changeMonth(-1)}><ChevronLeft /></Button>
+          <Button type="button" variant="outline" onClick={jumpToday}>今天</Button>
+          <Button type="button" variant="outline" size="icon" aria-label="下个月" title="下个月" onClick={() => changeMonth(1)}><ChevronRight /></Button>
         </div>
       </div>
 
-      <div className="grid gap-3 md:grid-cols-4">
+      <div className="calendarSummaryStrip">
         <SummaryTile
-          label="Month events"
+          label="本月事项"
           value={String(monthEvents.length)}
-          detail={`${activeProjectCount} active projects visible`}
+          detail={`${activeProjectCount} 个项目`}
           onClick={() => setMonthEventsOpen(true)}
           ariaLabel={`Open ${monthEvents.length} month events`}
         />
         <SummaryTile
-          label="Recurring"
+          label="重复任务"
           value={String(recurringRules.length)}
-          detail={`${monthEvents.filter((event) => event.kind === "recurring").length} this month`}
+          detail={`本月 ${monthEvents.filter((event) => event.kind === "recurring").length} 次`}
           onClick={() => setRecurringOpen(true)}
           ariaLabel={`Open ${recurringRules.length} recurring rules`}
         />
-        <SummaryTile label="Critical" value={String(monthEvents.filter((event) => event.critical).length)} detail="Scheduled critical path starts" tone={monthEvents.some((event) => event.critical) ? "warning" : "default"} />
-        <SummaryTile label="Selected day" value={String(selectedEvents.length)} detail={selectedLabel} />
+        <SummaryTile label="关键路径" value={String(monthEvents.filter((event) => event.critical).length)} detail="本月开始" tone={monthEvents.some((event) => event.critical) ? "warning" : "default"} />
+        <SummaryTile label="选中日期" value={String(selectedEvents.length)} detail={selectedLabel} />
       </div>
       <Sheet open={monthEventsOpen} onOpenChange={setMonthEventsOpen}>
         <SheetContent className="w-[92vw] overflow-y-auto sm:max-w-xl">
           <SheetHeader>
-            <SheetTitle>{monthLabel(monthStart)} events</SheetTitle>
-            <SheetDescription>{monthEvents.length} items across {activeProjectCount} active projects</SheetDescription>
+            <SheetTitle>{monthLabel(monthStart)}事项</SheetTitle>
+            <SheetDescription>{activeProjectCount} 个项目，共 {monthEvents.length} 项</SheetDescription>
           </SheetHeader>
           <div className="calendarAgenda monthEventSheetList">
             {monthEvents.length ? monthEventPage.items.map((event) => (
@@ -6451,7 +6577,7 @@ function CalendarView({
             )) : (
               <div className="emptyState">
                 <CalendarClock />
-                <span>No calendar events this month.</span>
+                <span>这个月还没有已安排的事项。</span>
               </div>
             )}
             <PaginationControls label="month events" {...monthEventPage} onPageChange={monthEventPage.setPage} />
@@ -6461,8 +6587,8 @@ function CalendarView({
       <Sheet open={recurringOpen} onOpenChange={setRecurringOpen}>
         <SheetContent className="w-[92vw] overflow-y-auto sm:max-w-2xl">
           <SheetHeader>
-            <SheetTitle>Recurring rules</SheetTitle>
-            <SheetDescription>{recurringRules.length} rules across active projects</SheetDescription>
+            <SheetTitle>重复任务</SheetTitle>
+            <SheetDescription>进行中的项目共有 {recurringRules.length} 条规则</SheetDescription>
           </SheetHeader>
           <div className="calendarRecurringList">
             {recurringRules.length ? recurringRulePage.items.map((rule) => (
@@ -6487,7 +6613,7 @@ function CalendarView({
             )) : (
               <div className="emptyState">
                 <RefreshCw />
-                <span>No recurring rules configured.</span>
+                <span>还没有设置重复任务。</span>
               </div>
             )}
             <PaginationControls label="recurring rules" {...recurringRulePage} onPageChange={recurringRulePage.setPage} />
@@ -6499,7 +6625,7 @@ function CalendarView({
         <Card>
           <CardContent className="calendarMonthShell">
             <div className="calendarWeekdays" aria-hidden="true">
-              {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((day) => <span key={day}>{day}</span>)}
+              {["日", "一", "二", "三", "四", "五", "六"].map((day) => <span key={day}>{day}</span>)}
             </div>
             <div className="calendarGrid" role="grid" aria-label={`${monthLabel(monthStart)} calendar`}>
               {days.map((day) => {
@@ -6574,7 +6700,7 @@ function CalendarView({
           <CardHeader className="flex-row items-start justify-between gap-3 pb-3">
             <div>
               <CardTitle className="flex items-center gap-2"><PanelRight className="h-4 w-4" /> {selectedLabel}</CardTitle>
-              <CardDescription>{selectedEvents.length ? `${selectedEvents.length} scheduled item${selectedEvents.length === 1 ? "" : "s"}` : "No work starts on this day."}</CardDescription>
+              <CardDescription>{selectedEvents.length ? `${selectedEvents.length} 项已安排事项` : "这天还没有安排事项。"}</CardDescription>
             </div>
             {calendarProject && (
               <WorkItemComposer
@@ -6583,7 +6709,7 @@ function CalendarView({
                 resources={workspace.resources}
                 onCreate={onWorkItemCreate}
                 initialStartValues={calendarWorkItemStartValues(selectedDay)}
-                triggerLabel="Add work item"
+                triggerLabel="添加任务"
                 triggerAriaLabel={`Add work item on ${selectedLongLabel} to ${calendarProject.name}`}
                 contextDescription={`${calendarProject.name} · fixed start ${selectedLongLabel}`}
               />
@@ -6609,12 +6735,12 @@ function CalendarView({
             }) : (
               <div className="emptyState">
                 <CalendarClock />
-                <span>No calendar event starts here.</span>
+                <span>这天还没有日历事项。</span>
               </div>
             )}
             {selectedEvents.length === 0 && activeProjectCount > 0 && (
               <div className="calendarQuietHint">
-                Pick another day or add scheduled / recurring work from a project.
+                可以选择其他日期，或从项目中添加已安排时间的任务。
               </div>
             )}
           </CardContent>
@@ -7200,12 +7326,21 @@ function AuditQueue({
   const decisionPage = usePagedItems(activeDecisions, 6);
   const changeSetPage = usePagedItems(changeSets, 8);
   const levelingPage = usePagedItems(activeLeveling, 8);
+  const [advancedReviewOpen, setAdvancedReviewOpen] = useState(Boolean(hardGates.length || warningGates.length));
   return (
-    <section className="grid gap-3 lg:grid-cols-2">
+    <section className="productPage reviewHome">
+      <header className="productPageHeader">
+        <div>
+          <p className="productPageKicker">回顾</p>
+          <h2>只处理真正需要你决定的事。</h2>
+          <p className="productPageLead">优先信号保持在最上方；项目判断、变更记录和资源调整需要时再展开。</p>
+        </div>
+        <Badge variant={hardGates.length ? "warning" : "success"}>{hardGates.length ? `${hardGates.length} 项待处理` : "目前清晰"}</Badge>
+      </header>
       <Card id="review-priority-signals">
         <CardHeader className="compactCardHeader">
           <div className="cardHeaderLine">
-            <CardTitle className="flex items-center gap-2"><ShieldAlert className="h-4 w-4" /> Priority signals</CardTitle>
+            <CardTitle className="flex items-center gap-2"><ShieldAlert className="h-4 w-4" /> 优先处理</CardTitle>
             <Badge variant={hardGates.length ? "warning" : "success"} className="iconBadge" title="Priority review signals"><ClipboardCheck />{hardGates.length}</Badge>
           </div>
         </CardHeader>
@@ -7214,10 +7349,18 @@ function AuditQueue({
           <PaginationControls label="priority review signals" {...hardGatePage} onPageChange={hardGatePage.setPage} />
         </CardContent>
       </Card>
+
+      <details className="optionalSurface reviewOptionalSurface" open={advancedReviewOpen} onToggle={(event) => setAdvancedReviewOpen(event.currentTarget.open)}>
+        <summary>
+          <span><ClipboardCheck /> 完整回顾工作台</span>
+          <small>{activeDecisions.length} 个项目判断 · {changeSets.length} 条变更 · {activeLeveling.length} 条资源建议</small>
+          <ChevronDown aria-hidden="true" />
+        </summary>
+        <div className="optionalSurfaceBody reviewAdvancedGrid">
       <Card id="audit-decisions">
         <CardHeader className="compactCardHeader">
           <div className="cardHeaderLine">
-            <CardTitle className="flex items-center gap-2"><Zap className="h-4 w-4" /> Project decisions</CardTitle>
+            <CardTitle className="flex items-center gap-2"><Zap className="h-4 w-4" /> 项目判断</CardTitle>
             <Badge variant="outline" className="iconBadge" title="Decisions"><Target />{activeDecisions.length}</Badge>
           </div>
         </CardHeader>
@@ -7247,7 +7390,7 @@ function AuditQueue({
       <Card id="audit-warnings">
         <CardHeader className="compactCardHeader">
           <div className="cardHeaderLine">
-            <CardTitle className="flex items-center gap-2"><AlertTriangle className="h-4 w-4" /> Warnings</CardTitle>
+            <CardTitle className="flex items-center gap-2"><AlertTriangle className="h-4 w-4" /> 提醒</CardTitle>
             <Badge variant={warningGates.length ? "warning" : "success"} className="iconBadge" title="Warnings"><AlertTriangle />{warningGates.length}</Badge>
           </div>
         </CardHeader>
@@ -7259,7 +7402,7 @@ function AuditQueue({
       <Card id="baseline-change-sets">
         <CardHeader className="compactCardHeader">
           <div className="cardHeaderLine">
-            <CardTitle className="flex items-center gap-2"><Archive className="h-4 w-4" /> Change review</CardTitle>
+            <CardTitle className="flex items-center gap-2"><Archive className="h-4 w-4" /> 变更记录</CardTitle>
             <div className="cardHeaderBadges">
               <Badge variant="outline" className="iconBadge" title="Total changes"><GitPullRequest />{changeSets.length}</Badge>
               <Badge variant={changeSets.some((item) => item.status === "blocked") ? "destructive" : "success"} className="iconBadge" title="Blocked changes"><Lock />{changeSets.filter((item) => item.status === "blocked").length}</Badge>
@@ -7287,7 +7430,7 @@ function AuditQueue({
       <Card className="lg:col-span-2" id="leveling-proposals">
         <CardHeader className="compactCardHeader">
           <div className="cardHeaderLine">
-            <CardTitle className="flex items-center gap-2"><CalendarClock className="h-4 w-4" /> Leveling Proposals</CardTitle>
+            <CardTitle className="flex items-center gap-2"><CalendarClock className="h-4 w-4" /> 资源调整建议</CardTitle>
             <Badge variant={activeLeveling.length ? "warning" : "success"} className="iconBadge" title="Leveling proposals"><CalendarClock />{activeLeveling.length}</Badge>
           </div>
         </CardHeader>
@@ -7328,6 +7471,8 @@ function AuditQueue({
           <PaginationControls label="leveling proposals" {...levelingPage} onPageChange={levelingPage.setPage} />
         </CardContent>
       </Card>
+        </div>
+      </details>
     </section>
   );
 }
@@ -7453,83 +7598,96 @@ function AgentCenter({
   };
 
   return (
-    <section className="grid gap-3 lg:grid-cols-2">
+    <section className="productPage agentHome">
+      <header className="productPageHeader">
+        <div>
+          <p className="productPageKicker">自动化</p>
+          <h2>任务仍由你决定，工具只负责搬运。</h2>
+          <p className="productPageLead">AI 回顾保持可选；给 Shortcut、Alfred 和其他工具使用的接口放在下方。</p>
+        </div>
+        <Badge variant={aiProviderReady ? "success" : "secondary"}>{aiProviderReady ? "AI 已就绪" : "无需配置也可使用"}</Badge>
+      </header>
       {notice !== idleAgentNotice && (
-        <div className="rounded-lg border bg-background p-3 text-sm font-medium lg:col-span-2">{notice}</div>
+        <div className="rounded-lg border bg-background p-3 text-sm font-medium">{notice}</div>
       )}
 
-      <Card className="lg:col-span-2">
+      <Card>
         <CardHeader className="compactCardHeader">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
-              <CardTitle className="flex items-center gap-2"><ClipboardCheck className="h-4 w-4" /> Agent</CardTitle>
+              <CardTitle className="flex items-center gap-2"><ClipboardCheck className="h-4 w-4" /> 自动化状态</CardTitle>
               <div className="compactBadgeRow">
-                <Badge variant="outline" className="iconBadge" title="Read endpoints"><FileText />read</Badge>
-                <Badge variant="outline" className="iconBadge" title="Command inbox"><Inbox />write</Badge>
-                <Badge variant={aiProviderReady ? "success" : "warning"} className="iconBadge" title="AI provider"><Zap />{aiProviderReady ? "AI" : "AI off"}</Badge>
+                <Badge variant="outline" className="iconBadge" title="读取接口"><FileText />可读取</Badge>
+                <Badge variant="outline" className="iconBadge" title="指令收件箱"><Inbox />可写入</Badge>
+                <Badge variant={aiProviderReady ? "success" : "warning"} className="iconBadge" title="AI 服务"><Zap />{aiProviderReady ? "AI 已就绪" : "AI 未开启"}</Badge>
               </div>
             </div>
-            <IconStatusBadge variant="outline" status="No secrets exposed" icon={<Lock />} />
+            <IconStatusBadge variant="outline" status="不暴露密钥" icon={<Lock />} />
           </div>
         </CardHeader>
         <CardContent className="grid gap-2 md:grid-cols-3">
-          <SettingsRow label="Protocol" value="/agent/manual.txt" />
-          <SettingsRow label="Portfolio state" value="/agent/projects.txt | .json" />
-          <SettingsRow label="Write entry" value="/agent/commands" />
+          <SettingsRow label="读取任务" value="可用" />
+          <SettingsRow label="写入入口" value="先预览再执行" />
+          <SettingsRow label="AI 回顾" value={aiProviderReady ? "已配置" : "未配置（可选）"} />
         </CardContent>
       </Card>
 
+      <details className="optionalSurface agentEndpoints">
+        <summary><span><FileDown /> Shortcut / Alfred / Agent 接口</span><small>只有接入外部工具时才需要</small><ChevronDown aria-hidden="true" /></summary>
+        <div className="optionalSurfaceBody agentEndpointGrid">
       <Card>
         <CardHeader className="compactCardHeader">
           <div className="cardHeaderLine">
-            <CardTitle className="flex items-center gap-2"><FileDown className="h-4 w-4" /> Read Endpoints</CardTitle>
-            <Badge variant="outline" className="iconBadge" title="No secrets exposed"><Lock />safe</Badge>
+            <CardTitle className="flex items-center gap-2"><FileDown className="h-4 w-4" /> 只读接口</CardTitle>
+            <Badge variant="outline" className="iconBadge" title="不暴露密钥"><Lock />安全</Badge>
           </div>
         </CardHeader>
         <CardContent className="flex flex-wrap gap-2">
-          <IconLinkButton label="Manual" href="/agent/manual.txt"><FileText /></IconLinkButton>
-          <IconLinkButton label="Projects text" href="/agent/projects.txt"><FileText /></IconLinkButton>
-          <IconLinkButton label="Projects JSON" href="/agent/projects.json"><FileJson /></IconLinkButton>
-          <IconLinkButton label="Selected project" href={`/agent/projects/${encodeURIComponent(agentProjectId)}.txt`}><Target /></IconLinkButton>
+          <IconLinkButton label="使用说明" href="/agent/manual.txt"><FileText /></IconLinkButton>
+          <IconLinkButton label="项目文本" href="/agent/projects.txt"><FileText /></IconLinkButton>
+          <IconLinkButton label="项目 JSON" href="/agent/projects.json"><FileJson /></IconLinkButton>
+          <IconLinkButton label="当前项目" href={`/agent/projects/${encodeURIComponent(agentProjectId)}.txt`}><Target /></IconLinkButton>
         </CardContent>
       </Card>
 
       <Card>
         <CardHeader className="compactCardHeader">
           <div className="cardHeaderLine">
-            <CardTitle className="flex items-center gap-2"><ClipboardCheck className="h-4 w-4" /> Command Inbox</CardTitle>
-            <Badge variant="warning" className="iconBadge" title="Guarded writes queue"><ShieldAlert />guard</Badge>
+            <CardTitle className="flex items-center gap-2"><ClipboardCheck className="h-4 w-4" /> 指令收件箱</CardTitle>
+            <Badge variant="warning" className="iconBadge" title="写入前会先审查"><ShieldAlert />受保护</Badge>
           </div>
         </CardHeader>
         <CardContent className="space-y-3">
           <div className="grid gap-2 md:grid-cols-2">
-            <SettingsRow label="Low-risk commands" value="auto-apply" />
-            <SettingsRow label="Guarded commands" value="queue gate" />
+            <SettingsRow label="普通指令" value="可直接执行" />
+            <SettingsRow label="敏感指令" value="先进入审查" />
           </div>
-          <IconLinkButton label="Command inbox" href="/agent/commands"><Inbox /></IconLinkButton>
+          <IconLinkButton label="打开指令收件箱" href="/agent/commands"><Inbox /></IconLinkButton>
         </CardContent>
       </Card>
+        </div>
+      </details>
 
-      <Card className="lg:col-span-2" id="agent-ai-audit">
+      <Card id="agent-ai-audit">
         <CardHeader className="compactCardHeader">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
-              <CardTitle className="flex items-center gap-2"><Zap className="h-4 w-4" /> AI Contrarian Audit</CardTitle>
+              <CardTitle className="flex items-center gap-2"><Zap className="h-4 w-4" /> AI 反向回顾（可选）</CardTitle>
               <div className="compactBadgeRow">
-                <Badge variant={aiProviderReady ? "success" : "warning"} className="iconBadge" title="Provider"><Zap />{aiProviderReady ? "provider" : "missing"}</Badge>
-                <Badge variant={sessionPassphrase.trim() ? "success" : "warning"} className="iconBadge" title="Passphrase"><KeyRound />{sessionPassphrase.trim() ? "unlocked" : "locked"}</Badge>
+                <Badge variant={aiProviderReady ? "success" : "warning"} className="iconBadge" title="AI 服务"><Zap />{aiProviderReady ? "已配置" : "未配置"}</Badge>
+                <Badge variant={sessionPassphrase.trim() ? "success" : "warning"} className="iconBadge" title="工作区口令"><KeyRound />{sessionPassphrase.trim() ? "已解锁" : "未解锁"}</Badge>
               </div>
             </div>
             <IconStatusBadge
               variant={aiProviderReady ? sessionPassphrase.trim() ? "success" : "warning" : "warning"}
-              status={aiProviderReady ? sessionPassphrase.trim() ? "Ready" : "Locked" : "Needs provider"}
+              status={aiProviderReady ? sessionPassphrase.trim() ? "已就绪" : "未解锁" : "需配置 AI"}
               icon={aiProviderReady ? sessionPassphrase.trim() ? <CheckCircle2 /> : <Lock /> : <AlertTriangle />}
             />
           </div>
         </CardHeader>
         <CardContent className="grid gap-3 md:grid-cols-[1fr_auto]">
           <NativeSelectField
-            label="Audit project"
+            label="回顾项目"
             value={auditProject?.id ?? ""}
             onChange={setAuditProjectId}
             options={auditProjects.map((project) => ({ value: project.id, label: project.name }))}
@@ -7543,7 +7701,7 @@ function AgentCenter({
             <IconLinkButton label="Open settings" href={hashForRoute({ view: "settings", selectedProjectId: agentProjectId })}><SettingsIcon /></IconLinkButton>
           </div>
           <div className="rounded-lg border bg-muted/40 p-3 text-sm text-muted-foreground md:col-span-2">
-            Sends project direction, open gates, recent evidence summaries, and first schedule rows only.
+            只会发送项目方向、未处理信号、最近证据摘要与少量排期行。
           </div>
         </CardContent>
       </Card>
@@ -9907,12 +10065,12 @@ function OutlineTable({
         <caption className="srOnly">Project outline with schedule, evidence, gate, and float status</caption>
         <TableHeader>
           <TableRow>
-            <TableHead>WBS</TableHead>
-            <TableHead>Work item</TableHead>
-            <TableHead>Plan</TableHead>
-            <TableHead>%</TableHead>
-            <TableHead>State</TableHead>
-            <TableHead>Action</TableHead>
+            <TableHead>层级</TableHead>
+            <TableHead>任务</TableHead>
+            <TableHead>时间</TableHead>
+            <TableHead>进度</TableHead>
+            <TableHead>状态</TableHead>
+            <TableHead>操作</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -9922,10 +10080,10 @@ function OutlineTable({
               const status = gate
                 ? `${gate.severity} gate`
                 : item.workItem.evidenceRequired && !hasEvidence
-                  ? "Needs evidence"
+                  ? "缺少证据"
                   : item.isCritical
-                    ? "Critical"
-                    : "Clear";
+                    ? "关键路径"
+                    : "正常";
               return (
                 <TableRow id={`work-item-${item.workItem.id}`} key={item.workItem.id} data-work-item-id={item.workItem.id} className={item.isCritical ? "border-l-4 border-l-destructive" : ""}>
                   <TableCell className="font-medium">{item.workItem.outline}</TableCell>
@@ -9944,9 +10102,9 @@ function OutlineTable({
                       )}
                     />
                     <span>
-                      {item.workItem.kind}
-                      {item.workItem.evidenceRequired && " / evidence"}
-                      {item.workItem.isKeyTask && " / key"}
+                      {workItemKindLabel(item.workItem.kind)}
+                      {item.workItem.evidenceRequired && " / 需证据"}
+                      {item.workItem.isKeyTask && " / 关键"}
                     </span>
                   </TableCell>
                   <TableCell className="outlinePlanCell">
@@ -9959,7 +10117,7 @@ function OutlineTable({
                       variant={gate ? "destructive" : item.isCritical ? "warning" : "secondary"}
                       title={`${status}; float ${Math.round(item.totalFloatSeconds / 3600)}h`}
                     >
-                      {gate ? "Gate" : item.isCritical ? "CP" : item.workItem.evidenceRequired && !hasEvidence ? "Evidence" : "Clear"}
+                      {gate ? "待审查" : item.isCritical ? "关键" : item.workItem.evidenceRequired && !hasEvidence ? "缺证据" : "正常"}
                     </Badge>
                   </TableCell>
                   <TableCell>
@@ -10002,7 +10160,7 @@ function OutlineTable({
                       {item.workItem.kind === "phase" ? (
                         <span className="text-xs text-muted-foreground">-</span>
                       ) : item.workItem.percentComplete >= 100 ? (
-                        <Badge variant="success">Done</Badge>
+                        <Badge variant="success">已完成</Badge>
                       ) : (
                         <Button type="button" size="icon" variant="outline" onClick={() => onFinishItem(item)} aria-label={`Mark ${item.workItem.title} done`} title="Mark done">
                           <CheckCircle2 />

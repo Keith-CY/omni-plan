@@ -111,15 +111,16 @@ interface TodoDraft {
 interface FilterDefinition {
   id: TodosFilter;
   label: string;
+  ariaLabel: string;
   icon: typeof Inbox;
 }
 
 const FILTERS: FilterDefinition[] = [
-  { id: "inbox", label: "Inbox", icon: Inbox },
-  { id: "all", label: "All", icon: ListTodo },
-  { id: "flagged", label: "Flagged", icon: Flag },
-  { id: "tags", label: "Tags", icon: Tags },
-  { id: "completed", label: "Completed", icon: CheckCircle2 }
+  { id: "inbox", label: "收件箱", ariaLabel: "Inbox", icon: Inbox },
+  { id: "all", label: "全部", ariaLabel: "All", icon: ListTodo },
+  { id: "flagged", label: "重点", ariaLabel: "Flagged", icon: Flag },
+  { id: "tags", label: "标签", ariaLabel: "Tags", icon: Tags },
+  { id: "completed", label: "已完成", ariaLabel: "Completed", icon: CheckCircle2 }
 ];
 
 function dateInputValue(value?: string): string {
@@ -274,15 +275,15 @@ function formatDate(value?: string): string | undefined {
   if (!value) return undefined;
   const date = new Date(value.length === 10 ? `${value}T00:00:00` : value);
   if (Number.isNaN(date.getTime())) return value;
-  return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" }).format(date);
+  return new Intl.DateTimeFormat("zh-CN", { month: "short", day: "numeric" }).format(date);
 }
 
 function formatRepeat(rule?: RepeatRule): string | undefined {
   if (!rule) return undefined;
-  if (rule.cadence === "monthly") return "Monthly";
-  if (rule.cadence === "weekly") return "Weekly";
+  if (rule.cadence === "monthly") return "每月";
+  if (rule.cadence === "weekly") return "每周";
   const everyDays = Math.max(1, Math.round(rule.everyDays ?? 1));
-  return everyDays === 1 ? "Daily" : `Every ${everyDays}d`;
+  return everyDays === 1 ? "每天" : `每 ${everyDays} 天`;
 }
 
 function todoMatchesSearch(todo: Todo, query: string): boolean {
@@ -432,32 +433,32 @@ export function TodosPage({
     }
   }
 
-  const filterLabel = FILTERS.find((item) => item.id === filter)?.label ?? "Todos";
+  const filterLabel = FILTERS.find((item) => item.id === filter)?.label ?? "任务";
 
   return (
     <section className="todosPage" aria-labelledby="todos-page-title">
       <header className="todosPage__header">
         <div>
-          <p className="todosPage__eyebrow">Personal execution</p>
+          <p className="todosPage__eyebrow">随手记录</p>
           <div className="todosPage__titleRow">
-            <h2 id="todos-page-title">Todos</h2>
-            <span className="todosPage__total" aria-label={`${openTodos.length} open todos`}>
+            <h2 id="todos-page-title">收件箱</h2>
+            <span className="todosPage__total" aria-label={`${openTodos.length} 个待办`}>
               {openTodos.length}
             </span>
           </div>
-          <p className="todosPage__subtitle">Capture lightly. Add project structure only when the work earns it.</p>
+          <p className="todosPage__subtitle">先把事情记下来；时间、工作量和项目归属都可以稍后再补。</p>
         </div>
         <label className="todosPage__search">
           <Search aria-hidden="true" />
-          <span className="todosPage__srOnly">Search Todos</span>
+          <span className="todosPage__srOnly">搜索任务</span>
           <input
             type="search"
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder="Search todos"
+            placeholder="搜索任务"
           />
           {query ? (
-            <button type="button" onClick={() => setQuery("")} aria-label="Clear Todo search">
+            <button type="button" onClick={() => setQuery("")} aria-label="清空搜索">
               <X aria-hidden="true" />
             </button>
           ) : null}
@@ -472,14 +473,15 @@ export function TodosPage({
         onUndo={onUndoCapture}
       />
 
-      <nav className="todosPage__filters" aria-label="Todo views">
-        {FILTERS.map(({ id, label, icon: Icon }) => (
+      <nav className="todosPage__filters" aria-label="任务视图">
+        {FILTERS.map(({ id, label, ariaLabel, icon: Icon }) => (
           <button
             key={id}
             type="button"
             className="todosPage__filter"
             data-active={filter === id}
             aria-pressed={filter === id}
+            aria-label={ariaLabel}
             onClick={() => selectFilter(id)}
           >
             <Icon aria-hidden="true" />
@@ -520,9 +522,9 @@ export function TodosPage({
       <div className="todosPage__listHeader">
         <div>
           <strong>{selectedTag ? `#${selectedTag}` : filterLabel}</strong>
-          <span>{filteredTodos.length} shown</span>
+          <span>{filteredTodos.length} 项</span>
         </div>
-        <span className="todosPage__listHint">Select a row for details and conversion options</span>
+        <span className="todosPage__listHint">点开任务后再补充安排或拆成项目</span>
       </div>
 
       {filteredTodos.length > 0 ? (
@@ -642,22 +644,22 @@ function TodoRow({
         >
           <span className="todoRow__titleLine">
             <span className="todoRow__title">{todo.title}</span>
-            {todo.inbox && !completed ? <span className="todoRow__inboxBadge">Inbox</span> : null}
+            {todo.inbox && !completed ? <span className="todoRow__inboxBadge">收件箱</span> : null}
           </span>
           <span className="todoRow__meta">
             {dueLabel ? (
               <span className="todoRow__due">
-                <CalendarDays aria-hidden="true" /> Due {dueLabel}
+                <CalendarDays aria-hidden="true" /> 截止 {dueLabel}
               </span>
             ) : null}
             {deferLabel ? (
               <span>
-                <Clock3 aria-hidden="true" /> Available {deferLabel}
+                <Clock3 aria-hidden="true" /> 可开始 {deferLabel}
               </span>
             ) : null}
             {planLabel ? (
               <span>
-                <CalendarDays aria-hidden="true" /> Plan {planLabel}
+                <CalendarDays aria-hidden="true" /> 安排 {planLabel}
               </span>
             ) : null}
             {repeatLabel ? (
@@ -665,7 +667,7 @@ function TodoRow({
                 <Repeat2 aria-hidden="true" /> {repeatLabel}
               </span>
             ) : null}
-            {todo.estimatedSeconds ? <span>{Math.max(1, Math.round(todo.estimatedSeconds / 60))} min</span> : null}
+            {todo.estimatedSeconds ? <span>{Math.max(1, Math.round(todo.estimatedSeconds / 60))} 分钟</span> : null}
             {todo.checklist.length > 0 ? (
               <span>
                 <CheckCircle2 aria-hidden="true" /> {checklistDone}/{todo.checklist.length}
@@ -755,7 +757,7 @@ function TodoEditor({ id, todo, timeZone, onSave, onCancel, onKeep, onConvertToT
     event.preventDefault();
     const title = draft.title.trim();
     if (!title) {
-      setSaveError("Give this Todo a title before saving.");
+      setSaveError("保存前请先填写标题。");
       titleInputRef.current?.focus();
       return;
     }
@@ -795,7 +797,7 @@ function TodoEditor({ id, todo, timeZone, onSave, onCancel, onKeep, onConvertToT
     <form id={id} className="todoEditor" onSubmit={submit}>
       <div className="todoEditor__grid">
         <label className="todoEditor__field todoEditor__field--wide">
-          <span>Title</span>
+          <span>标题</span>
           <input
             ref={titleInputRef}
             value={draft.title}
@@ -804,16 +806,16 @@ function TodoEditor({ id, todo, timeZone, onSave, onCancel, onKeep, onConvertToT
           />
         </label>
         <label className="todoEditor__field todoEditor__field--wide">
-          <span>Note</span>
+          <span>备注</span>
           <textarea
             value={draft.note}
             onChange={(event) => setDraft((current) => ({ ...current, note: event.target.value }))}
             rows={2}
-            placeholder="Context, link, or next step"
+            placeholder="背景、链接或下一步"
           />
         </label>
         <label className="todoEditor__field">
-          <span>Available</span>
+          <span>可开始日期</span>
           <input
             type="date"
             value={draft.deferUntil}
@@ -821,7 +823,7 @@ function TodoEditor({ id, todo, timeZone, onSave, onCancel, onKeep, onConvertToT
           />
         </label>
         <label className="todoEditor__field">
-          <span>Due</span>
+          <span>截止日期</span>
           <input
             type="date"
             value={draft.dueAt}
@@ -829,7 +831,7 @@ function TodoEditor({ id, todo, timeZone, onSave, onCancel, onKeep, onConvertToT
           />
         </label>
         <label className="todoEditor__field todoEditor__planField">
-          <span>Plan date</span>
+          <span>计划日期</span>
           <span className="todoEditor__dateWithAction">
             <input
               type="date"
@@ -843,12 +845,12 @@ function TodoEditor({ id, todo, timeZone, onSave, onCancel, onKeep, onConvertToT
               aria-label="Set plan date to Today"
               onClick={() => setDraft((current) => ({ ...current, plannedForDate: todayDate }))}
             >
-              Today
+              今天
             </button>
           </span>
         </label>
         <label className="todoEditor__field">
-          <span>Estimate</span>
+          <span>预估工作量</span>
           <span className="todoEditor__numberInput">
             <input
               type="number"
@@ -859,15 +861,15 @@ function TodoEditor({ id, todo, timeZone, onSave, onCancel, onKeep, onConvertToT
               onChange={(event) => setDraft((current) => ({ ...current, estimatedMinutes: event.target.value }))}
               aria-label="Estimated minutes"
             />
-            <span>min</span>
+            <span>分钟</span>
           </span>
         </label>
         <label className="todoEditor__field">
-          <span>Tags</span>
+          <span>标签</span>
           <input
             value={draft.tags}
             onChange={(event) => setDraft((current) => ({ ...current, tags: event.target.value }))}
-            placeholder="home, calls"
+            placeholder="家庭，电话"
           />
         </label>
         <label className="todoEditor__flagToggle">
@@ -877,14 +879,14 @@ function TodoEditor({ id, todo, timeZone, onSave, onCancel, onKeep, onConvertToT
             onChange={(event) => setDraft((current) => ({ ...current, flagged: event.target.checked }))}
           />
           <Flag aria-hidden="true" />
-          <span>Flag for attention</span>
+          <span>标记为重点</span>
         </label>
       </div>
 
       <fieldset className="todoEditor__repeat">
         <legend className="todosPage__srOnly">Repeat</legend>
         <div className="todoEditor__repeatHeader">
-          <span className="todoEditor__repeatLabel">Repeat</span>
+          <span className="todoEditor__repeatLabel">重复</span>
           <label>
             <span className="todosPage__srOnly">Repeat cadence</span>
             <select
@@ -898,10 +900,10 @@ function TodoEditor({ id, todo, timeZone, onSave, onCancel, onKeep, onConvertToT
                 ))
               }
             >
-              <option value="none">None</option>
-              <option value="every-n-days">Daily</option>
-              <option value="weekly">Weekly</option>
-              <option value="monthly">Monthly</option>
+              <option value="none">不重复</option>
+              <option value="every-n-days">每天</option>
+              <option value="weekly">每周</option>
+              <option value="monthly">每月</option>
             </select>
           </label>
         </div>
@@ -910,7 +912,7 @@ function TodoEditor({ id, todo, timeZone, onSave, onCancel, onKeep, onConvertToT
             <div className="todoEditor__repeatGrid">
               {draft.repeatCadence === "every-n-days" ? (
                 <label className="todoEditor__field">
-                  <span>Every</span>
+                  <span>间隔</span>
                   <span className="todoEditor__numberInput">
                     <input
                       type="number"
@@ -921,12 +923,12 @@ function TodoEditor({ id, todo, timeZone, onSave, onCancel, onKeep, onConvertToT
                       onChange={(event) => setDraft((current) => ({ ...current, repeatEveryDays: event.target.value }))}
                       aria-label="Repeat every number of days"
                     />
-                    <span>days</span>
+                    <span>天</span>
                   </span>
                 </label>
               ) : null}
               <label className="todoEditor__field">
-                <span>Starts</span>
+                <span>开始日期</span>
                 <input
                   type="date"
                   required
@@ -936,7 +938,7 @@ function TodoEditor({ id, todo, timeZone, onSave, onCancel, onKeep, onConvertToT
                 />
               </label>
               <label className="todoEditor__field">
-                <span>At</span>
+                <span>开始时间</span>
                 <input
                   type="time"
                   required
@@ -946,7 +948,7 @@ function TodoEditor({ id, todo, timeZone, onSave, onCancel, onKeep, onConvertToT
                 />
               </label>
               <label className="todoEditor__field">
-                <span>Ends</span>
+                <span>结束方式</span>
                 <select
                   value={draft.repeatEndMode}
                   aria-label="Repeat end mode"
@@ -962,14 +964,14 @@ function TodoEditor({ id, todo, timeZone, onSave, onCancel, onKeep, onConvertToT
                     }));
                   }}
                 >
-                  <option value="count">After count</option>
-                  <option value="until">On date</option>
-                  <option value="never">Never</option>
+                  <option value="count">按次数</option>
+                  <option value="until">到指定日期</option>
+                  <option value="never">不结束</option>
                 </select>
               </label>
               {draft.repeatEndMode === "count" ? (
                 <label className="todoEditor__field">
-                  <span>Occurrences</span>
+                  <span>重复次数</span>
                   <input
                     type="number"
                     inputMode="numeric"
@@ -984,7 +986,7 @@ function TodoEditor({ id, todo, timeZone, onSave, onCancel, onKeep, onConvertToT
               ) : null}
               {draft.repeatEndMode === "until" ? (
                 <label className="todoEditor__field">
-                  <span>End date</span>
+                  <span>结束日期</span>
                   <input
                     type="date"
                     required
@@ -999,17 +1001,17 @@ function TodoEditor({ id, todo, timeZone, onSave, onCancel, onKeep, onConvertToT
             <p className="todoEditor__repeatHint">
               <Repeat2 aria-hidden="true" />
               {draft.repeatUseExistingAdvanced && todo.repeatRule
-                ? `Existing ${todo.repeatRule.executionMode ?? "manual"} / ${todo.repeatRule.startMode ?? "fixed-time"} advanced settings stay intact.`
-                : "New rules use manual execution at a fixed time."}
+                ? `保留现有 ${todo.repeatRule.executionMode ?? "manual"} / ${todo.repeatRule.startMode ?? "fixed-time"} 高级设置。`
+                : "新规则默认在固定时间手动执行。"}
             </p>
           </div>
         ) : (
-          <p className="todoEditor__repeatEmpty">No repeat rule.</p>
+          <p className="todoEditor__repeatEmpty">不重复。</p>
         )}
       </fieldset>
 
       <fieldset className="todoEditor__checklist">
-        <legend>Checklist</legend>
+        <legend>检查清单</legend>
         {draft.checklist.length > 0 ? (
           <ul>
             {draft.checklist.map((item) => (
@@ -1056,7 +1058,7 @@ function TodoEditor({ id, todo, timeZone, onSave, onCancel, onKeep, onConvertToT
             ))}
           </ul>
         ) : (
-          <p>No checklist items.</p>
+          <p>还没有检查项。</p>
         )}
         <div className="todoEditor__addChecklist">
           <input
@@ -1068,11 +1070,11 @@ function TodoEditor({ id, todo, timeZone, onSave, onCancel, onKeep, onConvertToT
                 addChecklistItem();
               }
             }}
-            placeholder="Add a checklist item"
+            placeholder="添加检查项"
             aria-label="New checklist item"
           />
           <button type="button" onClick={addChecklistItem} disabled={!newChecklistTitle.trim()}>
-            <Plus aria-hidden="true" /> Add
+            <Plus aria-hidden="true" /> 添加
           </button>
         </div>
       </fieldset>
@@ -1087,24 +1089,24 @@ function TodoEditor({ id, todo, timeZone, onSave, onCancel, onKeep, onConvertToT
         {todo.status === "open" ? (
           <div className="todoEditor__conversionActions" aria-label="Todo conversion actions">
             <button type="button" className="todoEditor__quietAction" onClick={onKeep}>
-              <Check aria-hidden="true" /> Keep as Todo
+              <Check aria-hidden="true" /> 保持为待办
             </button>
             <button type="button" className="todoEditor__quietAction" onClick={onConvertToTask}>
-              <ArrowRight aria-hidden="true" /> Convert to Task
+              <ArrowRight aria-hidden="true" /> 转为项目任务
             </button>
             <button type="button" className="todoEditor__quietAction" onClick={onConvertToProject}>
-              <FolderKanban aria-hidden="true" /> Convert to Project
+              <FolderKanban aria-hidden="true" /> 拆成项目
             </button>
           </div>
         ) : (
-          <span className="todoEditor__completedNote">Restore this Todo before changing its destination.</span>
+          <span className="todoEditor__completedNote">先恢复这个待办，再更改它的去向。</span>
         )}
         <div className="todoEditor__saveActions">
           <button type="button" onClick={onCancel} disabled={saving}>
-            Cancel
+            取消
           </button>
           <button type="submit" className="todoEditor__primary" disabled={saving}>
-            {saving ? "Saving…" : "Save"}
+            {saving ? "保存中…" : "保存"}
           </button>
         </div>
       </div>
@@ -1119,23 +1121,23 @@ interface EmptyTodosProps {
 }
 
 function EmptyTodos({ filter, hasQuery, selectedTag }: EmptyTodosProps) {
-  let title = "Nothing here";
-  let detail = "This view will update as your Todos change.";
+  let title = "这里还没有任务";
+  let detail = "记录的新任务会出现在这里。";
   if (hasQuery) {
-    title = "No matching Todos";
-    detail = "Try a shorter search or clear the current filters.";
+    title = "没有找到匹配的任务";
+    detail = "可以缩短关键词，或清空当前筛选。";
   } else if (filter === "inbox") {
-    title = "Inbox clear";
-    detail = "New captures land here until you decide what deserves more structure.";
+    title = "收件箱已清空";
+    detail = "想到什么就先记下来，是否安排时间或拆成项目以后再决定。";
   } else if (filter === "flagged") {
-    title = "No flagged Todos";
-    detail = "Flag only the few items that need extra attention.";
+    title = "没有重点任务";
+    detail = "只标记少数真正需要额外关注的事项。";
   } else if (filter === "tags") {
-    title = selectedTag ? `No Todos tagged ${selectedTag}` : "No tagged Todos";
-    detail = "Add a tag while editing a Todo to group related errands or contexts.";
+    title = selectedTag ? `没有 #${selectedTag} 任务` : "没有带标签的任务";
+    detail = "编辑任务时可以补标签，用来整理相近的场景。";
   } else if (filter === "completed") {
-    title = "No completed Todos";
-    detail = "Completed items stay available here for quick restoration.";
+    title = "还没有已完成任务";
+    detail = "完成后的任务会保留在这里，也可以随时恢复。";
   }
 
   return (
@@ -1188,17 +1190,17 @@ function TodoConfirmationDialog({
   const isProject = state?.kind === "project";
   const confirmDisabled = pending || (isTask && !selectedProjectId);
 
-  let title = "Keep as Todo?";
-  let description = "This item will stay independent and remain available in your Todo views.";
-  let confirmLabel = "Keep as Todo";
+  let title = "保持为待办？";
+  let description = "这件事会继续作为独立待办，保留在任务视图中。";
+  let confirmLabel = "保持为待办";
   if (isTask) {
-    title = "Convert to Task?";
-    description = "Choose the project that should own this work. Its Todo details and checklist will be preserved.";
-    confirmLabel = "Convert to Task";
+    title = "转为项目任务？";
+    description = "选择一个所属项目，待办详情和检查清单都会保留。";
+    confirmLabel = "转为任务";
   } else if (isProject) {
-    title = "Convert to Project?";
-    description = "Choose how much planning structure this work needs. OmniPlan is the default for direct planning.";
-    confirmLabel = "Create Project";
+    title = "拆成项目？";
+    description = "只在确实需要结构时才建立项目；OmniPlan 适合直接规划任务、日期和依赖。";
+    confirmLabel = "建立项目";
   }
 
   return (
@@ -1225,7 +1227,7 @@ function TodoConfirmationDialog({
               <Dialog.Description id={descriptionId}>{description}</Dialog.Description>
             </div>
             <Dialog.Close asChild>
-              <button type="button" className="todoDialog__close" disabled={pending} aria-label="Close dialog">
+              <button type="button" className="todoDialog__close" disabled={pending} aria-label="关闭对话框">
                 <X aria-hidden="true" />
               </button>
             </Dialog.Close>
@@ -1233,7 +1235,7 @@ function TodoConfirmationDialog({
 
           {state ? (
             <div className="todoDialog__itemPreview">
-              <span>From Todo</span>
+              <span>来自待办</span>
               <strong>{state.todo.title}</strong>
             </div>
           ) : null}
@@ -1243,7 +1245,7 @@ function TodoConfirmationDialog({
               {projects.length > 0 ? (
                 <>
                   <label>
-                    <span>Project</span>
+                    <span>所属项目</span>
                     <select value={selectedProjectId} onChange={(event) => onProjectChange(event.target.value)} autoFocus>
                       {projects.map((project) => (
                         <option key={project.id} value={project.id}>
@@ -1254,9 +1256,9 @@ function TodoConfirmationDialog({
                   </label>
                   {selectedProjectScopes.length > 0 ? (
                     <label>
-                      <span>Shape Up scope <em>optional</em></span>
+                      <span>Shape Up 范围 <em>可选</em></span>
                       <select value={selectedScopeId} onChange={(event) => onScopeChange(event.target.value)}>
-                        <option value="">No scope</option>
+                        <option value="">不指定范围</option>
                         {selectedProjectScopes.map((scope) => (
                           <option key={scope.id} value={scope.id}>
                             {scope.title}
@@ -1268,11 +1270,11 @@ function TodoConfirmationDialog({
                 </>
               ) : (
                 <div className="todoDialog__noProjects">
-                  <strong>Create a project first</strong>
-                  <p>A Task needs a project so its schedule and dependencies have a home.</p>
+                  <strong>请先创建项目</strong>
+                  <p>项目任务需要一个所属项目，用来承载排期和依赖。</p>
                   {onRequestCreateProject ? (
                     <button type="button" onClick={onRequestCreateProject}>
-                      Create Project
+                      创建项目
                     </button>
                   ) : null}
                 </div>
@@ -1282,7 +1284,7 @@ function TodoConfirmationDialog({
 
           {isProject ? (
             <fieldset className="todoDialog__methodPicker">
-              <legend>Planning method</legend>
+              <legend>规划方式</legend>
               <label data-selected={planningMethod === "omniplan"}>
                 <input
                   type="radio"
@@ -1293,9 +1295,9 @@ function TodoConfirmationDialog({
                 />
                 <span>
                   <strong>OmniPlan</strong>
-                  <small>Outline tasks, dates, dependencies, and progress directly.</small>
+                  <small>直接管理任务、日期、依赖和进度。</small>
                 </span>
-                <span className="todoDialog__recommended">Default</span>
+                <span className="todoDialog__recommended">默认</span>
               </label>
               <label data-selected={planningMethod === "shape-up"}>
                 <input
@@ -1307,7 +1309,7 @@ function TodoConfirmationDialog({
                 />
                 <span>
                   <strong>Shape Up</strong>
-                  <small>Shape the problem, place a bet, then build within an appetite.</small>
+                  <small>先定义问题并设定投入边界，再开始执行。</small>
                 </span>
               </label>
             </fieldset>
@@ -1321,10 +1323,10 @@ function TodoConfirmationDialog({
 
           <div className="todoDialog__footer">
             <button type="button" onClick={onCancel} disabled={pending}>
-              Cancel
+              取消
             </button>
             <button type="button" className="todoDialog__confirm" onClick={onConfirm} disabled={confirmDisabled}>
-              {pending ? "Working…" : confirmLabel}
+              {pending ? "处理中…" : confirmLabel}
             </button>
           </div>
         </Dialog.Content>

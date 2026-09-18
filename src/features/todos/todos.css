@@ -3,7 +3,7 @@
   --todos-accent-soft: color-mix(in srgb, var(--todos-accent) 9%, white);
   --todos-warning: var(--amber, #d97706);
   --todos-success: var(--green, #059669);
-  width: min(100%, 1120px);
+  width: min(100%, 1440px);
   margin: 0 auto;
   color: var(--foreground, #0f172a);
 }
@@ -67,7 +67,7 @@
 .todosPage__titleRow h2 {
   margin: 0;
   color: var(--foreground, #0f172a);
-  font-size: clamp(1.75rem, 3vw, 2.35rem);
+  font-size: clamp(1.6rem, 2.2vw, 2rem);
   font-weight: 650;
   letter-spacing: -0.035em;
   line-height: 1;
@@ -477,7 +477,7 @@
 .todoEditor__grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 10px;
+  gap: 9px 10px;
 }
 
 .todoEditor__field {
@@ -531,6 +531,7 @@
 }
 
 .todoEditor__numberInput input {
+  width: 0;
   min-width: 0;
   height: 20px;
   flex: 1;
@@ -540,6 +541,8 @@
 }
 
 .todoEditor__numberInput > span {
+  flex: none;
+  padding-left: 8px;
   color: var(--text-subtle, #64748b);
   font-size: 0.7rem;
 }
@@ -575,6 +578,7 @@
 
 .todoEditor__flagToggle {
   display: flex;
+  grid-column: span 2;
   min-height: 38px;
   align-self: end;
   align-items: center;
@@ -1255,6 +1259,10 @@
 
   .todoEditor__grid {
     grid-template-columns: 1fr;
+  }
+
+  .todoEditor__flagToggle {
+    grid-column: span 1;
   }
 
   .todoEditor__field--wide {

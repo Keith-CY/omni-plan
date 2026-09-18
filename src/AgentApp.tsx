@@ -93,12 +93,12 @@ function AgentCommandsPage() {
   const [loaded, setLoaded] = useState(false);
   const [commandInput, setCommandInput] = useState(() => initialCommandInput());
   const [receipt, setReceipt] = useState<AgentCommandReceipt | undefined>(() => lastReceipt());
-  const [notice, setNotice] = useState("Dry-run a command before applying it.");
+  const [notice, setNotice] = useState("先预览变更，确认后再执行。");
 
   useNoIndex();
 
   useEffect(() => {
-    document.title = "Agent Command Inbox";
+    document.title = "OmniPlan 指令收件箱";
     let active = true;
     void repository.load().then((stored) => {
       if (!active) return;
@@ -107,7 +107,7 @@ function AgentCommandsPage() {
     }).catch((error: unknown) => {
       if (!active) return;
       setLoaded(true);
-      setNotice(`Workspace load failed: ${error instanceof Error ? error.message : "unknown error"}`);
+      setNotice(`工作区加载失败：${error instanceof Error ? error.message : "未知错误"}`);
     });
     return () => {
       active = false;
@@ -118,7 +118,7 @@ function AgentCommandsPage() {
     const result = previewAgentCommandInput(workspace, commandInput);
     setReceipt(result.receipt);
     saveReceipt(result.receipt);
-    setNotice(result.receipt.risk === "invalid" ? "Command rejected during dry-run." : "Dry-run receipt generated.");
+    setNotice(result.receipt.risk === "invalid" ? "预览时已拒绝这条指令。" : "预览已生成，尚未修改数据。");
   };
 
   const applyCommand = async () => {
@@ -130,10 +130,10 @@ function AgentCommandsPage() {
       await repository.save(result.workspace);
     }
     setNotice(result.receipt.status === "applied"
-      ? "Command applied and saved to the browser workspace."
+      ? "指令已执行并保存到本地工作区。"
       : result.receipt.status === "queued"
-        ? "Guarded command queued as a ChangeSet and Audit Gate."
-        : "Command rejected.");
+        ? "这是敏感变更，已放入审查队列。"
+        : "指令已被拒绝。");
   };
 
   const sampleJson = JSON.stringify({
@@ -151,22 +151,22 @@ function AgentCommandsPage() {
         <section className="space-y-4">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
-              <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Agent write boundary</p>
-              <h1 className="text-2xl font-semibold">Command Inbox</h1>
-              <p className="text-sm text-muted-foreground">Paste a Shortcut or AI Agent command. Dry-run first; guarded changes queue for review.</p>
+              <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">自动化写入</p>
+              <h1 className="text-2xl font-semibold">指令收件箱</h1>
+              <p className="text-sm text-muted-foreground">粘贴 Shortcut、Alfred 或 AI 指令。先预览，敏感变更会自动进入审查。</p>
             </div>
             <div className="flex flex-wrap gap-2">
-              <Badge variant={loaded ? "success" : "warning"}>{loaded ? "local workspace" : "loading"}</Badge>
-              <a className="inline-flex h-9 items-center rounded-md border px-3 text-sm font-medium hover:bg-accent" href="/agent/manual.txt">Manual</a>
-              <a className="inline-flex h-9 items-center rounded-md border px-3 text-sm font-medium hover:bg-accent" href="/agent/projects.txt">Projects</a>
-              <a className="inline-flex h-9 items-center rounded-md border px-3 text-sm font-medium hover:bg-accent" href="/">App</a>
+              <Badge variant={loaded ? "success" : "warning"}>{loaded ? "本地工作区" : "加载中"}</Badge>
+              <a className="inline-flex h-9 items-center rounded-md border px-3 text-sm font-medium hover:bg-accent" href="/agent/manual.txt">使用说明</a>
+              <a className="inline-flex h-9 items-center rounded-md border px-3 text-sm font-medium hover:bg-accent" href="/agent/projects.txt">项目数据</a>
+              <a className="inline-flex h-9 items-center rounded-md border px-3 text-sm font-medium hover:bg-accent" href="/">返回应用</a>
             </div>
           </div>
 
           <Card>
             <CardHeader>
-              <CardTitle>Command Input</CardTitle>
-              <CardDescription>Accepts plain text or JSON. Natural language uses local rules only in this version.</CardDescription>
+              <CardTitle>输入指令</CardTitle>
+              <CardDescription>支持普通文本或 JSON；这一版自然语言只使用本地规则解析。</CardDescription>
             </CardHeader>
             <CardContent className="space-y-3">
               <textarea
@@ -177,10 +177,10 @@ function AgentCommandsPage() {
                 aria-label="Agent command input"
               />
               <div className="flex flex-wrap items-center gap-2">
-                <Button type="button" onClick={runDryRun} disabled={!commandInput.trim()}>Dry run</Button>
-                <Button type="button" variant="outline" onClick={() => void applyCommand()} disabled={!commandInput.trim()}>Apply or queue</Button>
-                <Button type="button" variant="ghost" onClick={() => setCommandInput(sampleJson)}>Use JSON sample</Button>
-                <Button type="button" variant="ghost" onClick={() => setCommandInput("")}>Clear</Button>
+                <Button type="button" onClick={runDryRun} disabled={!commandInput.trim()}>预览</Button>
+                <Button type="button" variant="outline" onClick={() => void applyCommand()} disabled={!commandInput.trim()}>执行或送审</Button>
+                <Button type="button" variant="ghost" onClick={() => setCommandInput(sampleJson)}>使用 JSON 示例</Button>
+                <Button type="button" variant="ghost" onClick={() => setCommandInput("")}>清空</Button>
               </div>
               <p className="rounded-lg border bg-muted/40 p-3 text-sm">{notice}</p>
             </CardContent>
@@ -188,14 +188,14 @@ function AgentCommandsPage() {
 
           <Card>
             <CardHeader>
-              <CardTitle>Shortcut Pattern</CardTitle>
-              <CardDescription>First-version iPhone flow: dictate or build text, then share or paste it here.</CardDescription>
+              <CardTitle>Shortcut 接入方式</CardTitle>
+              <CardDescription>iPhone 上可以口述或组合文本，然后分享或粘贴到这里。</CardDescription>
             </CardHeader>
             <CardContent className="space-y-2 text-sm text-muted-foreground">
-              <p>1. Shortcut action: Ask for Text or Dictate Text.</p>
-              <p>2. Optional: build JSON text with project_id and command_type.</p>
-              <p>3. Open URL: /agent/commands?text=&lt;encoded command&gt; or share text into the installed PWA.</p>
-              <p>4. Review the Command Receipt; low-risk commands apply, guarded commands queue.</p>
+              <p>1. 在 Shortcut 中使用“询问文本”或“听写文本”。</p>
+              <p>2. 可选：组合包含 project_id 和 command_type 的 JSON。</p>
+              <p>3. 打开 /agent/commands?text=&lt;编码后的指令&gt;，或将文本分享到已安装的 PWA。</p>
+              <p>4. 确认预览结果；普通指令可执行，敏感指令进入审查。</p>
             </CardContent>
           </Card>
         </section>
@@ -203,37 +203,37 @@ function AgentCommandsPage() {
         <aside className="space-y-4">
           <Card>
             <CardHeader>
-              <CardTitle>Command Receipt</CardTitle>
-              <CardDescription>Machine-readable result for the last dry-run or apply action.</CardDescription>
+              <CardTitle>执行回执</CardTitle>
+              <CardDescription>最近一次预览或执行的结果。</CardDescription>
             </CardHeader>
             <CardContent className="space-y-3">
               {receipt ? (
                 <>
                   <div className="grid grid-cols-2 gap-2">
-                    <ReceiptTile label="Status" value={receipt.status} />
-                    <ReceiptTile label="Risk" value={receipt.risk} />
-                    <ReceiptTile label="Dry run" value={receipt.dry_run ? "true" : "false"} />
-                    <ReceiptTile label="Diffs" value={String(receipt.diffs.length)} />
+                    <ReceiptTile label="状态" value={receipt.status} />
+                    <ReceiptTile label="风险" value={receipt.risk} />
+                    <ReceiptTile label="仅预览" value={receipt.dry_run ? "是" : "否"} />
+                    <ReceiptTile label="变更" value={String(receipt.diffs.length)} />
                   </div>
                   <pre className="max-h-[56vh] overflow-auto rounded-lg border bg-muted/30 p-3 text-xs">{JSON.stringify(receipt, null, 2)}</pre>
                   <div className="flex flex-wrap gap-2">
-                    <Button type="button" variant="outline" size="sm" onClick={() => void copyText(JSON.stringify(receipt, null, 2))}>Copy receipt</Button>
-                    {receipt.project_id && <a className="inline-flex h-9 items-center rounded-md border px-3 text-sm font-medium hover:bg-accent" href={`/agent/projects/${encodeURIComponent(receipt.project_id)}.txt`}>Project status</a>}
+                    <Button type="button" variant="outline" size="sm" onClick={() => void copyText(JSON.stringify(receipt, null, 2))}>复制回执</Button>
+                    {receipt.project_id && <a className="inline-flex h-9 items-center rounded-md border px-3 text-sm font-medium hover:bg-accent" href={`/agent/projects/${encodeURIComponent(receipt.project_id)}.txt`}>项目状态</a>}
                   </div>
                 </>
               ) : (
-                <div className="rounded-lg border border-dashed p-6 text-sm text-muted-foreground">No receipt yet.</div>
+                <div className="rounded-lg border border-dashed p-6 text-sm text-muted-foreground">还没有回执。</div>
               )}
             </CardContent>
           </Card>
           <Card>
             <CardHeader>
-              <CardTitle>Rules</CardTitle>
+              <CardTitle>执行规则</CardTitle>
             </CardHeader>
             <CardContent className="space-y-2 text-sm text-muted-foreground">
-              <p>Low-risk: ordinary task, progress, actuals, evidence, notes.</p>
-              <p>Guarded: dependencies, baselines, scope expansion, milestone completion without evidence, completion, archive.</p>
-              <p>Secrets are never read from agent pages.</p>
+              <p>普通变更：任务、进度、实际工时、证据和备注。</p>
+              <p>需审查：依赖、基线、范围扩张、无证据的里程碑完成、项目完成和归档。</p>
+              <p>Agent 页面不会读取密钥。</p>
             </CardContent>
           </Card>
         </aside>

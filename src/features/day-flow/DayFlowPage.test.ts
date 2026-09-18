@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { TaskView } from "../../domain/tasks";
-import { formatTaskTime, timelineBarStyle } from "./DayFlowPage";
+import { formatTaskTime, formatTimelineLabel, timelineBarStyle } from "./DayFlowPage";
 
 const baseTask: TaskView = {
   id: "task-1",
@@ -53,5 +53,16 @@ describe("Today timeline presentation", () => {
     };
 
     expect(formatTaskTime(task, "Asia/Tokyo", "2026-09-16")).toBe("延续至 06:00");
+  });
+
+  it("uses a compact start-time label when a short timeline bar cannot fit the full range", () => {
+    const task = {
+      ...baseTask,
+      plannedStart: "2026-09-18T05:00:00.000Z",
+      plannedFinish: "2026-09-18T06:00:00.000Z"
+    };
+
+    expect(formatTaskTime(task, "Asia/Tokyo", "2026-09-18")).toBe("14:00–15:00");
+    expect(formatTimelineLabel(task, "Asia/Tokyo", "2026-09-18")).toBe("14:00");
   });
 });

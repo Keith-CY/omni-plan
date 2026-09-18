@@ -65,7 +65,7 @@ export function QuickTaskCapture({
           autoComplete="off"
           autoFocus={autoFocus}
         />
-        <span className="quickTaskCaptureHint">Enter 保存</span>
+        <span className="quickTaskCaptureHint">按 Enter 保存</span>
         <button type="submit" disabled={!title.trim() || composing}>保存</button>
       </form>
       {receipt && (

@@ -123,7 +123,7 @@ function selectedDayPanel(): HTMLElement {
 }
 
 function expectedSelectedDayLabel(day: string): string {
-  return new Intl.DateTimeFormat("en", {
+  return new Intl.DateTimeFormat("zh-CN", {
     day: "2-digit",
     month: "short",
     timeZone: "UTC",

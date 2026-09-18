@@ -127,6 +127,12 @@ function button(label: string): HTMLButtonElement {
   return match;
 }
 
+function editorSaveButton(): HTMLButtonElement {
+  const match = document.querySelector<HTMLButtonElement>(".todoEditor__primary");
+  if (!match) throw new Error("Todo editor save button was not rendered.");
+  return match;
+}
+
 async function click(target: Element) {
   await act(async () => {
     target.dispatchEvent(new MouseEvent("click", { bubbles: true }));
@@ -203,7 +209,7 @@ describe("TodosPage", () => {
     if (!startDate || !startTime) throw new Error("Repeat start controls were not rendered.");
     await change(startDate, "2026-07-25");
     await change(startTime, "10:30");
-    await click(button("Save"));
+    await click(editorSaveButton());
 
     const patch = onUpdateTodo.mock.calls[0]?.[1];
     expect(patch).toMatchObject({
@@ -245,7 +251,7 @@ describe("TodosPage", () => {
     const repeatCadence = container.querySelector<HTMLSelectElement>('select[aria-label="Repeat cadence"]');
     if (!repeatCadence) throw new Error("Repeat cadence selector was not rendered.");
     await change(repeatCadence, "weekly");
-    await click(button("Save"));
+    await click(editorSaveButton());
 
     expect(onUpdateTodo.mock.calls[0]?.[1]?.repeatRule).toMatchObject({
       id: "repeat-existing",
@@ -263,7 +269,7 @@ describe("TodosPage", () => {
     const repeatCadenceAfterReopen = container.querySelector<HTMLSelectElement>('select[aria-label="Repeat cadence"]');
     if (!repeatCadenceAfterReopen) throw new Error("Repeat cadence selector was not rendered after reopening.");
     await change(repeatCadenceAfterReopen, "none");
-    await click(button("Save"));
+    await click(editorSaveButton());
     expect(onUpdateTodo.mock.calls[0]?.[1]?.repeatRule).toBeUndefined();
   });
 
@@ -275,7 +281,7 @@ describe("TodosPage", () => {
     await render(callbacks({ snapshot: workspace, onConvertToTask, onConvertToProject }));
 
     await click(button("Edit Inbox thought"));
-    await click(button("Convert to Task"));
+    await click(button("转为项目任务"));
     const projectSelect = document.querySelector<HTMLSelectElement>(".todoDialog__fields select");
     if (!projectSelect) throw new Error("Project selector was not rendered.");
     await change(projectSelect, "project-shape");
@@ -292,8 +298,8 @@ describe("TodosPage", () => {
     });
 
     await click(button("Inbox thought"));
-    await click(button("Convert to Project"));
-    await click(button("Create Project"));
+    await click(button("拆成项目"));
+    await click(button("建立项目"));
     expect(onConvertToProject).toHaveBeenCalledWith({ todoId: "todo-inbox", planningMethod: "omniplan" });
     expect(workspace).toEqual(original);
   });

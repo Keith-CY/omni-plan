@@ -79,7 +79,7 @@ export function DayFlowPage({
     <section className="dayFlow" aria-label="今日安排">
       <header className="dayFlowHero">
         <div>
-          <p className="dayFlowEyebrow"><Sparkles aria-hidden="true" /> TODAY FLOW</p>
+          <p className="dayFlowEyebrow"><Sparkles aria-hidden="true" /> 今日安排</p>
           <h2>{formatDayHeading(selectedDate, snapshot.timeZone, selectedDate === todayDate)}</h2>
           <p>{openTasks.length} 项待完成 · {completedCount} 项已完成</p>
         </div>
@@ -102,7 +102,7 @@ export function DayFlowPage({
       <section className="dayFlowPlanSurface" aria-labelledby="day-flow-plan-title">
         <div className="dayFlowPlanHeader">
           <div>
-            <p className="dayFlowSectionLabel">DAY PLAN</p>
+            <p className="dayFlowSectionLabel">时间与工作量</p>
             <h3 id="day-flow-plan-title">一天，一条清晰的时间线</h3>
           </div>
           <CapacityMeter
@@ -224,6 +224,7 @@ function DayTaskRow({
   const barStyle = timelineBarStyle(task, date, timeZone);
   const taskTone = toneForTask(task);
   const timeLabel = formatTaskTime(task, timeZone, date);
+  const timelineLabel = formatTimelineLabel(task, timeZone, date);
   const isPoint = Boolean(task.plannedStart && (!task.plannedFinish || task.plannedFinish <= task.plannedStart));
   const pointAtEnd = Boolean(task.plannedStart && minutesFromTime(zonedTimeKey(task.plannedStart, timeZone)) >= timelineEndMinutes);
   return (
@@ -269,7 +270,7 @@ function DayTaskRow({
               onClick={onSelect}
               title={`${timeLabel} · ${task.title}`}
             >
-              <span>{timeLabel}</span>
+              <span>{timelineLabel}</span>
             </button>
           )}
         </div>
@@ -389,6 +390,14 @@ export function formatTaskTime(task: TaskView, timeZone: string, date?: string) 
   if (date && startDate < date && finishDate === date) return `延续至 ${finish}`;
   if (finishDate === shiftDate(startDate, 1)) return `${start}–次日 ${finish}`;
   return `${start}–${finishDate.slice(5)} ${finish}`;
+}
+
+export function formatTimelineLabel(task: TaskView, timeZone: string, date?: string) {
+  const fullLabel = formatTaskTime(task, timeZone, date);
+  if (!task.plannedStart || !task.plannedFinish || task.plannedFinish <= task.plannedStart) return fullLabel;
+  const sameDay = zonedDateKey(task.plannedStart, timeZone) === zonedDateKey(task.plannedFinish, timeZone);
+  const durationMinutes = (new Date(task.plannedFinish).getTime() - new Date(task.plannedStart).getTime()) / 60_000;
+  return sameDay && durationMinutes <= 90 ? zonedTimeKey(task.plannedStart, timeZone) : fullLabel;
 }
 
 function formatEffort(seconds: number) {
