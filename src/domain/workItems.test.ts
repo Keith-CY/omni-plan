@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  alignManualRecurringStart,
   calendarWorkItemStartValues,
   moveWorkItemToProject,
   planWorkItemForDay,
@@ -120,6 +121,41 @@ function workspace(): WorkspaceSnapshot {
     }]
   };
 }
+
+describe("manual recurrence and project schedule", () => {
+  const recurring = {
+    ...item("w-repeat", "p-source", "1", "Renew prepaid"),
+    constraint: { fixedStart: "2026-08-19T07:00:00.000Z" },
+    repeatRule: {
+      cadence: "every-n-days" as const,
+      everyDays: 365,
+      count: 5,
+      startMode: "fixed-time" as const,
+      startAt: "2026-08-19T07:00:00.000Z"
+    }
+  };
+
+  it("aligns a manual recurring task's project date to a changed start", () => {
+    const updated = alignManualRecurringStart(recurring, {
+      ...recurring.repeatRule,
+      startAt: "2026-11-20T07:00:00.000Z"
+    });
+    expect(updated.constraint?.fixedStart).toBe("2026-11-20T07:00:00.000Z");
+    expect(updated.repeatRule).toBe(recurring.repeatRule);
+  });
+
+  it("does not rewrite automatic recurrence or tasks without a fixed project date", () => {
+    expect(alignManualRecurringStart(recurring, {
+      ...recurring.repeatRule,
+      executionMode: "automatic",
+      startAt: "2026-11-20T07:00:00.000Z"
+    })).toBe(recurring);
+    const withoutFixedDate = { ...recurring, constraint: undefined };
+    expect(alignManualRecurringStart(withoutFixedDate, recurring.repeatRule)).toBe(withoutFixedDate);
+    const fixedFinish = { ...recurring, constraint: { ...recurring.constraint, fixedFinish: "2026-08-19T08:00:00.000Z" } };
+    expect(alignManualRecurringStart(fixedFinish, recurring.repeatRule)).toBe(fixedFinish);
+  });
+});
 
 describe("work item moves", () => {
   it("moves a work item subtree to another project without leaving broken local links", () => {

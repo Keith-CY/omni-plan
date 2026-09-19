@@ -1,4 +1,4 @@
-import type { Id, ISODate, Seconds, WorkItem, WorkspaceSnapshot } from "./types";
+import type { Id, ISODate, RepeatRule, Seconds, WorkItem, WorkspaceSnapshot } from "./types";
 import { zonedDateTimeToIso } from "./time";
 
 export type WorkItemStartConstraintMode = "none" | "noEarlierThan" | "fixedStart";
@@ -26,6 +26,23 @@ export function updateWorkItemDetails(item: WorkItem, patch: WorkItemDetailsPatc
   if (description === undefined) delete next.description;
   else next.description = description;
   return next;
+}
+
+/** Keep a manually repeated task's project date aligned with its recurring start. */
+export function alignManualRecurringStart(item: WorkItem, rule: RepeatRule | undefined): WorkItem {
+  if (
+    !rule?.startAt ||
+    rule.executionMode === "automatic" ||
+    rule.startMode === "after-previous-finish" ||
+    !item.constraint?.fixedStart ||
+    item.constraint.fixedFinish ||
+    item.constraint.fixedStart === rule.startAt
+  ) return item;
+
+  return {
+    ...item,
+    constraint: { ...item.constraint, fixedStart: rule.startAt }
+  };
 }
 
 export function planWorkItemForDay(item: WorkItem, patch: WorkItemDayPlanPatch): WorkItem {

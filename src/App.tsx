@@ -111,6 +111,7 @@ import {
 } from "./domain/settings";
 import { BrowserWorkspaceRepository, browserWorkspaceStorageStatus, workspaceFingerprint } from "./domain/storage";
 import {
+  alignManualRecurringStart,
   calendarWorkItemStartValues,
   moveWorkItemToProject,
   planWorkItemForDay,
@@ -2525,13 +2526,16 @@ function RoutedApp() {
     const before = workItem.repeatRule ?? null;
     const after = effectiveRepeatRule ?? null;
     const nextDescription = description?.trim() || undefined;
-    if (JSON.stringify(before) === JSON.stringify(after) && workItem.description === nextDescription) return;
+    const alignedWorkItem = alignManualRecurringStart(workItem, effectiveRepeatRule);
+    const constraintChanged = alignedWorkItem !== workItem;
+    const ruleChanged = JSON.stringify(before) !== JSON.stringify(after);
+    if (!ruleChanged && workItem.description === nextDescription && !constraintChanged) return;
 
     const nextWorkspace = {
       ...previous,
       workItems: previous.workItems.map((item) => {
         if (item.id !== workItemId) return item;
-        if (effectiveRepeatRule) return { ...item, repeatRule: effectiveRepeatRule, description: nextDescription };
+        if (effectiveRepeatRule) return { ...alignedWorkItem, repeatRule: effectiveRepeatRule, description: nextDescription };
         const nextItem = { ...item };
         delete nextItem.repeatRule;
         nextItem.description = nextDescription;
@@ -2540,10 +2544,11 @@ function RoutedApp() {
       changeSets: [
         createChangeSet(
           projectId,
-          effectiveRepeatRule ? `Set recurrence for ${workItem.title}` : `Clear recurrence for ${workItem.title}`,
-          effectiveRepeatRule ? "Updated the work item's recurring schedule rule." : "Removed the work item's recurring schedule rule.",
+          !ruleChanged && constraintChanged ? `Align project date for ${workItem.title}` : effectiveRepeatRule ? `Set recurrence for ${workItem.title}` : `Clear recurrence for ${workItem.title}`,
+          !ruleChanged && constraintChanged ? "Aligned the project date with the recurring start." : effectiveRepeatRule ? "Updated the work item's recurring schedule rule." : "Removed the work item's recurring schedule rule.",
           [
-            { entity: "WorkItem", entityId: workItemId, field: "repeatRule", before, after },
+            ...(ruleChanged ? [{ entity: "WorkItem", entityId: workItemId, field: "repeatRule", before, after }] : []),
+            ...(constraintChanged ? [{ entity: "WorkItem", entityId: workItemId, field: "constraint", before: workItem.constraint ?? null, after: alignedWorkItem.constraint ?? null }] : []),
             ...(workItem.description !== nextDescription ? [{ entity: "WorkItem", entityId: workItemId, field: "description", before: workItem.description ?? null, after: nextDescription ?? null }] : [])
           ],
           previous.changeSets.length
@@ -5491,6 +5496,7 @@ function RecurringTasksPanel({
   const [pendingDestructiveAction, setPendingDestructiveAction] = useState<"remove" | "stop" | null>(null);
   const [historyPage, setHistoryPage] = useState(0);
   const draftDirty = !repeatRuleDraftsEqual(draft, baselineDraft);
+  const projectDateOutOfSync = Boolean(selected?.repeatRule && alignManualRecurringStart(selected, selected.repeatRule) !== selected);
 
   useEffect(() => {
     if (!eligibleItems.length) {
@@ -5584,16 +5590,18 @@ function RecurringTasksPanel({
   const startDateTimeValid = !draft.enabled || isValidZonedDraftDateTime(draft.startDate, draft.startTime, timeZone);
   const endDateValid = !draft.enabled || draft.endMode !== "until" || isValidZonedDraftDateTime(draft.endDate, "23:59", timeZone);
   const draftValid = startDateTimeValid && endDateValid && Boolean(previewRule);
-  const canSave = Boolean(selected && !selectedStopped && draft.enabled && draftDirty && draftValid);
+  const canSave = Boolean(selected && !selectedStopped && draft.enabled && (draftDirty || projectDateOutOfSync) && draftValid);
   const saveHelp = selectedStopped
     ? "Stopped rules are read-only; their history remains available below."
     : !draft.enabled
     ? "Choose Manual or Automatic to configure a recurring rule."
-    : !draftDirty
+    : !draftDirty && !projectDateOutOfSync
       ? "No unsaved changes."
       : !draftValid
         ? "Enter a valid start date, start time, and optional end date."
-        : selected?.repeatRule ? "Ready to save your changes." : "Ready to create this recurring rule.";
+        : projectDateOutOfSync && !draftDirty
+          ? "The project date differs from the recurring start. Save to align them."
+          : selected?.repeatRule ? "Ready to save your changes." : "Ready to create this recurring rule.";
   const selectedRuleState = !selected?.repeatRule
     ? "Not configured"
     : selectedStopped
@@ -5660,7 +5668,7 @@ function RecurringTasksPanel({
           event.preventDefault();
           if (!selected) return;
           const repeatRule = repeatRuleFromDraft(draft, selected, timeZone, currentTime);
-          if (!draft.enabled || !draftDirty) return;
+          if (!draft.enabled || (!draftDirty && !projectDateOutOfSync)) return;
           if (!repeatRule) {
             setDraftError("Enter a valid start date, start time, and optional end date before saving.");
             return;
@@ -5668,7 +5676,7 @@ function RecurringTasksPanel({
           onRepeatRuleUpdate(selected.id, repeatRule, draft.description);
           setBaselineDraft(draft);
           setDraftError("");
-          setSaveNotice(selected.repeatRule ? "Recurring rule updated." : "Recurring rule created.");
+          setSaveNotice(projectDateOutOfSync && !draftDirty ? "Project date aligned with the recurring start." : selected.repeatRule ? "Recurring rule updated." : "Recurring rule created.");
         }}
       >
         <div className="recurringEditorHeader">
